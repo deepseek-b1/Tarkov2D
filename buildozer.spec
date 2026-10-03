@@ -15,15 +15,13 @@ version = 1.0.8
 
 # pygame 由 python-for-android 的 pygame 配方提供(SDL2)
 #
-# 版本必须钉住,原因:
+# 版本必须钉住,原因(踩过的坑全记在这):
 #   * p4a 的 pygame 配方默认锁在 2.1.0(2021 年),它引用的 longintrepr.h 在
-#     Python 3.11+ 已经换了位置 —— 直接编不过
-#     (报错: src_c/_sdl2/sdl2.c: fatal error: 'longintrepr.h' file not found)
-#   * p4a 的 python3 配方默认是 3.14,而 pygame 到 2.6.1 为止只支持到 3.13
-# 所以钉成 Python 3.12 + pygame 2.6.1 这个互相兼容、且被广泛验证过的组合。
-# 注意 hostpython3 必须和 python3 版本一致,否则 p4a 直接报
-# "python3 should have same version as hostpython3"。
-requirements = hostpython3==3.12.11,python3==3.12.11,pygame==2.6.1
+#     Python 3.11+ 已换位置 -> "fatal error: 'longintrepr.h' file not found"
+#   * p4a 的 python3 配方默认 3.14,而官方 pygame 只支持到 3.13
+#   * Python 3.12/3.13 配 NDK r28 会挂在 Modules/grpmodule.c(上游未适配)
+# 结论:退到被大量项目验证过的稳定组合 —— Python 3.11 + pygame 2.5.2 + NDK 25c
+requirements = hostpython3==3.11.9,python3==3.11.9,pygame==2.5.2
 
 orientation = landscape
 fullscreen = 1
@@ -37,7 +35,9 @@ android.api = 31
 android.minapi = 21
 android.accept_sdk_license = True
 android.allow_backup = True
+# 钉住 NDK 版本:buildozer 默认拉 r28c,而 p4a 的 CPython 配方还没适配它
+# (挂在 Modules/grpmodule.c)。25c 是 p4a 官方 CI 长期使用的版本。
+android.ndk = 25c
 
 # 游戏内部已经用 sys.platform / ANDROID_ARGUMENT 判断平台,
 # 安卓上会自动开启手机模式(触屏摇杆 + 按钮 + 自动锁敌)与全屏缩放。
-# 不固定 p4a 分支 / NDK 版本,交给 buildozer 自动选兼容组合,减少构建失败。
