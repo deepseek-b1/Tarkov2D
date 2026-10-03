@@ -72,19 +72,21 @@ jobs:
 
       - name: 构建 APK
         run: |
-          # p4a 用自己的 hostpython3 跑 pygame 的 setup.py,而 Cython 装在
-          # runner 的系统 Python 里没用 —— 报错是 "You need cython"。
-          # 这里先让 buildozer 生成 NDK/SDK 与 hostpython3,再把 cython 装进去。
-          buildozer -v android debug || true
-          HP=$(find "$PWD/.buildozer" -maxdepth 8 -type f -path "*hostpython3*/local/bin/pip3" 2>/dev/null | head -1)
-          if [ -n "$HP" ]; then
-            echo "找到 hostpython3 pip: $HP"
-            "$HP" install "cython<3.1" wheel setuptools || true
-            "$HP" -m cython --version || true
-          else
-            echo "!! 没找到 hostpython3 的 pip,pygame 那步可能会因缺 cython 失败"
+          # pygame 的 setup.py 由 p4a 自带的 hostpython3 执行,系统 Python 里装 Cython 没用
+          # (报错: "You need cython"),且 p4a 会检查 `python3 -m cython --help`。
+          # 1) 预热:先建出 NDK/SDK 与 hostpython3(会在 pygame 处停下,用 || true 兜住)
+          buildozer -v android buildozer.spec >/dev/null 2>&1 || true
+          # 2) 把 Cython 装进「那个」hostpython3(精确路径,见上轮构建日志)
+          HP=/home/runner/work/Tarkov2D/Tarkov2D/.buildozer/android/platform/build-arm64-v8a/build/other_builds/hostpython3/desktop/hostpython3/native-build/root/usr/local/bin/python3
+          if [ ! -x "$HP" ]; then
+            HP=$(find "$PWD/.buildozer" -type f -path "*hostpython3*" -name python3 2>/dev/null | head -1)
           fi
-          # 正式构建(hostpython3 已就绪,会直接复用)
+          echo "hostpython3 解释器: $HP"
+          # 3) 安装 + 校验(import 能过 + p4a 用的 `-m cython` 也能过)
+          "$HP" -m pip install -q "cython<3.1" wheel setuptools
+          "$HP" -c "import Cython; print('Cython', Cython.__version__)"
+          "$HP" -m cython --help >/dev/null && echo "OK: hostpython3 已具备 Cython"
+          # 4) 正式构建(复用已建好的 hostpython3)
           buildozer -v android debug
 
       - name: 显示产物
