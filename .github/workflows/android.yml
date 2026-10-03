@@ -23,8 +23,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y git zip unzip openjdk-17-jdk autoconf automake libtool \
-            libtool-bin pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo6 \
-            cmake libffi-dev libssl-dev gettext
+            libtool-bin libltdl-dev pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev \
+            libtinfo6 cmake libffi-dev libssl-dev gettext
+          echo "===== 校验 libffi 配方要求的宏是否就位 ====="
+          echo -n "LT_SYS_SYMBOL_USCORE 出现次数: "
+          grep -c "LT_SYS_SYMBOL_USCORE" /usr/share/aclocal/libtool.m4 /usr/share/aclocal/ltdl.m4 2>/dev/null | tr '\n' ' '
+          echo
 
       - name: 安装 buildozer
         run: |
