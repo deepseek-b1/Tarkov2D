@@ -22,9 +22,9 @@ jobs:
       - name: 安装系统依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y git zip unzip openjdk-17-jdk autoconf libtool \
-            pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo6 \
-            cmake libffi-dev libssl-dev
+          sudo apt-get install -y git zip unzip openjdk-17-jdk autoconf automake libtool \
+            libtool-bin pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo6 \
+            cmake libffi-dev libssl-dev gettext
 
       - name: 安装 buildozer
         run: |
