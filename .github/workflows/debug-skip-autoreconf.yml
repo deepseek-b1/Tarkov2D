@@ -1,0 +1,48 @@
+name: Debug skip autoreconf
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool libtool-bin pkg-config gettext
+
+      - name: 方案 G —— 用 no-op 包装 autoreconf(有 configure 就跳过)
+        run: |
+          mkdir -p /tmp/shim
+          cat > /tmp/shim/autoreconf <<'EOF'
+          #!/bin/bash
+          # libffi 等包自带的 configure 是完整可用的;Ubuntu 的 libtool 2.4.7 缺
+          # LT_SYS_SYMBOL_USCORE 宏,一旦重新生成就会失败 —— 所以有 configure 就跳过。
+          for a in "$@"; do
+            case "$a" in -*) ;; *) [ -f "$a/configure" ] && { echo "[shim] skip autoreconf for $a (configure exists)"; exit 0; } ;; esac
+          done
+          [ -f ./configure ] && { echo "[shim] skip autoreconf in $PWD (configure exists)"; exit 0; }
+          echo "[shim] pass-through to real autoreconf"
+          exec /usr/bin/autoreconf "$@"
+          EOF
+          chmod +x /tmp/shim/autoreconf
+
+          cd /tmp
+          curl -sSL https://github.com/libffi/libffi/releases/download/v3.4.4/libffi-3.4.4.tar.gz -o l.tgz
+          tar -xzf l.tgz
+          rm -rf t && cp -r libffi-3.4.4 t && cd t
+          echo "=== 用 no-op shim 跑 autoreconf -vfi ==="
+          PATH="/tmp/shim:$PATH" autoreconf -vfi; echo "autoreconf 退出码: $?"
+          echo "=== 直接 configure 试试(交叉编译场景先跳过,只看能不能过配置阶段) ==="
+          ./configure --help >/dev/null 2>&1 && echo ">>> 方案 G: configure 可用 ✅" || echo ">>> 方案 G: configure 有问题"
+
+      - name: 检查 p4a 里哪些配方会跑 autoreconf
+        run: |
+          git clone --depth 1 https://github.com/kivy/python-for-android /tmp/p4a >/dev/null 2>&1
+          cd /tmp/p4a
+          git log --oneline -1
+          echo "=== 调用 autoreconf 的地方 ==="
+          grep -rn "autoreconf" pythonforandroid/ | head -20
+          echo "=== libffi 配方全文 ==="
+          cat pythonforandroid/recipes/libffi/__init__.py
