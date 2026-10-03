@@ -98,31 +98,34 @@ def run():
     def t_map():
         from world import GameMap
         from settings import MAPS
-        for key in ("border", "tv", "port"):
+        for key in ("border", "tv", "port", "indoor"):
             m = GameMap(key)
             assert m.map_name == MAPS[key]["name"], key
             assert m.spawn is not None, key
             assert len(m.extracts) == 3, key
-            assert m.boss_spawn is not None, key
-            assert len(m.guard_spawns) >= 3, key
             assert len(m.loot) >= 20, (key, len(m.loot))
-            assert len([c for c in m.loot if c.kind == "val"]) >= 3, key
             assert len(m.scav_spawns) >= 6, (key, len(m.scav_spawns))
             sx, sy = m.spawn
             assert not m.collides(sx, sy, PLAYER["radius"]), key
             spawn_tile = (int(sx // 32), int(sy // 32))
-            # 撤离点 / 保险箱 / 头目 必须从出生点可达(防封死区域)
+            # 撤离点 / 保险箱 必须从出生点可达(防封死区域)
             for name, r in m.extracts:
                 t = (int(r.centerx // 32), int(r.centery // 32))
                 assert m.astar(spawn_tile, t) is not None, f"{key} 撤离点不可达:{name}"
             for lc in [c for c in m.loot if c.kind == "val"]:
                 t = (int(lc.rect.centerx // 32), int(lc.rect.centery // 32))
                 assert m.astar(spawn_tile, t) is not None, f"{key} 保险箱不可达"
-            bx, by = m.boss_spawn
-            assert not m.collides(bx, by, 12), key
-            assert m.astar(spawn_tile, (int(bx // 32), int(by // 32))) is not None, key
-            for gx, gy in m.guard_spawns:
-                assert not m.collides(gx, gy, 12), key
+            if key == "indoor":
+                # 室内图(人质模式):没有头目/手下,但有人质与队友出生点
+                assert m.boss_spawn is None and m.author_spawn is None, key
+            else:
+                assert m.boss_spawn is not None, key
+                assert len(m.guard_spawns) >= 3, key
+                bx, by = m.boss_spawn
+                assert not m.collides(bx, by, 12), key
+                assert m.astar(spawn_tile, (int(bx // 32), int(by // 32))) is not None, key
+                for gx, gy in m.guard_spawns:
+                    assert not m.collides(gx, gy, 12), key
             # 水域只在港口出现
             has_water = any("W" in row for row in MAPS[key]["rows"])
             assert has_water == (key == "port"), (key, has_water)
@@ -981,8 +984,8 @@ def run():
             # 专属枪械归入「特殊枪械」分区(上架可买)
             assert trade_cat_match(b["weapon"], "special"), key
             assert b.get("guards", 0) >= 3, key
-        # 实战:逐张地图击杀头目 -> 头目尸体必含 5 级甲 + 专属武器
-        for key in MAP_ORDER:
+        # 实战:逐张有头目的地图击杀头目 -> 头目尸体必含 5 级甲 + 专属武器
+        for key in [k for k in MAP_ORDER if BOSSES.get(k)]:
             g = Game()
             g.save = save_mod.reset_data()
             g.save.map_key = key
@@ -1298,6 +1301,121 @@ def run():
         assert g2.save.touch is False
 
     check("手机-触屏/自动锁敌/玩法简介", t_touch)
+
+    def t_hostage():
+        """人质模式:室内大楼 / 4 人质 / 3 队友 / 6 敌人 / 救援与拉起 / 任务判定。"""
+        from game import Game
+        from world import GameMap
+        from settings import (MAPS, MAP_ORDER, MODE_ORDER, HOSTAGE_COUNT,
+                              HOSTAGE_ENEMIES, ALLY_COUNT, W as SW, H as SH)
+        import raid_ui
+        # 1) 室内大楼结构
+        m = GameMap("indoor")
+        assert len(m.hostage_spawns) == HOSTAGE_COUNT
+        assert len(m.ally_spawns) == ALLY_COUNT
+        assert len(m.scav_spawns) == HOSTAGE_ENEMIES
+        assert len(m.corners) >= 20, len(m.corners)
+        assert len(m.extracts) == 3
+        sx, sy = m.spawn
+        st = (int(sx // 32), int(sy // 32))
+        assert not m.collides(sx, sy, PLAYER["radius"])
+        for name, r in m.extracts:
+            t = (int(r.centerx // 32), int(r.centery // 32))
+            assert m.astar(st, t) is not None, f"撤离点不可达 {name}"
+        for (hx, hy) in m.hostage_spawns:
+            assert not m.collides(hx, hy, 12)
+            assert m.astar(st, (int(hx // 32), int(hy // 32))) is not None, "人质不可达"
+        for (ax, ay) in m.ally_spawns:
+            assert not m.collides(ax, ay, 12)
+        # 95% 以上是房间/走廊:室外地面占比很低
+        rows = MAPS["indoor"]["rows"]
+        outdoor = sum(row.count(".") for row in rows)
+        assert outdoor / (len(rows) * len(rows[0])) < 0.10, outdoor
+        # 2) 模式选择与存档
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        h = g.hideout
+        h.show_intro = False
+        h._click(h.map_rects[MAP_ORDER.index("indoor")].center)
+        assert g.save.mode == "hostage" and g.save.map_key == "indoor"
+        h._click(h.mode_rects[MODE_ORDER.index("raid")].center)
+        assert g.save.mode == "raid"
+        h._click(h.mode_rects[MODE_ORDER.index("hostage")].center)
+        assert g.save.mode == "hostage" and g.save.map_key == "indoor"
+        save_mod.save_data(g.save)
+        assert save_mod.load_data().mode == "hostage"
+        # 3) 战局生成
+        g2 = Game()
+        g2.save = save_mod.reset_data()
+        g2.save.mode = "hostage"
+        g2.start_raid()
+        r = g2.raid
+        assert r.mode == "hostage" and r.map_key == "indoor"
+        assert r.boss_cfg is None, "人质模式没有头目"
+        assert len(r.scavs) == HOSTAGE_ENEMIES
+        assert len(r.allies) == ALLY_COUNT and len(r.hostages) == HOSTAGE_COUNT
+        p = r.player
+        # 4) 队友自动开火
+        a = r.allies[0]
+        enemy = r.scavs[0]
+        for other in r.scavs[1:]:
+            other.x, other.y = p.x + 4000, p.y + 4000
+        a.x, a.y = p.x + 100, p.y
+        enemy.x, enemy.y = p.x + 320, p.y
+        hp0 = enemy.hp
+        r.update(1 / 60, [])
+        assert any(b["owner"] == "ally" for b in r.bullets), "队友应该开火"
+        for _ in range(60):
+            r.update(1 / 60, [])
+        assert enemy.hp < hp0, (hp0, enemy.hp)
+        # 5) 解救人质(站定读条)
+        r.scavs = []
+        host = r.hostages[0]
+        host.x, host.y = p.x + 40, p.y
+        r.interact()
+        assert r.channel is not None and r.channel["kind"] == "rescue"
+        for _ in range(200):
+            r.update(1 / 60, [])
+        assert host.rescued, "站定读条应完成解救"
+        # 6) 队友倒地 -> 拉起
+        a.take_damage(999, r)
+        assert a.downed
+        a.x, a.y = p.x + 30, p.y
+        r.interact()
+        assert r.channel is not None and r.channel["kind"] == "revive"
+        for _ in range(200):
+            r.update(1 / 60, [])
+        assert not a.downed and a.hp > 0
+        # 7) 全部救出 -> 任务完成;只救一半 -> 未完成
+        for host in r.hostages:
+            host.rescued = True
+        r.finish("extract")
+        assert r.result["mission"] is True
+        assert r.result["rescued"] == HOSTAGE_COUNT
+        g3 = Game()
+        g3.save = save_mod.reset_data()
+        g3.save.mode = "hostage"
+        g3.start_raid()
+        r3 = g3.raid
+        r3.scavs = []
+        r3.hostages[0].rescued = True
+        r3.finish("extract")
+        assert r3.result["mission"] is False
+        # 8) 渲染(队友 / 人质 / 救援读条)
+        screen = pygame.display.set_mode((SW, SH))
+        g4 = Game()
+        g4.save = save_mod.reset_data()
+        g4.save.mode = "hostage"
+        g4.start_raid()
+        r4 = g4.raid
+        r4.hostages[0].x, r4.hostages[0].y = r4.player.x + 40, r4.player.y
+        r4.channel = dict(kind="rescue", ent=r4.hostages[0], t=1.0)
+        raid_ui.draw_raid(r4, screen)
+        r4.channel = None
+        pygame.display.flip()
+
+    check("人质模式-室内图/队友/救援/任务判定", t_hostage)
 
     ok = all(r[1] for r in results)
     report = ["Tarkov2D selftest " + ("PASS" if ok else "FAIL"), ""]

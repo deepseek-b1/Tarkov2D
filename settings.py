@@ -3,7 +3,7 @@
 import pygame
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "1.0.8"
+GAME_VERSION = "1.0.9"
 # 更新清单地址(可换成自建服务器 / GitHub raw;留空则只认 EXE 同目录的 version.json)
 UPDATE_MANIFEST_URL = "http://127.0.0.1:8765/version.json"
 UPDATE_TIMEOUT = 3   # 检查 / 下载超时(秒)
@@ -291,7 +291,7 @@ def trade_sell_price(item):
     return max(1, int(item.total_price() * SELL_RATE))
 
 # ---------- 地图(三张地图见 maps.py) ----------
-from maps import MAPS, MAP_ORDER, MAP_W, MAP_H
+from maps import MAPS, MAP_ORDER, MODE_MAP, MAP_W, MAP_H
 
 MW, MH = MAP_W, MAP_H
 MAP_ROWS = MAPS["border"]["rows"]      # 兼容:默认地图行数据
@@ -378,6 +378,22 @@ TRADE_TABS = [("全部", None), ("枪械", "weapon"), ("特殊枪械", "special"
               ("护甲", "armor"), ("背包", "pack"), ("子弹", "ammo"),
               ("药品", "med")]
 TRADE_PAGE_H = 450      # 商品区可见高度(像素);超出时用滚轮翻看
+
+# ---------- 游戏模式 ----------
+MODES = {
+    "raid": dict(name="搜打撤", desc="自由搜刮 · 找撤离点撤离"),
+    "hostage": dict(name="人质解救", desc="室内近战 · 救出 4 名人质后撤离"),
+}
+MODE_ORDER = ["raid", "hostage"]
+HOSTAGE_COUNT = 4          # 人质数量
+HOSTAGE_ENEMIES = 6        # 人质模式的敌人上限
+ALLY_COUNT = 3             # 队友数量
+ALLY_HP = 130
+ALLY_DMG = 13
+ALLY_RANGE = 520
+HOSTAGE_RESCUE_TIME = 2.5  # 解救人质引导时间(秒)
+REVIVE_TIME = 2.0          # 拉起倒地球友的引导时间(秒)
+INTERACT_RANGE = 64        # 人质/队友交互距离(像素)
 
 # ---------- 手机(触屏)模式 ----------
 TOUCH = dict(

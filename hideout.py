@@ -10,7 +10,7 @@ import save as save_mod
 from settings import (W, H, COL, fmt_rub, get_font, DIFF_ORDER, DIFFICULTIES,
                       ITEMS, TRADE_GOODS, TRADE_TABS, TRADE_PAGE_H,
                       trade_buy_price, trade_sell_price,
-                      armor_allows, MAPS, MAP_ORDER)
+                      armor_allows, MAPS, MAP_ORDER, MODES, MODE_ORDER, MODE_MAP)
 from inventory import Item, try_move
 import uikit
 from uikit import draw_grid, draw_button, draw_slot, draw_tooltip
@@ -50,9 +50,11 @@ class Hideout:
         self.view = "stash"    # stash / trade
         self.lay = _layout()
         sp = self.lay["side_panel"]
-        self.map_rects = [pygame.Rect(sp.x + 18 + i * 100, sp.y + 66, 92, 32)
-                          for i in range(3)]
-        self.diff_rects = [pygame.Rect(sp.x + 18 + i * 100, sp.y + 148, 92, 32)
+        self.map_rects = [pygame.Rect(sp.x + 18 + i * 78, sp.y + 66, 74, 32)
+                          for i in range(len(MAP_ORDER))]
+        self.mode_rects = [pygame.Rect(sp.x + 18 + i * 158, sp.y + 144, 150, 32)
+                           for i in range(len(MODE_ORDER))]
+        self.diff_rects = [pygame.Rect(sp.x + 18 + i * 100, sp.y + 222, 92, 32)
                            for i in range(3)]
         # 交易所:仓库网格 66,150 / 分区标签 / 商品行(双列可滚动) / 返回按钮
         self.trade_stash_grid = (66, 150)
@@ -149,12 +151,25 @@ class Hideout:
         lay = self.lay
         audio.play("click")
 
-        # 地图选择
+        # 地图选择(人质大楼 = 人质模式专用图)
         for i, key in enumerate(MAP_ORDER):
             if self.map_rects[i].collidepoint(pos):
                 sd.map_key = key
+                sd.mode = "hostage" if key == "indoor" else "raid"
                 save_mod.save_data(sd)
                 self.say(f"出战地图已设为「{MAPS[key]['name']}」:{MAPS[key]['desc']}",
+                         COL["accent"], ttl=3.2)
+                return
+
+        # 模式选择
+        for i, key in enumerate(MODE_ORDER):
+            if self.mode_rects[i].collidepoint(pos):
+                sd.mode = key
+                forced = MODE_MAP.get(key)
+                if forced:
+                    sd.map_key = forced
+                save_mod.save_data(sd)
+                self.say(f"模式已设为「{MODES[key]['name']}」:{MODES[key]['desc']}",
                          COL["accent"], ttl=3.2)
                 return
 
@@ -450,30 +465,36 @@ class Hideout:
         t = get_font(17, bold=True).render("出战地图", True, COL["accent"])
         screen.blit(t, (sp.x + 18, sp.y + 42))
         draw_choice(self.map_rects, MAP_ORDER,
-                    {k: MAPS[k]["name"] for k in MAP_ORDER}, sd.map_key)
+                    {k: MAPS[k].get("short", MAPS[k]["name"]) for k in MAP_ORDER},
+                    sd.map_key)
         t = get_font(13).render(MAPS[sd.map_key]["desc"], True, COL["text_dim"])
         screen.blit(t, (sp.x + 18, sp.y + 102))
 
+        t = get_font(17, bold=True).render("游戏模式", True, COL["accent"])
+        screen.blit(t, (sp.x + 18, sp.y + 120))
+        draw_choice(self.mode_rects, MODE_ORDER,
+                    {k: MODES[k]["name"] for k in MODE_ORDER}, sd.mode)
+        t = get_font(13).render(MODES[sd.mode]["desc"], True,
+                                COL["good"] if sd.mode == "hostage" else COL["text_dim"])
+        screen.blit(t, (sp.x + 18, sp.y + 180))
+
         t = get_font(17, bold=True).render("战局难度", True, COL["accent"])
-        screen.blit(t, (sp.x + 18, sp.y + 124))
+        screen.blit(t, (sp.x + 18, sp.y + 198))
         draw_choice(self.diff_rects, DIFF_ORDER,
                     {k: DIFFICULTIES[k]["name"] for k in DIFF_ORDER}, sd.difficulty)
         d = DIFFICULTIES[sd.difficulty]
         t = get_font(13).render(f"{d['desc']} · {d['loot_desc']}", True, COL["text_dim"])
-        screen.blit(t, (sp.x + 18, sp.y + 184))
+        screen.blit(t, (sp.x + 18, sp.y + 258))
 
-        y = sp.y + 210
+        y = sp.y + 282
         lines = [
             f"出击 {st['raids']} 次    撤离 {st['extracts']} 次",
             f"阵亡 {st['deaths']} 次    击杀 {st['kills']} 人",
             f"余额 {fmt_rub(sd.rubles)}    搜刮 {fmt_rub(st['value'])}",
             "",
-            "WASD 移动    Shift 慢走",
-            "左键射击    长按右键架枪",
-            "弹匣空自动换弹    H 快捷打药",
-            "E 搜刮    TAB 背包    ESC 暂停",
-            "",
-            "死亡会丢失带入的装备!",
+            "WASD 移动 · 左键射击 · 右键架枪",
+            "弹匣空自动换弹 · H 打药 · E 搜刮/救人",
+            "TAB 背包 · 死亡会丢失带入的装备!",
         ]
         for ln in lines:
             col = COL["text_dim"] if ln == "" else COL["text"]
@@ -487,7 +508,8 @@ class Hideout:
         draw_button(screen, lay["touch_btn"],
                     "手机模式:开" if sd.touch else "手机模式:关",
                     lay["touch_btn"].collidepoint(mx, my), small=True)
-        draw_button(screen, lay["start"], "开始战局", lay["start"].collidepoint(mx, my))
+        draw_button(screen, lay["start"], f"开始战局 · {MODES[sd.mode]['name']}",
+                    lay["start"].collidepoint(mx, my))
         draw_button(screen, lay["trade"], "交易所",
                     lay["trade"].collidepoint(mx, my), small=True)
         if not sd.any_weapon():

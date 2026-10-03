@@ -32,7 +32,8 @@ class SaveData:
         self.armor = None    # Item 或 None(出战护甲槽)
         self.pack = None     # Item 或 None(出战背包,决定 bag 格子容量)
         self.difficulty = "lockdown"   # easy / lockdown / hardened
-        self.map_key = "border"        # 出战地图(border / tv / port)
+        self.map_key = "border"        # 出战地图(border / tv / port / indoor)
+        self.mode = "raid"             # raid 搜打撤 / hostage 人质解救
         self.touch = False             # 手机(触屏)模式:虚拟摇杆 + 按钮 + 自动锁敌
         self.seen_intro = False        # 是否看过玩法简介
         self.rubles = 20000  # 货币
@@ -96,6 +97,7 @@ class SaveData:
             "pack": self.pack.serialize() if self.pack else None,
             "difficulty": self.difficulty,
             "map": self.map_key,
+            "mode": self.mode,
             "touch": bool(self.touch),
             "seen_intro": bool(self.seen_intro),
             "rubles": int(self.rubles),
@@ -124,11 +126,13 @@ class SaveData:
             # 旧档没有背包字段:补发中型背包(保持 6×4 体验不变)
             sd.pack = Item("pack_mid")
         sd.apply_pack()
-        from settings import DIFFICULTIES, MAPS
+        from settings import DIFFICULTIES, MAPS, MODES
         if data.get("difficulty") in DIFFICULTIES:
             sd.difficulty = data["difficulty"]
         if data.get("map") in MAPS:
             sd.map_key = data["map"]
+        if data.get("mode") in MODES:
+            sd.mode = data["mode"]
         sd.touch = bool(data.get("touch", False))
         sd.seen_intro = bool(data.get("seen_intro", False))
         try:

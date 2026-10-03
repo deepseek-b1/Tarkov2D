@@ -61,7 +61,7 @@ class Scav:
             self.path = []
 
     def sees_player(self, raid):
-        p = raid.player
+        p = raid.threat_for(self)
         dist = math.hypot(p.x - self.x, p.y - self.y)
         if dist > self.d["view"]:
             return False
@@ -108,7 +108,7 @@ class Scav:
 
     # ---- 主逻辑 ----
     def update(self, raid, dt):
-        p = raid.player
+        p = raid.threat_for(self)      # 目标可能是玩家,也可能是暴露的队友
         dist = math.hypot(p.x - self.x, p.y - self.y)
         see = self.sees_player(raid)
         self.hit_flash = max(0.0, self.hit_flash - dt)

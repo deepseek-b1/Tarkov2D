@@ -41,3 +41,6 @@ android.ndk = 25c
 
 # 游戏内部已经用 sys.platform / ANDROID_ARGUMENT 判断平台,
 # 安卓上会自动开启手机模式(触屏摇杆 + 按钮 + 自动锁敌)与全屏缩放。
+
+# ����Ŀ�ڵ� pygame �䷽(�ص� x86 SIMD,�޸� arm64 �� surface.so ȱ���ŵ�����)
+p4a.local_recipes = ./p4a-recipes

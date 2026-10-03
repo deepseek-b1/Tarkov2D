@@ -11,10 +11,14 @@ from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       CLASSIFIED, DOC_HARDENED_COUNT, armor_allows,
                       MAPS, BOSSES, GUARD_ARMOR_DROP, GUARD_ARMORS,
                       AUTHOR_BOSS, AUTHOR_MIN_DIFFICULTY, RPG_BLAST_RADIUS,
-                      RPG_HALF_HP_ARMOR_LEVEL, TOUCH, fmt_rub, get_font)
+                      RPG_HALF_HP_ARMOR_LEVEL, TOUCH, MODES, MODE_MAP,
+                      HOSTAGE_COUNT, HOSTAGE_ENEMIES, ALLY_COUNT,
+                      HOSTAGE_RESCUE_TIME, REVIVE_TIME, INTERACT_RANGE, ALLY_DMG,
+                      fmt_rub, get_font)
 from inventory import Item, try_move
 from world import GameMap, LootContainer
 from enemy import Scav
+from npc import Ally, Hostage
 from touch import TouchUI
 
 
@@ -106,13 +110,15 @@ class Raid:
         if self.diff_key not in DIFFICULTIES:
             self.diff_key = "lockdown"
         self.diff = DIFFICULTIES[self.diff_key]
-        self.map_key = getattr(game.save, "map_key", "border")
-        if self.map_key not in MAPS:
-            self.map_key = "border"
+        self.mode = getattr(game.save, "mode", "raid")
+        if self.mode not in MODES:
+            self.mode = "raid"
+        map_key = MODE_MAP.get(self.mode) or getattr(game.save, "map_key", "border")
+        self.map_key = map_key if map_key in MAPS else "border"
+        self.boss_cfg = BOSSES.get(self.map_key)
         self.touch_mode = bool(getattr(game.save, "touch", False))
         self.touch = TouchUI() if self.touch_mode else None
         self.aim_locked = None
-        self.boss_cfg = BOSSES[self.map_key]
         self.map = GameMap(self.map_key)
         self.map_surf = self.map.prerender()
         self.player = Player(game.save)
@@ -122,8 +128,19 @@ class Raid:
         self.start_value = self._loadout_value()   # 进局装备总值(撤离收益快照基准)
 
         self.scavs = [Scav(k, x, y, self.diff) for k, (x, y) in self._pick_spawns()]
-        self._spawn_boss_and_guards()
-        self._spawn_author()
+        if self.mode == "hostage":
+            # 人质模式:敌人固定上限(6 个),没有头目/手下/作者
+            random.shuffle(self.scavs)
+            self.scavs = self.scavs[:HOSTAGE_ENEMIES]
+        else:
+            self._spawn_boss_and_guards()
+            self._spawn_author()
+        # 人质模式的己方单位:3 名队友 + 4 名人质
+        self.allies = [Ally(x, y) for x, y in self.map.ally_spawns[:ALLY_COUNT]] \
+            if self.mode == "hostage" else []
+        self.hostages = [Hostage(x, y) for x, y in self.map.hostage_spawns[:HOSTAGE_COUNT]] \
+            if self.mode == "hostage" else []
+        self.channel = None       # 解救人质 / 拉起队友的引导状态
         self.containers = list(self.map.loot)
         # 强化封锁:机密文件固定刷在保险箱(先放入,保证有位置)
         if self.diff_key == "hardened" and DOC_HARDENED_COUNT > 0:
@@ -140,8 +157,12 @@ class Raid:
         if self.diff_key == "hardened" and DOC_HARDENED_COUNT > 0:
             self.add_toast("强化封锁:机密文件已刷新,藏在保险箱之一",
                            COL["accent"], 4.5)
-        self.add_toast(f"头目 {self.boss_cfg['name']} 在场 —— 击杀可爆 5 级甲与专属枪械",
-                       COL["accent"], 4.0)
+        if self.boss_cfg is not None:
+            self.add_toast(f"头目 {self.boss_cfg['name']} 在场 —— 击杀可爆 5 级甲与专属枪械",
+                           COL["accent"], 4.0)
+        if self.mode == "hostage":
+            self.add_toast(f"任务:救出 {HOSTAGE_COUNT} 名人质后撤离 —— 拐角有死角,小心埋伏",
+                           COL["accent"], 5.0)
         if any(getattr(s, "tag", None) == "author" for s in self.scavs):
             self.add_toast("警报:隐藏头目「作者」携 RPG 在场!(没穿 6 级甲别硬碰)",
                            COL["bad"], 5.0)
@@ -243,6 +264,8 @@ class Raid:
     def _spawn_boss_and_guards(self):
         """按地图配置生成头目与他的手下(独立于普通拾荒者的随机刷新)。"""
         b = self.boss_cfg
+        if b is None:
+            return
         if self.map.boss_spawn:
             bx, by = self.map.boss_spawn
             self.scavs.append(Scav("ar", bx, by, self.diff,
@@ -304,6 +327,82 @@ class Raid:
             x = int(x + math.cos(ang) * rad)
             y = int(y + math.sin(ang) * rad)
         return x, y
+
+    def nearest_interactable(self):
+        """人质模式:最近的可交互对象(未解救人质 / 倒地球友)。"""
+        p = self.player
+        best, bd, kind = None, INTERACT_RANGE, None
+        for h in self.hostages:
+            if h.rescued:
+                continue
+            d = math.hypot(h.x - p.x, h.y - p.y)
+            if d < bd:
+                best, bd, kind = h, d, "rescue"
+        for a in self.allies:
+            if not a.downed:
+                continue
+            d = math.hypot(a.x - p.x, a.y - p.y)
+            if d < bd:
+                best, bd, kind = a, d, "revive"
+        return (kind, best) if best is not None else (None, None)
+
+    def interact(self):
+        """E / 搜刮按钮:优先救人质、拉队友,其次搜刮容器。"""
+        if self.channel is not None:
+            self.channel = None
+            return
+        kind, ent = self.nearest_interactable()
+        if kind is not None:
+            self.channel = dict(kind=kind, ent=ent, t=0.0)
+            audio.play("click")
+            return
+        if self.loot_target:
+            self.loot_target = None
+        elif self.inv_open:
+            self.inv_open = False
+        else:
+            lc = self.nearest_container()
+            if lc is not None:
+                self.loot_target = lc
+                audio.play("click")
+
+    def _update_channel(self, dt):
+        """解救人质 / 拉起队友的引导进度(需要站定且保持在附近)。"""
+        if self.channel is None or self.over:
+            return
+        p = self.player
+        ent = self.channel["ent"]
+        need = HOSTAGE_RESCUE_TIME if self.channel["kind"] == "rescue" else REVIVE_TIME
+        d = math.hypot(ent.x - p.x, ent.y - p.y)
+        keys = pygame.key.get_pressed()
+        moving = any(keys[k] for k in (pygame.K_w, pygame.K_a, pygame.K_s, pygame.K_d,
+                                       pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT,
+                                       pygame.K_RIGHT))
+        if self.touch_mode and self.touch is not None:
+            moving = moving or any(abs(v) > 0.1 for v in self.touch.move_axis())
+        if d > INTERACT_RANGE * 1.6:
+            self.channel = None
+            self.add_toast("离太远了,引导中断", COL["bad"])
+            return
+        self.channel["t"] += dt                  # 站定推进(边走边救也能完成,但更慢)
+        if moving:
+            self.channel["t"] -= dt * 0.5
+        if self.channel["t"] < 0:
+            self.channel["t"] = 0.0
+        if self.channel["t"] >= need:
+            kind = self.channel["kind"]
+            self.channel = None
+            if kind == "rescue":
+                ent.rescued = True
+                done = sum(1 for h in self.hostages if h.rescued)
+                audio.play("pickup")
+                self.add_toast(f"解救人质 {done}/{len(self.hostages)}", COL["good"], 3.0)
+                if done >= len(self.hostages):
+                    self.add_toast("全部人质已解救!带队撤离!", COL["accent"], 5.0)
+            else:
+                ent.revive()
+                audio.play("heal")
+                self.add_toast("队友已重新站起", COL["good"], 3.0)
 
     def kill_scav(self, scav):
         self.scavs.remove(scav)
@@ -398,6 +497,29 @@ class Raid:
         audio.play(sfx)
         self.emit_noise(x, y, 700 if rpg else 400)
 
+    def spawn_ally_bullet(self, x, y, ang):
+        """队友射击:子弹只伤害敌人,不会误伤玩家。"""
+        spd = 900.0
+        self.bullets.append(dict(x=x, y=y, dx=math.cos(ang) * spd, dy=math.sin(ang) * spd,
+                                 dmg=ALLY_DMG, owner="ally", ttl=520 / spd))
+        audio.play("epm")
+        self.emit_noise(x, y, 450)
+
+    def threat_for(self, scav):
+        """拾荒者的当前目标:优先玩家;玩家不可见而被队友看得见时打队友。"""
+        p = self.player
+        if math.hypot(p.x - scav.x, p.y - scav.y) <= scav.d["view"] \
+                and self.map.los_clear(scav.x, scav.y, p.x, p.y):
+            return p
+        best, bd = None, scav.d["view"]
+        for a in self.allies:
+            if getattr(a, "downed", False):
+                continue
+            d = math.hypot(a.x - scav.x, a.y - scav.y)
+            if d < bd and self.map.los_clear(scav.x, scav.y, a.x, a.y):
+                best, bd = a, d
+        return best if best is not None else p
+
     def explode(self, x, y, dmg, owner, src=None):
         """火箭弹爆炸:半径内的拾荒者一律吃伤害(不用瞄准);
         玩家被波及则按火箭弹规则判定(穿 6 级甲半血,否则阵亡)。src 为发射者,不吃自己的爆炸。"""
@@ -462,7 +584,7 @@ class Raid:
                         dead = True
                         break
                     continue
-                if b["owner"] == "player":
+                if b["owner"] in ("player", "ally"):
                     for s in self.scavs:
                         if math.hypot(s.x - b["x"], s.y - b["y"]) < s.r + 3:
                             s.damage(b["dmg"])
@@ -477,6 +599,14 @@ class Raid:
                     if math.hypot(p.x - b["x"], p.y - b["y"]) < PLAYER["radius"] + 2:
                         p.take_damage(b["dmg"], self)
                         dead = True
+                    else:
+                        for a in self.allies:
+                            if a.downed:
+                                continue
+                            if math.hypot(a.x - b["x"], a.y - b["y"]) < a.r + 2:
+                                a.take_damage(b["dmg"], self)
+                                dead = True
+                                break
                 if dead:
                     break
             if not dead:
@@ -676,9 +806,15 @@ class Raid:
         # 用"撤离时装备总值 - 进局时装备总值"快照计算净收益,事件式记账
         # 会在放回物品/部分堆叠转移时失真
         gained = max(0, int(self._loadout_value() - self.start_value))
+        rescued = sum(1 for h in self.hostages if h.rescued)
         self.result = dict(kind=kind, kills=self.kills, gained=gained,
                            n=len(self.loot_log), time=RAID_TIME - self.time_left,
-                           entries=self.loot_log)
+                           entries=self.loot_log,
+                           mode=self.mode, rescued=rescued,
+                           hostages=len(self.hostages),
+                           mission=(self.mode != "hostage" or (
+                               len(self.hostages) > 0
+                               and rescued >= len(self.hostages))))
         self.game.raid_finished(self.result)
 
     # ---------- 每帧 ----------
@@ -719,15 +855,7 @@ class Raid:
                     self.ask_merge = False
                     self.inv_open = not self.inv_open
                 elif ev.key == pygame.K_e:
-                    if self.loot_target:
-                        self.loot_target = None
-                    elif self.inv_open:
-                        self.inv_open = False
-                    else:
-                        lc = self.nearest_container()
-                        if lc is not None:
-                            self.loot_target = lc
-                            audio.play("click")
+                    self.interact()
                 elif ev.key == pygame.K_r:
                     if not (self.inv_open or self.loot_target):
                         self.start_reload()
@@ -819,15 +947,7 @@ class Raid:
                 elif name == "heal":
                     self.quick_heal()
                 elif name == "loot":
-                    if self.loot_target:
-                        self.loot_target = None
-                    elif self.inv_open:
-                        self.inv_open = False
-                    else:
-                        lc = self.nearest_container()
-                        if lc is not None:
-                            self.loot_target = lc
-                            audio.play("click")
+                    self.interact()
                 elif name == "bag":
                     self.loot_target = None
                     self.inv_open = not self.inv_open
@@ -874,6 +994,11 @@ class Raid:
         # 实体
         for s in self.scavs:
             s.update(self, dt)
+        for a in self.allies:
+            a.update(self, dt)
+        for h in self.hostages:
+            h.update(self, dt)
+        self._update_channel(dt)
         self._update_bullets(dt)
         for pt in self.particles:
             pt["ttl"] -= dt

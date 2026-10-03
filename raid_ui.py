@@ -6,6 +6,7 @@ import pygame
 
 import audio
 from settings import (W, H, COL, BAG_W, BAG_H, RAID_TIME, EXTRACT_TIME,
+                      HOSTAGE_RESCUE_TIME, REVIVE_TIME,
                       PLAYER, fmt_rub, get_font)
 import uikit
 from uikit import CELL, draw_grid, draw_item_icon, draw_tooltip, draw_button, draw_slot
@@ -133,6 +134,33 @@ def draw_raid(raid, screen):
             pygame.draw.rect(screen, (220, 80, 70),
                              (x - bw / 2, y - s.r - 10, bw * s.hp / s.d["hp"], 5))
 
+    # 队友与人质(人质模式)
+    for a in raid.allies:
+        x, y = a.x + ox, a.y + oy
+        col = (110, 190, 110) if not a.downed else (120, 108, 88)
+        pygame.draw.circle(screen, col, (int(x), int(y)), a.r)
+        pygame.draw.circle(screen, (20, 30, 20), (int(x), int(y)), a.r, 2)
+        if not a.downed:
+            pygame.draw.line(screen, (235, 235, 235), (x, y),
+                             (x + math.cos(a.aim) * 18, y + math.sin(a.aim) * 18), 3)
+            if a.hp < a.max_hp:
+                bw2 = 30
+                pygame.draw.rect(screen, (40, 40, 46), (x - bw2 / 2, y - a.r - 10, bw2, 5))
+                pygame.draw.rect(screen, (120, 220, 120),
+                                 (x - bw2 / 2, y - a.r - 10, bw2 * a.hp / a.max_hp, 5))
+        else:
+            t = get_font(12, bold=True).render("倒地", True, (240, 190, 90))
+            screen.blit(t, t.get_rect(center=(x, y - a.r - 12)))
+    for h in raid.hostages:
+        if not h.rescued and not raid.map.los_clear(p.x, p.y, h.x, h.y):
+            continue
+        x, y = h.x + ox, h.y + oy
+        col = (238, 238, 248) if not h.rescued else (140, 200, 240)
+        pygame.draw.circle(screen, col, (int(x), int(y)), h.r)
+        pygame.draw.circle(screen, (40, 40, 60), (int(x), int(y)), h.r, 2)
+        t = get_font(12, bold=True).render("人质" if not h.rescued else "已解救", True, col)
+        screen.blit(t, t.get_rect(center=(x, y - h.r - 12)))
+
     # 粒子
     for pt in raid.particles:
         a = pt["ttl"] / pt["max_ttl"]
@@ -173,6 +201,20 @@ def draw_raid(raid, screen):
     for name, r in raid.map.extracts:
         _edge_arrow(screen, raid, name, r, ox, oy)
 
+    # 人质模式:指向最近未解救人质
+    if raid.mode == "hostage":
+        near, nd = None, 1e9
+        for h in raid.hostages:
+            if h.rescued:
+                continue
+            d = math.hypot(h.x - raid.player.x, h.y - raid.player.y)
+            if d < nd:
+                near, nd = h, d
+        if near is not None and nd > 340:
+            fake = pygame.Rect(0, 0, 2, 2)
+            fake.center = (int(near.x), int(near.y))
+            _edge_arrow(screen, raid, "人质", fake, ox, oy)
+
     # 辅助瞄准(手机):锁定标记
     if raid.aim_locked is not None:
         lx = raid.aim_locked.x + ox
@@ -192,6 +234,16 @@ def draw_raid(raid, screen):
         by = py - 34
         pygame.draw.rect(screen, (30, 30, 36), (bx, by, bw, 9), border_radius=4)
         pygame.draw.rect(screen, COL["extract"], (bx, by, bw * ratio, 9), border_radius=4)
+
+    # 解救人质 / 拉起队友 引导进度条
+    if raid.channel is not None:
+        need = HOSTAGE_RESCUE_TIME if raid.channel["kind"] == "rescue" else REVIVE_TIME
+        ratio = min(1.0, raid.channel["t"] / need)
+        bw = 90
+        bx = px - bw / 2
+        by = py - 52
+        pygame.draw.rect(screen, (30, 30, 36), (bx, by, bw, 9), border_radius=4)
+        pygame.draw.rect(screen, COL["good"], (bx, by, bw * ratio, 9), border_radius=4)
 
     _draw_hud(raid, screen)
 
@@ -309,6 +361,17 @@ def _draw_hud(raid, screen):
                                        COL["bad"] if tl < 60 else COL["text"])
     screen.blit(t, t.get_rect(center=(W // 2, 18)))
 
+    # 人质模式:任务进度面板
+    if raid.mode == "hostage" and not raid.over:
+        done = sum(1 for h in raid.hostages if h.rescued)
+        alive = sum(1 for a in raid.allies if not a.downed)
+        info = f"人质 {done}/{len(raid.hostages)}    队友 {alive}/{len(raid.allies)}"
+        t = get_font(18, bold=True).render(info, True, COL["accent"])
+        bg = pygame.Surface((t.get_width() + 20, 32), pygame.SRCALPHA)
+        bg.fill((10, 12, 14, 175))
+        screen.blit(bg, (20, 16))
+        screen.blit(t, (30, 22))
+
     # 提示
     if not (raid.inv_open or raid.loot_target or raid.paused or raid.over):
         prompt = None
@@ -316,6 +379,16 @@ def _draw_hud(raid, screen):
             if r.collidepoint(raid.player.x, raid.player.y):
                 prompt = "撤离区:保持不动完成撤离"
                 break
+        if prompt is None and raid.channel is not None:
+            need = HOSTAGE_RESCUE_TIME if raid.channel["kind"] == "rescue" else REVIVE_TIME
+            label = "解救人质中" if raid.channel["kind"] == "rescue" else "拉起队友中"
+            prompt = f"{label}…{int(min(1.0, raid.channel['t'] / need) * 100)}%"
+        if prompt is None and raid.mode == "hostage":
+            kind, _ent = raid.nearest_interactable()
+            if kind == "rescue":
+                prompt = "E  解救人质"
+            elif kind == "revive":
+                prompt = "E  拉起队友"
         if prompt is None:
             lc = raid.nearest_container()
             if lc is not None:
@@ -474,6 +547,13 @@ def _draw_result(raid, screen):
     line = f"用时 {mm:02d}:{ss:02d}    击杀 {r['kills']}    搜刮 {r['n']} 件  价值 {fmt_rub(r['gained'])}"
     t = get_font(20).render(line, True, COL["text"])
     screen.blit(t, t.get_rect(center=(W // 2, 210)))
+    if r.get("mode") == "hostage":
+        ok = r.get("mission")
+        obj = (f"人质解救 {r.get('rescued', 0)}/{r.get('hostages', 0)} —— "
+               + ("任务完成!" if ok else "任务未完成"))
+        t = get_font(20, bold=True).render(obj, True,
+                                           COL["good"] if ok else COL["bad"])
+        screen.blit(t, t.get_rect(center=(W // 2, 244)))
 
     if r["entries"]:
         f = get_font(16)

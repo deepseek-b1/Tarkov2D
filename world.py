@@ -15,7 +15,7 @@ WATER = "W"
 SOLID = {WALL, TREE, WATER}     # 水域同样不可通行、挡视线
 _LOOT_LETTER = {"C": "crate", "M": "med", "G": "gun", "V": "val"}
 _SCAV_LETTER = {"p": "pistol", "g": "shotgun", "r": "ar", "m": "melee"}
-_SPECIAL = ("S", "1", "2", "3", "X", "Y", "Z")
+_SPECIAL = ("S", "1", "2", "3", "X", "Y", "Z", "H", "T", "c")
 
 
 class LootContainer:
@@ -53,6 +53,9 @@ class GameMap:
         self.boss_spawn = None     # (x, y) 像素坐标(头目)
         self.guard_spawns = []     # [(x, y)] 头目手下
         self.author_spawn = None   # (x, y) 隐藏头目「作者」
+        self.hostage_spawns = []   # [(x, y)] 人质(人质模式)
+        self.ally_spawns = []      # [(x, y)] 队友出生点
+        self.corners = []          # [(x, y)] 拐角死角(敌人偏好蹲守)
         self.spawn = None          # (x, y) 像素坐标
 
         for ty, row in enumerate(rows):
@@ -84,6 +87,12 @@ class GameMap:
                     self.guard_spawns.append((cx, cy))
                 elif ch == "Z":
                     self.author_spawn = (cx, cy)
+                elif ch == "H":
+                    self.hostage_spawns.append((cx, cy))
+                elif ch == "T":
+                    self.ally_spawns.append((cx, cy))
+                elif ch == "c":
+                    self.corners.append((cx, cy))
                 elif ch == "S":
                     self.spawn = (cx, cy)
                 elif ch in ("1", "2", "3"):
