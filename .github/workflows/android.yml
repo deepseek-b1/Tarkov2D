@@ -11,6 +11,7 @@ on:
 jobs:
   apk:
     runs-on: ubuntu-latest
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
@@ -28,7 +29,7 @@ jobs:
       - name: 安装 buildozer
         run: |
           pip install --upgrade pip
-          pip install buildozer cython
+          pip install "buildozer>=1.5.0" "cython<3.1"
 
       - name: 缓存 SDK/NDK
         uses: actions/cache@v4
@@ -39,9 +40,14 @@ jobs:
       - name: 构建 APK
         run: buildozer -v android debug
 
+      - name: 显示产物
+        run: ls -lh bin/ || true
+
       - name: 上传 APK
         uses: actions/upload-artifact@v4
         with:
           name: Tarkov2D-apk
-          path: bin/*.apk
+          path: |
+            bin/*.apk
+            bin/**/*.apk
           if-no-files-found: error
