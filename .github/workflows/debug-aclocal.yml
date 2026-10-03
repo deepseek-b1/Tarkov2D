@@ -1,0 +1,51 @@
+name: Debug aclocal shim
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool libtool-bin pkg-config gettext
+
+      - name: 下载 libffi
+        run: |
+          cd /tmp
+          curl -sSL https://github.com/libffi/libffi/releases/download/v3.4.4/libffi-3.4.4.tar.gz -o l.tgz
+          tar -xzf l.tgz
+          echo "自带 aclocal.m4 里有没有宏: $(grep -c 'AC_DEFUN(\[LT_SYS_SYMBOL_USCORE\]' libffi-3.4.4/aclocal.m4)"
+          echo "系统 libtool.m4 里有没有宏: $(grep -c 'LT_SYS_SYMBOL_USCORE' /usr/share/aclocal/libtool.m4)"
+
+      - name: 纯 autoconf 定位(最小复现,只跑 aclocal+autoconf)
+        run: |
+          cd /tmp && rm -rf t1 && cp -r libffi-3.4.4 t1 && cd t1
+          rm -f aclocal.m4
+          libtoolize --force --copy >/dev/null 2>&1
+          echo "--- 试 aclocal -I /usr/share/aclocal ---"
+          aclocal -I /usr/share/aclocal 2>&1 | tail -3
+          echo "结果: $(grep -c 'AC_DEFUN(\[LT_SYS_SYMBOL_USCORE\]' aclocal.m4)"
+          echo "--- 试 aclocal (无参数,但列目录) ---"
+          cd /tmp && rm -rf t2 && cp -r libffi-3.4.4 t2 && cd t2
+          rm -f aclocal.m4 && libtoolize --force --copy >/dev/null 2>&1
+          aclocal 2>&1 | tail -3
+          echo "结果: $(grep -c 'AC_DEFUN(\[LT_SYS_SYMBOL_USCORE\]' aclocal.m4)"
+
+      - name: 方案 F —— aclocal 包装脚本 + 完整 autoreconf
+        run: |
+          mkdir -p /tmp/shim
+          cat > /tmp/shim/aclocal <<'EOF'
+          #!/bin/bash
+          # 强制把系统宏目录追加进搜索路径(修复 Ubuntu libtool 2.4.7 缺 LT_SYS_SYMBOL_USCORE)
+          exec /usr/bin/aclocal -I /usr/share/aclocal "$@"
+          EOF
+          chmod +x /tmp/shim/aclocal
+          cd /tmp && rm -rf t3 && cp -r libffi-3.4.4 t3 && cd t3
+          echo "=== 用包装脚本跑 autoreconf -vfi ==="
+          PATH="/tmp/shim:$PATH" autoreconf -vfi 2>&1 | tail -15
+          echo "退出码: $?"
+          echo "生成的 aclocal.m4 里有没有宏: $(grep -c 'AC_DEFUN(\[LT_SYS_SYMBOL_USCORE\]' aclocal.m4)"
+          test -f configure && echo ">>> 方案 F: configure 已生成 ✅ 成功" || echo ">>> 方案 F: 失败"
