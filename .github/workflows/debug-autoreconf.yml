@@ -31,16 +31,21 @@ jobs:
       - name: 试各种 autoreconf 方式,看哪种能过
         run: |
           cd /tmp/libffi-3.4.4
-          echo "===== A) autoreconf -vfi (默认) ====="
-          autoreconf -vfi 2>&1 | tail -15 || echo "A 失败"
+          echo "===== libffi 自带 m4 目录内容 ====="
+          ls -l m4/ 2>/dev/null | head -20 || echo "(没有 m4 目录)"
+          grep -c "LT_SYS_SYMBOL_USCORE" m4/*.m4 2>/dev/null || true
+
           echo
-          echo "===== B) AUTORECONF 环境变量 + WARNINGS=no ====="
-          git init -q 2>/dev/null || true
-          cd /tmp && rm -rf libffi-b && cp -r libffi-3.4.4 libffi-b && cd libffi-b
-          WARNINGS=no autoreconf -vfi 2>&1 | tail -15 || echo "B 失败"
-          echo
-          echo "===== C) 只跑 libtoolize + autoconf(跳过 automake 的宏检查) ====="
-          cd /tmp && rm -rf libffi-c && cp -r libffi-3.4.4 libffi-c && cd libffi-c
-          libtoolize --force --copy 2>&1 | tail -3
+          echo "===== 方案 D: aclocal -I m4 优先于系统宏 ====="
+          cd /tmp && rm -rf libffi-d && cp -r libffi-3.4.4 libffi-d && cd libffi-d
+          libtoolize --force --copy >/dev/null 2>&1
           aclocal -I m4 2>&1 | tail -3
-          autoconf -W no-syntax 2>&1 | tail -10 && echo "C 的 autoconf 通过" || echo "C 失败"
+          echo -n "生成后的 aclocal.m4 里有没有这个宏: "
+          grep -c "AC_DEFUN(\[LT_SYS_SYMBOL_USCORE\]" aclocal.m4 || echo 0
+          autoconf 2>&1 | tail -8 && echo ">>> 方案 D: autoconf 通过 ✅" || echo ">>> 方案 D: 失败"
+
+          echo
+          echo "===== 方案 E: 只改 aclocal 的搜索顺序(把 libffi 的 m4 放最前) ====="
+          cd /tmp && rm -rf libffi-e && cp -r libffi-3.4.4 libffi-e && cd libffi-e
+          ACLOCAL_PATH="$PWD/m4" autoreconf -vfi 2>&1 | tail -12 && echo ">>> 方案 E: autoreconf 通过 ✅" || echo ">>> 方案 E: 失败"
+
