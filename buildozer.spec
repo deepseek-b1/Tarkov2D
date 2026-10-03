@@ -28,7 +28,11 @@ requirements = hostpython3==3.12.11,python3==3.12.11,pygame==2.6.1
 orientation = landscape
 fullscreen = 1
 presplash.color = #101216
-android.archs = arm64-v8a,armeabi-v7a
+# 只出 arm64-v8a:
+#   Python 3.12 的 Modules/grpmodule.c 在 armv7a(32 位)+ 新版 NDK 下编译不过
+#   (make: *** [Makefile:3063: Modules/grpmodule.o] Error 1),p4a 上游也没有对应补丁。
+#   2020 年以后的安卓机基本都是 arm64,只出 arm64 即可。
+android.archs = arm64-v8a
 android.api = 31
 android.minapi = 21
 android.accept_sdk_license = True
