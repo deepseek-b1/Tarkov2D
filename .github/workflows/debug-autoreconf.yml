@@ -1,0 +1,46 @@
+name: Debug autoreconf
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool libtool-bin pkg-config gettext
+
+      - name: 定位 libffi configure.ac 第 215 行
+        run: |
+          set -x
+          cd /tmp
+          for V in 3.4.4 3.4.6; do
+            echo "########## libffi $V ##########"
+            curl -sSL "https://github.com/libffi/libffi/releases/download/v$V/libffi-$V.tar.gz" -o "libffi-$V.tgz"
+            ls -l "libffi-$V.tgz"
+            tar -xzf "libffi-$V.tgz"
+            echo "--- configure.ac 205..225 ---"
+            sed -n '205,225p' "libffi-$V/configure.ac"
+            echo "--- 该行提到的宏是否在 aclocal 宏里 ---"
+            grep -rn "LT_SYS_SYMBOL_USCORE" "libffi-$V" | head -5 || true
+            grep -rn "LT_SYS_SYMBOL_USCORE" /usr/share/aclocal/ | head -5 || true
+          done
+
+      - name: 试各种 autoreconf 方式,看哪种能过
+        run: |
+          cd /tmp/libffi-3.4.4
+          echo "===== A) autoreconf -vfi (默认) ====="
+          autoreconf -vfi 2>&1 | tail -15 || echo "A 失败"
+          echo
+          echo "===== B) AUTORECONF 环境变量 + WARNINGS=no ====="
+          git init -q 2>/dev/null || true
+          cd /tmp && rm -rf libffi-b && cp -r libffi-3.4.4 libffi-b && cd libffi-b
+          WARNINGS=no autoreconf -vfi 2>&1 | tail -15 || echo "B 失败"
+          echo
+          echo "===== C) 只跑 libtoolize + autoconf(跳过 automake 的宏检查) ====="
+          cd /tmp && rm -rf libffi-c && cp -r libffi-3.4.4 libffi-c && cd libffi-c
+          libtoolize --force --copy 2>&1 | tail -3
+          aclocal -I m4 2>&1 | tail -3
+          autoconf -W no-syntax 2>&1 | tail -10 && echo "C 的 autoconf 通过" || echo "C 失败"
