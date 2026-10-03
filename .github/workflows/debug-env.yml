@@ -1,0 +1,46 @@
+name: Debug build env
+
+on:
+  workflow_dispatch:
+
+jobs:
+  env:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git zip unzip openjdk-17-jdk autoconf automake libtool \
+            libtool-bin pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo6 \
+            cmake libffi-dev libssl-dev gettext
+
+      - name: 环境自检
+        run: |
+          echo "===== 系统 ====="
+          lsb_release -a
+          echo "===== autotools 版本 ====="
+          autoconf --version | head -1
+          automake --version | head -1
+          libtool --version | head -1
+          libtoolize --version | head -1
+          echo "===== libtool m4 宏是否就位 ====="
+          ls -l /usr/share/aclocal/libtool.m4 || echo "!!! 缺 /usr/share/aclocal/libtool.m4"
+          grep -c "LT_SYS_SYMBOL_USCORE" /usr/share/aclocal/libtool.m4 || echo "!!! 宏里没有 LT_SYS_SYMBOL_USCORE"
+          echo "===== pkg-config 里的 libffi ====="
+          pkg-config --modversion libffi || true
+          echo "===== python-for-android 版本与 libffi 配方 ====="
+          pip install "buildozer>=1.5.0" "cython<3.1" >/dev/null
+          python -c "import buildozer, os; print('buildozer', buildozer.__version__ if hasattr(buildozer,'__version__') else '?')"
+          git clone --depth 1 https://github.com/kivy/python-for-android /tmp/p4a >/dev/null 2>&1
+          cd /tmp/p4a && git log --oneline -1
+          echo "--- libffi recipe ---"
+          cat pythonforandroid/recipes/libffi/__init__.py
+          echo "--- libffi 配方里的补丁/固定版本 ---"
+          ls -l pythonforandroid/recipes/libffi/
+          echo "===== 现成 tarball: libffi 是否带 libtool m4 ====="
+          grep -rn "libffi" pythonforandroid/recipes/libffi/__init__.py | head -20
