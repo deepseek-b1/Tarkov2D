@@ -71,7 +71,21 @@ jobs:
           key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
 
       - name: 构建 APK
-        run: buildozer -v android debug
+        run: |
+          # p4a 用自己的 hostpython3 跑 pygame 的 setup.py,而 Cython 装在
+          # runner 的系统 Python 里没用 —— 报错是 "You need cython"。
+          # 这里先让 buildozer 生成 NDK/SDK 与 hostpython3,再把 cython 装进去。
+          buildozer -v android debug || true
+          HP=$(find "$PWD/.buildozer" -maxdepth 8 -type f -path "*hostpython3*/local/bin/pip3" 2>/dev/null | head -1)
+          if [ -n "$HP" ]; then
+            echo "找到 hostpython3 pip: $HP"
+            "$HP" install "cython<3.1" wheel setuptools || true
+            "$HP" -m cython --version || true
+          else
+            echo "!! 没找到 hostpython3 的 pip,pygame 那步可能会因缺 cython 失败"
+          fi
+          # 正式构建(hostpython3 已就绪,会直接复用)
+          buildozer -v android debug
 
       - name: 显示产物
         run: ls -lh bin/ || true
