@@ -14,7 +14,14 @@ source.exclude_exts = spec, bat, md, exe, log, zip
 version = 1.0.8
 
 # pygame 由 python-for-android 的 pygame 配方提供(SDL2)
-requirements = python3,pygame
+#
+# 版本必须钉住,原因:
+#   * p4a 的 pygame 配方默认锁在 2.1.0(2021 年),它引用的 longintrepr.h 在
+#     Python 3.11+ 已经换了位置 —— 直接编不过
+#     (报错: src_c/_sdl2/sdl2.c: fatal error: 'longintrepr.h' file not found)
+#   * p4a 的 python3 配方默认是 3.14,而 pygame 到 2.6.1 为止只支持到 3.13
+# 所以钉成 Python 3.12 + pygame 2.6.1 这个互相兼容、且被广泛验证过的组合。
+requirements = python3==3.12.11,pygame==2.6.1
 
 orientation = landscape
 fullscreen = 1
