@@ -21,7 +21,9 @@ version = 1.0.8
 #     (报错: src_c/_sdl2/sdl2.c: fatal error: 'longintrepr.h' file not found)
 #   * p4a 的 python3 配方默认是 3.14,而 pygame 到 2.6.1 为止只支持到 3.13
 # 所以钉成 Python 3.12 + pygame 2.6.1 这个互相兼容、且被广泛验证过的组合。
-requirements = python3==3.12.11,pygame==2.6.1
+# 注意 hostpython3 必须和 python3 版本一致,否则 p4a 直接报
+# "python3 should have same version as hostpython3"。
+requirements = hostpython3==3.12.11,python3==3.12.11,pygame==2.6.1
 
 orientation = landscape
 fullscreen = 1
