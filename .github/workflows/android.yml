@@ -31,6 +31,35 @@ jobs:
           pip install --upgrade pip
           pip install "buildozer>=1.5.0" "cython<3.1"
 
+      # Ubuntu 的 libtool 2.4.7 里没有 LT_SYS_SYMBOL_USCORE 宏(老 libtool 才有),
+      # 而 libffi 的 configure.ac 要用它 —— 一旦 autoreconf 重新生成 aclocal.m4 就报
+      # "possibly undefined macro: LT_SYS_SYMBOL_USCORE" 直接中断构建。
+      # 这些包自带的 configure 本来就是完整可用的,所以有 configure 就跳过 autoreconf。
+      - name: 修补 autoreconf(绕开 libtool 老宏缺失)
+        run: |
+          mkdir -p "$HOME/.binshim"
+          cat > "$HOME/.binshim/autoreconf" <<'EOF'
+          #!/bin/bash
+          for a in "$@"; do
+            case "$a" in
+              -*) ;;
+              *) if [ -f "$a/configure" ]; then
+                   echo "[shim] skip autoreconf for $a (pre-generated configure exists)"
+                   exit 0
+                 fi ;;
+            esac
+          done
+          if [ -f ./configure ]; then
+            echo "[shim] skip autoreconf in $PWD (pre-generated configure exists)"
+            exit 0
+          fi
+          echo "[shim] pass-through to real autoreconf"
+          exec /usr/bin/autoreconf "$@"
+          EOF
+          chmod +x "$HOME/.binshim/autoreconf"
+          "$HOME/.binshim/autoreconf" --help || true
+          echo "$HOME/.binshim" >> "$GITHUB_PATH"
+
       - name: 缓存 SDK/NDK
         uses: actions/cache@v4
         with:
