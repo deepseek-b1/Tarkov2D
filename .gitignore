@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# PyInstaller 产物
+build/
+dist/
+*.spec.bak
+update_server/*.exe
+
+# pygbag 网页版产物(不入库,体积大且可再生)
+webapp/build/
+
+# pygbag 打包暂存目录(是根目录源码的副本,buildozer 也已排除)
+webapp/
+
+# 打包中间产物
+bin/
+*.apk
+*.aab
+*.wgt
+*.zip
+
+# 编辑器 / IDE
+.idea/
+.vscode/
+.hbuilderx/
+.codely-cli/
+*.log
+
+# 本地自检输出
+diag_result.txt
+selftest_report.txt

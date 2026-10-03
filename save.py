@@ -1,0 +1,174 @@
+# -*- coding: utf-8 -*-
+"""存档:JSON 持久化(Windows 用 %LOCALAPPDATA%,安卓用应用私有目录,网页版用虚拟盘)。"""
+import json
+import os
+import sys
+import time
+
+from settings import STASH_W, STASH_H, BAG_W, BAG_H
+from inventory import Container, Item
+
+
+def _default_dir():
+    """按平台选择可写的存档目录。"""
+    if sys.platform == "emscripten":
+        return os.environ.get("PYGBAG_SAVE_DIR") or "."
+    android = os.environ.get("ANDROID_PRIVATE")
+    if android:
+        return os.path.join(android, "Tarkov2D")
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "Tarkov2D")
+
+
+SAVE_DIR = _default_dir()
+SAVE_FILE = os.path.join(SAVE_DIR, "save.json")
+
+
+class SaveData:
+    def __init__(self):
+        self.stash = Container(STASH_W, STASH_H)
+        self.bag = Container(BAG_W, BAG_H)   # 容量由装备的背包决定
+        self.weapon = None   # Item 或 None(出战武器槽)
+        self.armor = None    # Item 或 None(出战护甲槽)
+        self.pack = None     # Item 或 None(出战背包,决定 bag 格子容量)
+        self.difficulty = "lockdown"   # easy / lockdown / hardened
+        self.map_key = "border"        # 出战地图(border / tv / port)
+        self.touch = False             # 手机(触屏)模式:虚拟摇杆 + 按钮 + 自动锁敌
+        self.seen_intro = False        # 是否看过玩法简介
+        self.rubles = 20000  # 货币
+        self.stats = {"raids": 0, "extracts": 0, "deaths": 0, "kills": 0, "value": 0}
+
+    def apply_pack(self):
+        """按当前背包调整出战背包容量(先尽量扩容,收窄时放不下的退回仓库)。"""
+        from settings import pack_grid, POCKETS
+        gw, gh = pack_grid(self.pack.iid) if self.pack else POCKETS
+        if (self.bag.w, self.bag.h) == (gw, gh):
+            return True
+        new, overflow = self.bag.resized(gw, gh)
+        for it in overflow:
+            if not self.stash.add_item(it):
+                return False   # 仓库也塞不下:放弃收窄(保留原容量,不丢东西)
+        self.bag = new
+        return True
+
+    def default_fill(self):
+        """新玩家初始配置:手枪 + 中型背包 + 少量物资;仓库有一点家底。"""
+        self.pack = Item("pack_mid")
+        self.bag = Container(6, 4)
+        self.weapon = Item.weapon("pm", mag=8)
+        self.bag.add_item(Item("a9", count=30))
+        self.bag.add_item(Item("bandage", count=1))
+        self.stash.add_item(Item.weapon("mp5", mag=30))
+        self.stash.add_item(Item("a9", count=30))
+        self.stash.add_item(Item("medkit", count=1))
+        self.stash.add_item(Item("gold", count=1))
+        self.stash.add_item(Item("paca", count=1))
+        self.stash.add_item(Item("pack_large", count=1))   # 一个扩容目标
+
+    def any_weapon(self):
+        if self.weapon:
+            return True
+        for p in self.stash.items:
+            if p.item.cat == "weapon":
+                return True
+        for p in self.bag.items:
+            if p.item.cat == "weapon":
+                return True
+        return False
+
+    def wipe_loadout(self):
+        """阵亡:丢失带入战局的所有装备(含背包,退回口袋容量)。"""
+        self.weapon = None
+        self.armor = None
+        self.pack = None
+        self.bag = Container(BAG_W, BAG_H)
+
+    # ---- 序列化 ----
+    def serialize(self):
+        return {
+            "v": 1,
+            "stash": self.stash.serialize(),
+            "bag": self.bag.serialize(),
+            "bag_w": self.bag.w,
+            "bag_h": self.bag.h,
+            "weapon": self.weapon.serialize() if self.weapon else None,
+            "armor": self.armor.serialize() if self.armor else None,
+            "pack": self.pack.serialize() if self.pack else None,
+            "difficulty": self.difficulty,
+            "map": self.map_key,
+            "touch": bool(self.touch),
+            "seen_intro": bool(self.seen_intro),
+            "rubles": int(self.rubles),
+            "stats": dict(self.stats),
+        }
+
+    @staticmethod
+    def deserialize(data):
+        sd = SaveData()
+        sd.stash = Container.deserialize(STASH_W, STASH_H, data.get("stash"))
+        # 存了容器尺寸(新档)就按存的来,否则旧档按 6×4 兼容
+        try:
+            bw = int(data.get("bag_w", 6) or 6)
+            bh = int(data.get("bag_h", 4) or 4)
+        except (TypeError, ValueError):
+            bw, bh = 6, 4
+        sd.bag = Container.deserialize(bw, bh, data.get("bag"))
+        if data.get("weapon"):
+            sd.weapon = Item.from_dict(data["weapon"])
+        if data.get("armor"):
+            sd.armor = Item.from_dict(data["armor"])
+        if "pack" in data:
+            if data.get("pack"):
+                sd.pack = Item.from_dict(data["pack"])
+        else:
+            # 旧档没有背包字段:补发中型背包(保持 6×4 体验不变)
+            sd.pack = Item("pack_mid")
+        sd.apply_pack()
+        from settings import DIFFICULTIES, MAPS
+        if data.get("difficulty") in DIFFICULTIES:
+            sd.difficulty = data["difficulty"]
+        if data.get("map") in MAPS:
+            sd.map_key = data["map"]
+        sd.touch = bool(data.get("touch", False))
+        sd.seen_intro = bool(data.get("seen_intro", False))
+        try:
+            sd.rubles = max(0, int(data.get("rubles", 20000)))
+        except (TypeError, ValueError):
+            sd.rubles = 20000
+        sd.stats.update(data.get("stats") or {})
+        return sd
+
+
+def save_data(sd):
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    tmp = SAVE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(sd.serialize(), f, ensure_ascii=False)
+    os.replace(tmp, SAVE_FILE)
+
+
+def load_data():
+    if not os.path.exists(SAVE_FILE):
+        sd = SaveData()
+        sd.default_fill()
+        return sd
+    try:
+        with open(SAVE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return SaveData.deserialize(data)
+    except Exception:
+        # 损坏存档备份后重置
+        try:
+            os.replace(SAVE_FILE, SAVE_FILE + ".broken-" + str(int(time.time())))
+        except OSError:
+            pass
+        sd = SaveData()
+        sd.default_fill()
+        return sd
+
+
+def reset_data():
+    sd = SaveData()
+    sd.default_fill()
+    save_data(sd)
+    return sd

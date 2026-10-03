@@ -1,0 +1,5 @@
+{
+  "version": "1.0.8",
+  "url": "Tarkov2D.exe",
+  "notes": "多平台改造:异步主循环(网页版必需)、跨平台存档/字体、安卓与网页自动开启手机模式;新增 GitHub Actions 一键打 APK 工作流"
+}

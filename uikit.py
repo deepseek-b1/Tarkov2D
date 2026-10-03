@@ -1,0 +1,200 @@
+# -*- coding: utf-8 -*-
+"""共享 UI 组件:格子容器绘制、物品图标、悬浮提示、按钮。"""
+import pygame
+
+from settings import get_font, COL, fmt_rub, ITEMS
+from inventory import Container, Placed
+
+CELL = 40  # 界面格子像素
+
+
+def draw_panel(surface, rect, title=None):
+    pygame.draw.rect(surface, COL["panel"], rect, border_radius=8)
+    pygame.draw.rect(surface, COL["border"], rect, 2, border_radius=8)
+    if title:
+        t = get_font(20, bold=True).render(title, True, COL["text"])
+        surface.blit(t, (rect.x + 12, rect.y + 8))
+    return rect
+
+
+def draw_grid(surface, x, y, container, cell=CELL, title=None):
+    """绘制格子容器,返回 (Rect, cell)。"""
+    w = container.w * cell
+    h = container.h * cell
+    rect = pygame.Rect(x, y, w, h)
+    pygame.draw.rect(surface, COL["grid_bg"], rect, border_radius=4)
+    for gx in range(container.w):
+        for gy in range(container.h):
+            r = pygame.Rect(x + gx * cell, y + gy * cell, cell, cell)
+            pygame.draw.rect(surface, COL["grid"], r, 1)
+    for p in container.items:
+        draw_item_icon(surface, p.item, x + p.x * cell, y + p.y * cell, cell)
+    if title:
+        t = get_font(16, bold=True).render(title, True, COL["text_dim"])
+        surface.blit(t, (x, y - 24))
+    return rect, cell
+
+
+def grid_hit(container, rect, cell, mx, my):
+    """像素坐标 -> 命中的 Placed(或 None)。"""
+    if not rect.collidepoint(mx, my):
+        return None
+    gx = (mx - rect.x) // cell
+    gy = (my - rect.y) // cell
+    return container.at(int(gx), int(gy))
+
+
+def draw_item_icon(surface, item, x, y, cell=CELL):
+    """按类别画简单图标:武器=枪形,弹药=子弹,医疗=十字,护甲=背心,值钱品=菱形。"""
+    w, h = item.size()
+    wpx, hpx = w * cell, h * cell
+    rect = pygame.Rect(x, y, wpx, hpx)
+    col = item.def_["color"]
+    pygame.draw.rect(surface, col, rect.inflate(-6, -6), border_radius=4)
+    pygame.draw.rect(surface, (20, 20, 24), rect.inflate(-6, -6), 2, border_radius=4)
+    cx, cy = rect.center
+    inner = rect.inflate(-8, -8)
+    cat = item.cat
+    if cat == "weapon":
+        # 枪管 + 枪身
+        pygame.draw.line(surface, (40, 40, 46), (inner.left, cy), (inner.right, cy), 4)
+        pygame.draw.rect(surface, (50, 50, 58),
+                         (cx - 10, cy - 3, 14, 10), border_radius=2)
+        pygame.draw.rect(surface, (50, 50, 58), (cx + 2, cy + 2, 8, 6))
+    elif cat == "ammo":
+        for i in range(3):
+            pygame.draw.rect(surface, (60, 60, 66),
+                             (inner.left + 4 + i * 8, inner.top + 8, 5, 12), border_radius=2)
+    elif cat == "med":
+        pygame.draw.rect(surface, (240, 240, 240), (cx - 9, cy - 3, 18, 6), border_radius=2)
+        pygame.draw.rect(surface, (240, 240, 240), (cx - 3, cy - 9, 6, 18), border_radius=2)
+    elif cat == "armor":
+        pygame.draw.polygon(surface, (36, 36, 42), [
+            (inner.left + 4, cy - 12), (inner.right - 4, cy - 12),
+            (inner.right - 4, cy + 2), (cx, cy + 13), (inner.left + 4, cy + 2)])
+    elif cat == "pack":
+        # 背包:主体 + 顶部提手 + 横带
+        pygame.draw.rect(surface, (32, 32, 38),
+                         (inner.left + 3, cy - 7, inner.w - 6, inner.h - 11),
+                         border_radius=5)
+        pygame.draw.rect(surface, (28, 28, 32),
+                         (inner.left + 3, cy - 7, inner.w - 6, 5), border_radius=2)
+        pygame.draw.arc(surface, (28, 28, 32),
+                        (cx - 10, inner.top + 2, 20, 20), 0.3, 2.9, 3)
+        pygame.draw.line(surface, (28, 28, 32), (inner.left + 3, cy + 4),
+                         (inner.right - 3, cy + 4), 2)
+    elif cat == "misc":
+        # 杂物:六角螺母 + 中心孔
+        pygame.draw.polygon(surface, (44, 44, 50), [
+            (cx, cy - 11), (cx + 9, cy - 5), (cx + 9, cy + 5),
+            (cx, cy + 11), (cx - 9, cy + 5), (cx - 9, cy - 5)])
+        pygame.draw.circle(surface, (26, 26, 30), (cx, cy), 4)
+    else:  # valuable
+        pygame.draw.polygon(surface, (255, 255, 255),
+                            [(cx, cy - 11), (cx + 10, cy), (cx, cy + 11), (cx - 10, cy)])
+    # 数量 / 弹匣
+    if item.is_stackable() and item.count > 1:
+        t = get_font(13, bold=True).render(f"x{item.count}", True, (255, 255, 255))
+        surface.blit(t, (rect.right - t.get_width() - 6, rect.bottom - t.get_height() - 3))
+    if cat == "weapon":
+        mag = item.state.get("mag", 0)
+        t = get_font(13, bold=True).render(f"{mag}", True,
+                                           (120, 255, 120) if mag else (255, 120, 110))
+        surface.blit(t, (rect.x + 6, rect.bottom - t.get_height() - 3))
+
+
+def draw_button(surface, rect, text, hover=False, enabled=True, small=False):
+    base = COL["panel_hi"] if hover else COL["panel"]
+    if not enabled:
+        base = (44, 46, 50)
+    pygame.draw.rect(surface, base, rect, border_radius=8)
+    border = COL["accent"] if hover and enabled else COL["border"]
+    pygame.draw.rect(surface, border, rect, 2, border_radius=8)
+    f = get_font(18, bold=True) if not small else get_font(15, bold=True)
+    col = COL["text"] if enabled else (120, 120, 126)
+    t = f.render(text, True, col)
+    surface.blit(t, t.get_rect(center=rect.center))
+    return rect
+
+
+def draw_slot(surface, rect, item, label, hover=False):
+    """装备槽(武器/护甲)。"""
+    pygame.draw.rect(surface, COL["grid_bg"], rect, border_radius=6)
+    pygame.draw.rect(surface, COL["accent"] if hover else COL["border"], rect, 2, border_radius=6)
+    t = get_font(14, bold=True).render(label, True, COL["text_dim"])
+    surface.blit(t, (rect.x + 8, rect.y + 6))
+    if item:
+        cell = min((rect.w - 20) // max(1, item.size()[0]),
+                   (rect.h - 30) // max(1, item.size()[1]), 34)
+        ix = rect.centerx - item.size()[0] * cell // 2
+        iy = rect.bottom - item.size()[1] * cell // 2 - 6
+        draw_item_icon(surface, item, ix, iy, cell)
+    else:
+        t2 = get_font(13).render("空", True, (90, 94, 102))
+        surface.blit(t2, t2.get_rect(center=(rect.centerx, rect.bottom - 26)))
+    return rect
+
+
+def item_info_lines(item):
+    """悬浮提示信息行。"""
+    d = item.def_
+    lines = [d["name"]]
+    w, h = item.base_size()
+    sub = [f"{w}×{h} 格  {fmt_rub(d['price'])}"]
+    if item.cat == "weapon":
+        sub.append(f"伤害 {d['dmg']}×{d['pellets']}  射速 {d['rof']}s  弹匣 {item.state.get('mag', 0)}/{d['mag']}")
+        sub.append(f"弹药: {ITEMS[d['ammo']]['name']}  {'全自动' if d['auto'] else '半自动'}")
+        if d.get("spread_braced") is not None:
+            sub.append(f"散布:腰射 ±{d['spread']} → 长按右键架枪 ±{d['spread_braced']}")
+            if d.get("braced_immobile"):
+                sub.append("★ 架枪时无法移动(重型机枪)")
+        else:
+            sub.append(f"散布:±{d['spread']}(狙击枪,不参与架枪)")
+        if d.get("req_armor_level"):
+            sub.append(f"★ 需装备 {d['req_armor_level']} 级护甲才能持用")
+    elif item.cat == "armor":
+        txt = ""
+        if d.get("level"):
+            txt += f"防弹级别 {d['level']}   "
+        txt += f"减伤 {int(d['reduce'] * 100)}%"
+        if d.get("slow"):
+            txt += f"  移速 -{int(d['slow'] * 100)}%"
+        sub.append(txt)
+        if d.get("revive"):
+            sub.append("★ 倒地自救 ×1(每局一次)")
+    elif item.cat == "pack":
+        gw, gh = d.get("grid", (0, 0))
+        sub.append(f"携行容量 {gw}×{gh} 格")
+    elif item.cat == "misc":
+        sub.append(f"杂物 · 价值 {fmt_rub(d['price'])}")
+        if item.iid == "doc":
+            sub.append("★ 仅在「强化封锁」的保险箱中固定刷出")
+    elif item.cat == "med":
+        sub.append(f"治疗 {d['heal']} HP")
+    elif item.cat == "ammo":
+        sub.append(f"剩余 {item.count} 发")
+    lines.extend(sub)
+    return lines
+
+
+def draw_tooltip(surface, mx, my, item):
+    lines = item_info_lines(item)
+    f = get_font(15)
+    th = sum(f.size(ln)[1] for ln in lines) + 14
+    tw = max(f.size(ln)[0] for ln in lines) + 20
+    x = mx + 16
+    y = my + 16
+    if x + tw > surface.get_width():
+        x = mx - tw - 12
+    if y + th > surface.get_height():
+        y = my - th - 12
+    rect = pygame.Rect(x, y, tw, th)
+    s = pygame.Surface((tw, th), pygame.SRCALPHA)
+    s.fill((14, 15, 18, 235))
+    surface.blit(s, rect)
+    pygame.draw.rect(surface, COL["border"], rect, 1)
+    yy = y + 7
+    for i, ln in enumerate(lines):
+        t = f.render(ln, True, COL["accent"] if i == 0 else COL["text"])
+        surface.blit(t, (x + 10, yy))
+        yy += f.size(ln)[1]
