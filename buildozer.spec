@@ -26,7 +26,7 @@ version = 1.0.8
 # So: Python 3.11 + pygame 2.5.2 + NDK 25c - a widely used working combo.
 # hostpython3 must match python3 exactly or p4a aborts with
 #   "python3 should have same version as hostpython3".
-requirements = hostpython3==3.11.9,python3==3.11.9,pygame==2.5.2
+requirements = hostpython3==3.11.9,python3==3.11.9,pygame==2.1.0
 
 orientation = landscape
 fullscreen = 1
@@ -46,7 +46,6 @@ android.ndk = 25c
 
 # Project-local pygame recipe: disables the x86 SIMD blitter path, which
 # otherwise makes surface.so unloadable on arm64.
-p4a.local_recipes = ./p4a-recipes
 
 # The game already detects Android (sys.platform / ANDROID_ARGUMENT) and turns
 # on touch controls, auto-aim and fullscreen scaling by itself.
