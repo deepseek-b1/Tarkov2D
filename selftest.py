@@ -298,6 +298,11 @@ def run():
         r.extract_t = 1.5
         r.player.hurt_flash = 0.3
         g.draw(screen)                       # 战局世界+迷雾+HUD+撤离指示
+        # 多弹种武器(霰弹枪 ammo 为列表:龙息弹/穿甲独头弹)也要能画 HUD
+        r.player.weapon = Item.weapon("mp133", mag=4)
+        r.player.weapon.state["loaded"] = "a12db"
+        r.player.bag.add_item(Item("a12db", count=8))
+        g.draw(screen)                       # 修复前:ITEMS_CAL 抛 TypeError 直接闪退
         r.inv_open = True
         g.draw(screen)                       # 背包界面
         r.inv_open = False
@@ -603,7 +608,7 @@ def run():
         import raid_ui
         assert ITEMS["a9"]["stack"] == 120
         assert ITEMS["a545"]["stack"] == 120
-        assert ITEMS["a12"]["stack"] == 120
+        assert ITEMS["a12db"]["stack"] == 40
         g = Game()
         g.save.bag.clear()
         g.save.pack = Item("pack_mid")
@@ -1303,7 +1308,7 @@ def run():
     check("手机-触屏/自动锁敌/玩法简介", t_touch)
 
     def t_hostage():
-        """人质模式:室内大楼 / 4 人质 / 3 队友 / 6 敌人 / 救援与拉起 / 任务判定。"""
+        """人质模式:室内大楼 / 4 人质 / 3 队友 / 20 敌人分房间 / 救援与拉起 / 任务判定。"""
         from game import Game
         from world import GameMap
         from settings import (MAPS, MAP_ORDER, MODE_ORDER, HOSTAGE_COUNT,
@@ -1313,6 +1318,7 @@ def run():
         m = GameMap("indoor")
         assert len(m.hostage_spawns) == HOSTAGE_COUNT
         assert len(m.ally_spawns) == ALLY_COUNT
+        assert HOSTAGE_ENEMIES >= 20, HOSTAGE_ENEMIES
         assert len(m.scav_spawns) == HOSTAGE_ENEMIES
         assert len(m.corners) >= 20, len(m.corners)
         assert len(m.extracts) == 3
@@ -1327,6 +1333,21 @@ def run():
             assert m.astar(st, (int(hx // 32), int(hy // 32))) is not None, "人质不可达"
         for (ax, ay) in m.ally_spawns:
             assert not m.collides(ax, ay, 12)
+        # 1b) 匪徒必须分散在八个房间里,不许挤在同一间
+        rooms = {"西北上": (2, 2, 26, 8), "西北下": (2, 10, 26, 17),
+                 "东北上": (32, 2, 57, 8), "东北下": (32, 10, 57, 17),
+                 "西南上": (2, 23, 26, 29), "西南下": (2, 31, 26, 37),
+                 "东南上": (32, 23, 57, 29), "东南下": (32, 31, 57, 37)}
+        per_room = {k: 0 for k in rooms}
+        for kind, (ex, ey) in m.scav_spawns:
+            tx, ty = int(ex // 32), int(ey // 32)
+            assert not m.tile_solid(tx, ty), f"匪徒刷新点在墙里 {kind} {tx},{ty}"
+            in_room = [k for k, (x1, y1, x2, y2) in rooms.items()
+                       if x1 <= tx <= x2 and y1 <= ty <= y2]
+            assert len(in_room) == 1, f"刷新点不在任何房间内:{tx},{ty}"
+            per_room[in_room[0]] += 1
+            assert m.astar(st, (tx, ty)) is not None, "匪徒刷新点不可达"
+        assert all(c >= 2 for c in per_room.values()), per_room
         # 95% 以上是房间/走廊:室外地面占比很低
         rows = MAPS["indoor"]["rows"]
         outdoor = sum(row.count(".") for row in rows)
@@ -1354,6 +1375,11 @@ def run():
         assert r.mode == "hostage" and r.map_key == "indoor"
         assert r.boss_cfg is None, "人质模式没有头目"
         assert len(r.scavs) == HOSTAGE_ENEMIES
+        # 实际开局的敌人同样分散在多个房间,不是全挤在一间
+        used_rooms = {k for s in r.scavs
+                      for k, (x1, y1, x2, y2) in rooms.items()
+                      if x1 <= int(s.x // 32) <= x2 and y1 <= int(s.y // 32) <= y2}
+        assert len(used_rooms) == len(rooms), used_rooms
         assert len(r.allies) == ALLY_COUNT and len(r.hostages) == HOSTAGE_COUNT
         p = r.player
         # 4) 队友自动开火
@@ -1416,6 +1442,108 @@ def run():
         pygame.display.flip()
 
     check("人质模式-室内图/队友/救援/任务判定", t_hostage)
+
+    def t_attach():
+        """配件系统 + 枪械天赋 + 弹药分级(霰弹双弹种 / 步枪穿甲)。"""
+        from game import Game
+        from settings import (ITEMS, TRADE_TABS, TRADE_GOODS, trade_cat_match,
+                              weapon_capacity, weapon_params, weapon_slots,
+                              weapon_ammo_ids, TALENTS, ATTACH_SLOTS)
+        # 1) 配件数据与分区
+        attach_items = [i for i, d in ITEMS.items() if d["cat"] == "attach"]
+        assert len(attach_items) >= 8, attach_items
+        for iid in attach_items:
+            d = ITEMS[iid]
+            assert d.get("slot") in ATTACH_SLOTS, iid
+            assert ("mag_bonus" in d) or ("brace_mul" in d) or ("hip_mul" in d), iid
+        assert any(key == "attach" for _l, key in TRADE_TABS), "缺少配件分区"
+        goods = [g for g in TRADE_GOODS if trade_cat_match(g[0], "attach")]
+        assert goods and all(ITEMS[i]["cat"] == "attach" for i, _c in goods)
+        # 2) 弹夹扩容(巨浪弹匣太小 -> 弹鼓)
+        w = Item.weapon("asval", mag=20)
+        assert weapon_capacity(w) == 20
+        w.state.setdefault("attach", {})["mag"] = "mag_drum"
+        assert weapon_capacity(w) == 40, weapon_capacity(w)
+        # 3) 握把降架枪散布 / 激光降腰射散布
+        w2 = Item.weapon("ak74", mag=30)
+        hip0, braced0 = weapon_params(w2)[2], weapon_params(w2)[3]
+        w2.state.setdefault("attach", {})["grip"] = "grip_ang"
+        hip1, braced1 = weapon_params(w2)[2], weapon_params(w2)[3]
+        assert braced1 < braced0 * 0.9, (braced0, braced1)
+        assert abs(hip1 - hip0) < 1e-9, (hip0, hip1)      # 握把不影响腰射
+        w2.state["attach"]["laser"] = "laser_ir"
+        hip2 = weapon_params(w2)[2]
+        assert hip2 < hip1 * 0.9, (hip1, hip2)
+        # 4) 天赋
+        assert TALENTS["akm"]["dmg_mul"] > 1
+        assert weapon_params(Item.weapon("akm"))[0] > ITEMS["akm"]["dmg"]
+        assert weapon_params(Item.weapon("vector"))[5] < 1.0      # 装填更快
+        assert weapon_params(Item.weapon("m700"))[3] < ITEMS["m700"]["spread"]
+        # 5) M139 不装配件
+        assert weapon_slots("m139") == []
+        # 6) 弹药分级
+        assert "a12" not in ITEMS, "旧霰弹应被龙息/独头弹取代"
+        assert set(weapon_ammo_ids(Item.weapon("mp133"))) == {"a12db", "a12ap"}
+        assert weapon_params(Item.weapon("mp133"))[1] >= 5        # 龙息:多弹丸
+        it_ap = Item.weapon("mp133")
+        it_ap.state["loaded"] = "a12ap"
+        ap = weapon_params(it_ap)
+        assert ap[1] == 1 and ap[0] > 30, ap[:2]                  # 独头弹:单发高伤
+        for rid in ("ak74", "akm", "m4a1", "m700"):
+            for aid in weapon_ammo_ids(Item.weapon(rid)):
+                assert ITEMS[aid].get("dmg_mul", 1.0) > 1.0, (rid, aid)
+        # 7) 藏身处安装配件(含机枪拒绝)
+        g = Game()
+        g.save = save_mod.reset_data()
+        sd = g.save
+        h = g.hideout
+        h.show_intro = False
+        sd.stash.clear()
+        sd.bag.clear()
+        sd.weapon = Item.weapon("mp5", mag=30)
+        sd.stash.add_item(Item("mag_drum_big"))
+        pl = next(p for p in sd.stash.items if p.item.iid == "mag_drum_big")
+        h._install_attachment(sd, pl)
+        assert weapon_capacity(sd.weapon) == 60, weapon_capacity(sd.weapon)
+        assert not sd.stash.items, "配件应从仓库装到枪上"
+        sd.weapon = Item.weapon("m139", mag=500)
+        sd.stash.add_item(Item("mag_drum_big"))
+        pl = next(p for p in sd.stash.items if p.item.iid == "mag_drum_big")
+        h._install_attachment(sd, pl)
+        assert weapon_capacity(sd.weapon) == 500, "机枪不该装弹夹"
+        # 8) 战局:装填记录弹种 + 龙息点燃
+        g2 = Game()
+        g2.save = save_mod.reset_data()
+        g2.save.weapon = Item.weapon("mp133", mag=0)
+        g2.save.bag.clear()
+        g2.save.bag.add_item(Item("a12db", count=10))
+        g2.start_raid()
+        r = g2.raid
+        s = r.scavs[0]
+        for other in r.scavs[1:]:
+            other.x, other.y = r.player.x + 4000, r.player.y + 4000
+        w3 = r.player.weapon
+        r.start_reload()
+        r._finish_reload()
+        assert w3.state.get("loaded") == "a12db", w3.state
+        assert w3.state["mag"] == 4, w3.state
+        s.x, s.y = r.player.x + 60, r.player.y
+        s.hp = 400
+        r.braced = True
+        r.player.fire_cd = 0
+        r.player.aim = 0.0
+        r.fire_edge = True
+        r.try_fire(True)
+        r.fire_edge = False
+        for _ in range(10):
+            r.update(1 / 60, [])
+        assert getattr(s, "burn_t", 0) > 0, "龙息弹应点燃敌人"
+        hp_hit = s.hp
+        for _ in range(60):
+            r.update(1 / 60, [])
+        assert s.hp < hp_hit, (hp_hit, s.hp)
+
+    check("配件-弹夹/握把/激光/天赋/弹药分级", t_attach)
 
     ok = all(r[1] for r in results)
     report = ["Tarkov2D selftest " + ("PASS" if ok else "FAIL"), ""]

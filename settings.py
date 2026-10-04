@@ -3,7 +3,7 @@
 import pygame
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "1.0.9"
+GAME_VERSION = "1.1.2"
 # 更新清单地址(可换成自建服务器 / GitHub raw;留空则只认 EXE 同目录的 version.json)
 UPDATE_MANIFEST_URL = "http://127.0.0.1:8765/version.json"
 UPDATE_TIMEOUT = 3   # 检查 / 下载超时(秒)
@@ -108,14 +108,20 @@ ITEMS = {
                 ammo="a9", dmg=12, pellets=1, spread=0.075, spread_braced=0.036,
                 rof=0.105, auto=True, mag=30, range=760, loud=760, sfx="mp5"),
     "mp133": dict(name="MP-133 霰弹枪", cat="weapon", w=4, h=1, color=(152, 96, 52), price=22000,
-                  ammo="a12", dmg=9, pellets=7, spread=0.20, spread_braced=0.115,
+                  ammo=["a12db", "a12ap"], dmg=9, pellets=7, spread=0.20,
+                  spread_braced=0.115,
                   rof=0.95, auto=False, mag=4, range=430, loud=880, sfx="sg"),
     "ak74": dict(name="AK-74 突击步枪", cat="weapon", w=5, h=2, color=(124, 84, 58), price=52000,
                  ammo="a545", dmg=20, pellets=1, spread=0.095, spread_braced=0.045,
                  rof=0.115, auto=True, mag=30, range=900, loud=920, sfx="ar"),
     "a9": dict(name="9×19mm 子弹", cat="ammo", w=1, h=1, color=(232, 182, 62), price=60, stack=120),
-    "a545": dict(name="5.45×39 子弹", cat="ammo", w=1, h=1, color=(208, 66, 66), price=90, stack=120),
-    "a12": dict(name="12号霰弹", cat="ammo", w=1, h=1, color=(104, 72, 168), price=120, stack=120),
+    "a545": dict(name="5.45×39 穿甲弹", cat="ammo", w=1, h=1, color=(208, 66, 66),
+                 price=120, stack=120, dmg_mul=1.30),
+    "a12db": dict(name="12号龙息弹", cat="ammo", w=1, h=1, color=(226, 120, 40),
+                  price=260, stack=40, pellets=6, dmg_mul=0.80, spread_add=0.06, burn=9),
+    "a12ap": dict(name="12号穿甲独头弹", cat="ammo", w=1, h=1, color=(140, 160, 200),
+                  price=420, stack=30, pellets=1, dmg_mul=5.00, spread_add=-0.14,
+                  range_mul=1.25),
     "bandage": dict(name="绷带", cat="med", w=1, h=1, color=(238, 238, 238), price=1200, heal=20),
     "medkit": dict(name="军用医疗包", cat="med", w=2, h=1, color=(232, 74, 74), price=7500, heal=55),
     # 更多药品(价格 / 治疗量阶梯)
@@ -165,9 +171,12 @@ ITEMS.update({
     "m700": dict(name="M700 狙击步枪", cat="weapon", w=6, h=2, color=(96, 70, 52), price=96000,
                  ammo="a54r", dmg=78, pellets=1, spread=0.02, rof=1.5, auto=False, mag=5,
                  range=1400, loud=1050, sfx="sg"),
-    "a556": dict(name="5.56×45 子弹", cat="ammo", w=1, h=1, color=(226, 140, 60), price=110, stack=120),
-    "a762": dict(name="7.62×39 子弹", cat="ammo", w=1, h=1, color=(180, 96, 44), price=90, stack=120),
-    "a54r": dict(name="7.62×54R 子弹", cat="ammo", w=1, h=1, color=(150, 60, 90), price=160, stack=120),
+    "a556": dict(name="5.56×45 穿甲弹", cat="ammo", w=1, h=1, color=(226, 140, 60),
+                 price=140, stack=120, dmg_mul=1.30),
+    "a762": dict(name="7.62×39 穿甲弹", cat="ammo", w=1, h=1, color=(180, 96, 44),
+                 price=120, stack=120, dmg_mul=1.30),
+    "a54r": dict(name="7.62×54R 穿甲弹", cat="ammo", w=1, h=1, color=(150, 60, 90),
+                 price=200, stack=120, dmg_mul=1.35),
     # M139 装轮机枪:500 发弹容,需 6 级甲才能持用;腰射散布大,长按右键架枪大幅收拢
     "m139": dict(name="M139 装轮机枪", cat="weapon", w=5, h=3, color=(76, 82, 92),
                  price=320000, ammo="a762x45", dmg=24, pellets=1,
@@ -241,7 +250,7 @@ SCAVS = {
 # 击杀掉落:武器 -> (武器iid, 弹药iid, 弹药min, 弹药max)
 SCAV_DROPS = {
     "pistol": ("pm", "a9", 8, 16),
-    "shotgun": ("mp133", "a12", 4, 8),
+    "shotgun": ("mp133", "a12db", 4, 8),
     "ar": ("ak74", "a545", 10, 25),
 }
 
@@ -269,7 +278,7 @@ TRADE_GOODS = [
     ("pm", 1), ("mp133", 1), ("mp5", 1), ("ak74", 1),
     ("m4a1", 1), ("akm", 1), ("m700", 1), ("m139", 1),
     # 弹药(按盒)
-    ("a9", 30), ("a545", 30), ("a12", 20),
+    ("a9", 30), ("a545", 30), ("a12db", 30), ("a12ap", 20),
     ("a556", 30), ("a762", 30), ("a54r", 20), ("a762x45", 30),
     # 医疗 / 护甲 / 背包
     ("bandage", 1), ("medkit", 1),
@@ -368,25 +377,150 @@ SPECIAL_WEAPONS = ["asval", "vector", "pkp", "rpg", "rpg2"]
 
 # 交易所新增:5 级甲、头目枪械与弹种、火箭弹、更多药品
 TRADE_GOODS += [("pack_small", 1), ("b23", 1), ("zhuk", 1), ("korund", 1),
+                ("mag_ext", 1), ("mag_drum", 1), ("mag_drum_big", 1),
+                ("grip_vert", 1), ("grip_ang", 1), ("laser_tac", 1), ("laser_ir", 1),
+                ("stock_tac", 1), ("stock_heavy", 1),
                 ("a939", 30), ("a45", 30), ("rocket", 1),
                 ("painkiller", 1), ("tourniquet", 1), ("syringe", 1),
                 ("ai2", 1), ("surgery", 1)]
 TRADE_GOODS += [(iid, 1) for iid in SPECIAL_WEAPONS]
 
 # 交易站分区:(标签名, 分区键;None = 全部)
-TRADE_TABS = [("全部", None), ("枪械", "weapon"), ("特殊枪械", "special"),
+TRADE_TABS = [("全部", None), ("枪械", "weapon"), ("特殊枪械", "special"), ("配件", "attach"),
               ("护甲", "armor"), ("背包", "pack"), ("子弹", "ammo"),
               ("药品", "med")]
 TRADE_PAGE_H = 450      # 商品区可见高度(像素);超出时用滚轮翻看
 
+# ---------- 枪械配件 ----------
+# slot: mag 弹夹 / grip 前握把 / laser 激光 / stock 后握把
+# 效果:mag_bonus 加弹容;brace_mul 架枪散布倍率(越小越准);hip_mul 腰射散布倍率
+ATTACH_SLOTS = {"mag": "弹夹", "grip": "前握把", "laser": "激光", "stock": "后握把"}
+ITEMS.update({
+    "mag_ext": dict(name="加长弹夹", cat="attach", slot="mag", w=1, h=1,
+                    color=(150, 150, 160), price=6000, mag_bonus=10, desc="弹容 +10"),
+    "mag_drum": dict(name="弹鼓", cat="attach", slot="mag", w=1, h=2,
+                     color=(120, 124, 134), price=14000, mag_bonus=20, desc="弹容 +20"),
+    "mag_drum_big": dict(name="大弹鼓", cat="attach", slot="mag", w=2, h=2,
+                         color=(96, 100, 110), price=26000, mag_bonus=30, desc="弹容 +30"),
+    "grip_vert": dict(name="垂直握把", cat="attach", slot="grip", w=1, h=1,
+                      color=(88, 92, 100), price=5000, brace_mul=0.88, desc="架枪散布 -12%"),
+    "grip_ang": dict(name="斜角握把", cat="attach", slot="grip", w=1, h=1,
+                     color=(76, 84, 96), price=12000, brace_mul=0.80, desc="架枪散布 -20%"),
+    "laser_tac": dict(name="战术激光", cat="attach", slot="laser", w=1, h=1,
+                      color=(200, 90, 90), price=6000, hip_mul=0.90, desc="腰射散布 -10%"),
+    "laser_ir": dict(name="红外激光", cat="attach", slot="laser", w=1, h=1,
+                     color=(190, 60, 70), price=15000, hip_mul=0.82, desc="腰射散布 -18%"),
+    "stock_tac": dict(name="战术枪托", cat="attach", slot="stock", w=2, h=1,
+                      color=(96, 92, 84), price=7000, brace_mul=0.92, hip_mul=0.96,
+                      desc="架枪 -8% · 腰射 -4%"),
+    "stock_heavy": dict(name="重型枪托", cat="attach", slot="stock", w=2, h=1,
+                        color=(80, 78, 72), price=18000, brace_mul=0.85, hip_mul=0.92,
+                        desc="架枪 -15% · 腰射 -8%"),
+})
+
+# ---------- 枪械天赋(每把枪自带) ----------
+# dmg_mul 伤害倍率; spread_mul 全部散布; brace_mul 架枪散布; reload_mul 装填时间; loud_mul 枪声; blast_mul 爆炸半径
+TALENTS = {
+    "pm": dict(name="顺手", desc="无特殊效果"),
+    "mp5": dict(name="扫射专精", desc="散布 -10%", spread_mul=0.90),
+    "mp133": dict(name="近身压制", desc="架枪散布 -10%", brace_mul=0.90),
+    "ak74": dict(name="老伙计", desc="散布 -8%", spread_mul=0.92),
+    "m4a1": dict(name="战术本能", desc="装填速度 +35%", reload_mul=0.65),
+    "akm": dict(name="重弹头", desc="伤害 +10%", dmg_mul=1.10),
+    "m700": dict(name="一枪入魂", desc="架枪散布 -40%", brace_mul=0.60),
+    "m139": dict(name="金属风暴", desc="机枪不装配件", spread_mul=1.0),
+    "asval": dict(name="潜行刺客", desc="枪声 -60% · 架枪 -15%",
+                  loud_mul=0.40, brace_mul=0.85),
+    "vector": dict(name="狂飙", desc="装填速度 +50%", reload_mul=0.50),
+    "pkp": dict(name="弹链供给", desc="装填速度 +40%", reload_mul=0.60),
+    "rpg": dict(name="轰天雷", desc="爆炸溅射更远", blast_mul=1.25),
+    "rpg2": dict(name="四连轰", desc="爆炸溅射更远", blast_mul=1.25),
+}
+
+# 武器可装的配件槽(M139 机枪按需求不装任何配件)
+WEAPON_SLOTS = {
+    "pm": [], "mp5": ["mag", "grip", "laser", "stock"],
+    "mp133": ["mag", "grip", "laser"],
+    "ak74": ["mag", "grip", "laser", "stock"],
+    "m4a1": ["mag", "grip", "laser", "stock"],
+    "akm": ["mag", "grip", "laser", "stock"],
+    "m700": ["mag", "laser", "stock"],
+    "m139": [], "asval": ["mag", "grip", "laser"],
+    "vector": ["mag", "grip", "laser", "stock"],
+    "pkp": ["laser"], "rpg": [], "rpg2": [],
+}
+
+
+def weapon_slots(iid):
+    return WEAPON_SLOTS.get(iid, [])
+
+
+def weapon_talent(iid):
+    return TALENTS.get(iid)
+
+
+def weapon_attach(item):
+    return (item.state.get("attach") or {}) if item is not None else {}
+
+
+def weapon_capacity(item):
+    """有效弹容 = 基础弹容 + 配件加成。"""
+    if item is None:
+        return 0
+    cap = item.def_["mag"]
+    for iid in weapon_attach(item).values():
+        cap += ITEMS.get(iid, {}).get("mag_bonus", 0)
+    return cap
+
+
+def weapon_params(item):
+    """(伤害, 弹丸数, 腰射散布, 架枪散布, 射程, 装填时间, 枪声, 燃烧伤害)。
+    综合武器基础值 + 当前装填的弹种 + 配件 + 天赋。"""
+    d = item.def_
+    ammo_ids = d["ammo"] if isinstance(d["ammo"], list) else [d["ammo"]]
+    loaded = item.state.get("loaded")
+    if loaded not in ammo_ids:
+        loaded = ammo_ids[0] if ammo_ids else None
+    a = ITEMS.get(loaded, {})
+    tal = TALENTS.get(item.iid, {})
+    dmg = d["dmg"] * a.get("dmg_mul", 1.0) * tal.get("dmg_mul", 1.0)
+    pellets = a.get("pellets", d.get("pellets", 1))
+    spread_add = a.get("spread_add", 0.0)
+    hip = d["spread"] + spread_add
+    braced = d.get("spread_braced", d["spread"]) + max(0.0, spread_add * 0.4)
+    hip_mul = tal.get("spread_mul", 1.0)
+    braced_mul = tal.get("spread_mul", 1.0)
+    for iid in weapon_attach(item).values():
+        att = ITEMS.get(iid, {})
+        hip_mul *= att.get("hip_mul", 1.0)
+        braced_mul *= att.get("brace_mul", 1.0)
+    braced_mul *= tal.get("brace_mul", 1.0)
+    hip *= hip_mul
+    braced *= braced_mul
+    return (dmg, pellets, hip, braced, d["range"] * a.get("range_mul", 1.0),
+            1.6 * tal.get("reload_mul", 1.0), d["loud"] * tal.get("loud_mul", 1.0),
+            a.get("burn", 0.0))
+
+
+def weapon_ammo_ids(item):
+    if item is None:
+        return []
+    a = item.def_["ammo"]
+    return list(a) if isinstance(a, list) else [a]
+
+
+def weapon_blast_mul(item):
+    tal = TALENTS.get(item.iid, {}) if item is not None else {}
+    return tal.get("blast_mul", 1.0)
+
 # ---------- 游戏模式 ----------
 MODES = {
     "raid": dict(name="搜打撤", desc="自由搜刮 · 找撤离点撤离"),
-    "hostage": dict(name="人质解救", desc="室内近战 · 救出 4 名人质后撤离"),
+    "hostage": dict(name="人质解救", desc="室内近战 · 20 名匪徒分守八间房 · 救出 4 名人质"),
 }
 MODE_ORDER = ["raid", "hostage"]
 HOSTAGE_COUNT = 4          # 人质数量
-HOSTAGE_ENEMIES = 6        # 人质模式的敌人上限
+HOSTAGE_ENEMIES = 20       # 人质模式的敌人数量下限(地图上的刷新点按房间均匀布置)
 ALLY_COUNT = 3             # 队友数量
 ALLY_HP = 130
 ALLY_DMG = 13
@@ -419,7 +553,7 @@ def trade_cat_match(iid, key):
 # ---------- 拾荒战利品表 (iid, 最大数量, 权重) ----------
 LOOT = {
     # 补给箱:以杂物为主,金色物品概率被摊薄
-    "crate": [("a9", 30, 10), ("a545", 30, 8), ("a12", 20, 8), ("bandage", 1, 10),
+    "crate": [("a9", 30, 10), ("a545", 30, 8), ("a12db", 20, 8), ("bandage", 1, 10),
               ("medkit", 1, 4), ("gold", 1, 3), ("cpu", 1, 2), ("pm", 1, 3),
               ("mp5", 1, 3), ("paca", 1, 2), ("pack_small", 1, 3), ("pack_mid", 1, 2),
               # 杂物(权重高,产出多)
@@ -437,9 +571,11 @@ LOOT = {
             ("filter", 1, 5), ("wire", 1, 5), ("canteen", 1, 4)],
     "gun": [("pm", 1, 6), ("mp133", 1, 7), ("mp5", 1, 6), ("ak74", 1, 5),
             ("m4a1", 1, 3), ("akm", 1, 3), ("m700", 1, 2), ("m139", 1, 1),
-            ("a9", 30, 6), ("a545", 30, 7), ("a12", 20, 5),
+            ("a9", 30, 6), ("a545", 30, 7), ("a12db", 20, 5), ("a12ap", 20, 4),
             ("a556", 30, 4), ("a762", 30, 4), ("a54r", 20, 3), ("a762x45", 30, 2),
             ("a939", 30, 2), ("a45", 30, 2),
+            ("mag_ext", 1, 4), ("grip_vert", 1, 4), ("laser_tac", 1, 3),
+            ("stock_tac", 1, 3), ("mag_drum", 1, 2), ("grip_ang", 1, 2),
             ("fort", 1, 2), ("wrench", 1, 6), ("tape", 1, 6), ("screws", 1, 6),
             ("relay", 1, 5), ("flashlight", 1, 5), ("hose", 1, 4)],
     # 保险箱:值钱货与高阶杂物(金色物品仍是最稀有的);5 级甲小概率开出

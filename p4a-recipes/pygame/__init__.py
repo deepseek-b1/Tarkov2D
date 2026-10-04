@@ -1,14 +1,20 @@
 """
-Tarkov2D 专用 pygame 配方(基于 p4a 官方配方,只加一处修复)。
+Project-local pygame recipe for Tarkov2D (based on p4a's official recipe).
 
-问题:用 p4a 默认配方编出来的 pygame 2.5.2,在 arm64 上运行时报
+Why this file exists
+--------------------
+The pygame built by p4a's stock recipe crashes on arm64 at runtime:
+
     ImportError: dlopen failed: cannot locate symbol
     "alphablit_alpha_sse2_argb_surf_alpha" referenced by ".../pygame/surface.so"
-这个符号是 pygame 的 **x86 SSE2** 专用 SIMD 函数(名字里的 sse2 就是它),
-在 arm64 上根本不存在,于是 surface.so 加载失败 -> pygame.display 不可用 ->
-游戏在 pygame.display.set_mode() 处崩溃(exit 255)。
 
-修法:构建时关掉 pygame 的 SIMD 汇编路径,让它走纯 C 实现。
+That symbol is an x86 SSE2-only SIMD blitter (note the "sse2" in the name).
+p4a's cross-compile setup ends up linking x86 SIMD blitters into the arm64
+build, so surface.so cannot be loaded, pygame.display becomes unavailable,
+and the game dies in pygame.display.set_mode() with exit status 255.
+
+Fix: build with the SIMD blitter path disabled so pygame uses plain C code.
+This is the ONLY difference from the upstream recipe.
 """
 from os.path import join
 
@@ -70,8 +76,7 @@ class Pygame2Recipe(CompiledComponentsPythonRecipe):
         env['USE_SDL2'] = '1'
         env["PYGAME_CROSS_COMPILE"] = "TRUE"
         env["PYGAME_ANDROID"] = "TRUE"
-        # ==== 本配方唯一的改动:关掉 SIMD/SSE 汇编 ====
-        # 否则 surface.so 会引用 x86 SSE2 符号,arm64 上 dlopen 失败。
+        # ==== the only change vs upstream: disable the SIMD blitter path ====
         env["PYGAME_DISABLE_SIMD"] = "1"
         env["PS_DISABLE_SIMD"] = "1"
         cflags = env.get("CFLAGS", "")

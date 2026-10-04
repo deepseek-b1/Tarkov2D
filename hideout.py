@@ -8,6 +8,7 @@ import audio
 import intro
 import save as save_mod
 from settings import (W, H, COL, fmt_rub, get_font, DIFF_ORDER, DIFFICULTIES,
+                      weapon_slots, weapon_attach, weapon_capacity, ATTACH_SLOTS,
                       ITEMS, TRADE_GOODS, TRADE_TABS, TRADE_PAGE_H,
                       trade_buy_price, trade_sell_price,
                       armor_allows, MAPS, MAP_ORDER, MODES, MODE_ORDER, MODE_MAP)
@@ -61,7 +62,7 @@ class Hideout:
         self.trade_cat = None            # 当前分区(None = 全部)
         self.trade_scroll = 0.0          # 滚轮偏移(像素)
         self.trade_tab_rects = [
-            pygame.Rect(548 + i * 100, 132, 92, 30) for i in range(len(TRADE_TABS))]
+            pygame.Rect(548 + i * 86, 132, 80, 30) for i in range(len(TRADE_TABS))]
         self.trade_view_top = 178        # 商品区可见范围
         self.trade_view_bottom = 178 + TRADE_PAGE_H
         self.trade_close = pygame.Rect(1140, 76, 100, 36)
@@ -281,6 +282,8 @@ class Hideout:
                     sd.armor = item
                     save_mod.save_data(sd)
                     self.say(f"装备护甲 {item.name}")
+                elif item.cat == "attach":
+                    self._install_attachment(sd, placed)
                 elif item.cat == "pack":
                     idx = sd.stash.items.index(placed)
                     ok, msg = self._try_equip_pack(idx)
@@ -305,6 +308,32 @@ class Hideout:
                 else:
                     self.say("仓库空间不足", COL["bad"])
             return
+
+    # ---------- 配件安装 ----------
+    def _install_attachment(self, sd, placed):
+        item = placed.item
+        w = sd.weapon
+        slot = item.def_.get("slot")
+        if w is None:
+            self.say("先装备武器,再点配件安装", COL["bad"], 3.0)
+            return
+        if slot not in weapon_slots(w.iid):
+            self.say(f"{w.name} 不支持{ATTACH_SLOTS.get(slot, '该')}配件"
+                     + ("(机枪不装配件)" if w.iid == "m139" else ""),
+                     COL["bad"], 3.2)
+            return
+        old = weapon_attach(w).get(slot)
+        if old is not None and not sd.stash.add_item(Item(old)):
+            self.say("仓库空间不足,无法换下旧配件", COL["bad"])
+            return
+        sd.stash.remove_placed(placed)
+        w.state.setdefault("attach", {})[slot] = item.iid
+        cap = weapon_capacity(w)
+        if w.state.get("mag", 0) > cap:
+            w.state["mag"] = cap
+        save_mod.save_data(sd)
+        self.say(f"已给 {w.name} 装上 {item.name}({ATTACH_SLOTS.get(slot, '')})",
+                 COL["good"], 3.0)
 
     # ---------- 背包装卸(克隆试算,失败不改动) ----------
     @staticmethod

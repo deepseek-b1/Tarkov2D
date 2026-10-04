@@ -413,8 +413,11 @@ def _draw_hud(raid, screen):
 
 
 def ITEMS_CAL(d):
+    """HUD 口径行。霰弹枪的 ammo 是弹种列表(龙息弹/穿甲独头弹),要逐项取名。"""
     from settings import ITEMS
-    return ITEMS[d["ammo"]]["name"]
+    ammo = d["ammo"]
+    ids = ammo if isinstance(ammo, list) else [ammo]
+    return "/".join(ITEMS[a]["name"] for a in ids if a in ITEMS)
 
 
 def _close_button(surface, rect):

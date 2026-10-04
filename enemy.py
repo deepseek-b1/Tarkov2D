@@ -44,6 +44,8 @@ class Scav:
         self.wander_t = random.uniform(0.5, 2.0)
         self.dead = False
         self.hit_flash = 0.0
+        self.burn_t = 0.0        # 燃烧剩余时间(龙息弹)
+        self.burn_dps = 0.0
 
     @property
     def pos(self):

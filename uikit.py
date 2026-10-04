@@ -2,7 +2,9 @@
 """共享 UI 组件:格子容器绘制、物品图标、悬浮提示、按钮。"""
 import pygame
 
-from settings import get_font, COL, fmt_rub, ITEMS
+from settings import (get_font, COL, fmt_rub, ITEMS, ATTACH_SLOTS,
+                      weapon_params, weapon_capacity, weapon_ammo_ids,
+                      weapon_slots, weapon_attach, weapon_talent)
 from inventory import Container, Placed
 
 CELL = 40  # 界面格子像素
@@ -83,6 +85,12 @@ def draw_item_icon(surface, item, x, y, cell=CELL):
                         (cx - 10, inner.top + 2, 20, 20), 0.3, 2.9, 3)
         pygame.draw.line(surface, (28, 28, 32), (inner.left + 3, cy + 4),
                          (inner.right - 3, cy + 4), 2)
+    elif cat == "attach":
+        # 配件:导轨 + 镜筒
+        pygame.draw.rect(surface, (30, 30, 34),
+                         (inner.left + 2, cy - 3, inner.w - 4, 8), border_radius=2)
+        pygame.draw.circle(surface, (30, 30, 34), (cx, cy - 6), 6, 3)
+        pygame.draw.line(surface, (30, 30, 34), (cx, cy - 3), (cx, cy - 1), 3)
     elif cat == "misc":
         # 杂物:六角螺母 + 中心孔
         pygame.draw.polygon(surface, (44, 44, 50), [
@@ -142,16 +150,39 @@ def item_info_lines(item):
     w, h = item.base_size()
     sub = [f"{w}×{h} 格  {fmt_rub(d['price'])}"]
     if item.cat == "weapon":
-        sub.append(f"伤害 {d['dmg']}×{d['pellets']}  射速 {d['rof']}s  弹匣 {item.state.get('mag', 0)}/{d['mag']}")
-        sub.append(f"弹药: {ITEMS[d['ammo']]['name']}  {'全自动' if d['auto'] else '半自动'}")
+        dmg, pellets, hip, braced_s, rng, rl_t, _loud, burn = weapon_params(item)
+        cap = weapon_capacity(item)
+        sub.append(f"伤害 {dmg:.0f}×{pellets}  射速 {d['rof']}s  "
+                   f"弹匣 {item.state.get('mag', 0)}/{cap}")
+        names = "/".join(ITEMS[a]["name"] for a in weapon_ammo_ids(item) if a in ITEMS)
+        sub.append(f"弹药: {names}  {'全自动' if d['auto'] else '半自动'}")
+        if burn:
+            sub.append(f"★ 燃烧伤害 {burn:.0f}/秒")
         if d.get("spread_braced") is not None:
-            sub.append(f"散布:腰射 ±{d['spread']} → 长按右键架枪 ±{d['spread_braced']}")
+            sub.append(f"散布:腰射 ±{hip:.3f} → 架枪 ±{braced_s:.3f}")
             if d.get("braced_immobile"):
                 sub.append("★ 架枪时无法移动(重型机枪)")
         else:
-            sub.append(f"散布:±{d['spread']}(狙击枪,不参与架枪)")
+            sub.append(f"散布:±{hip:.3f}(狙击枪,不参与架枪)")
+        tal = weapon_talent(item.iid)
+        if tal:
+            sub.append(f"天赋·{tal['name']}:{tal.get('desc', '')}")
+        slots = weapon_slots(item.iid)
+        att = weapon_attach(item)
+        if slots:
+            parts = [f"{ATTACH_SLOTS[s]}:"
+                     + (ITEMS[att[s]]["name"] if s in att else "空") for s in slots]
+            sub.append(" ".join(parts))
+        elif item.iid == "m139":
+            sub.append("机枪不可装配件")
+        loaded = item.state.get("loaded")
+        if loaded in ITEMS:
+            sub.append(f"当前装填:{ITEMS[loaded]['name']}")
         if d.get("req_armor_level"):
             sub.append(f"★ 需装备 {d['req_armor_level']} 级护甲才能持用")
+    elif item.cat == "attach":
+        sub.append(f"{ATTACH_SLOTS.get(d.get('slot'), '配件')} · {d.get('desc', '')}")
+        sub.append("在藏身处装备武器后点它即可安装")
     elif item.cat == "armor":
         txt = ""
         if d.get("level"):

@@ -14,6 +14,8 @@ from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       RPG_HALF_HP_ARMOR_LEVEL, TOUCH, MODES, MODE_MAP,
                       HOSTAGE_COUNT, HOSTAGE_ENEMIES, ALLY_COUNT,
                       HOSTAGE_RESCUE_TIME, REVIVE_TIME, INTERACT_RANGE, ALLY_DMG,
+                      weapon_params, weapon_capacity, weapon_ammo_ids,
+                      weapon_slots, weapon_attach, weapon_blast_mul, ATTACH_SLOTS,
                       fmt_rub, get_font)
 from inventory import Item, try_move
 from world import GameMap, LootContainer
@@ -98,8 +100,8 @@ class Player:
     def reserve_count(self):
         if self.weapon is None:
             return 0
-        ammo = self.weapon.def_["ammo"]
-        return sum(p.item.count for p in self.bag.items if p.item.iid == ammo)
+        ids = weapon_ammo_ids(self.weapon)
+        return sum(p.item.count for p in self.bag.items if p.item.iid in ids)
 
 
 class Raid:
@@ -129,7 +131,7 @@ class Raid:
 
         self.scavs = [Scav(k, x, y, self.diff) for k, (x, y) in self._pick_spawns()]
         if self.mode == "hostage":
-            # 人质模式:敌人固定上限(6 个),没有头目/手下/作者
+            # 人质模式:匪徒固定 20 名(刷新点按房间均匀分布),没有头目/手下/作者
             random.shuffle(self.scavs)
             self.scavs = self.scavs[:HOSTAGE_ENEMIES]
         else:
@@ -201,9 +203,12 @@ class Raid:
 
     # ---------- 战利品 ----------
     def _pick_spawns(self):
-        """按难度决定敌人数量与位置。"""
+        """按难度决定敌人数量与位置。人质模式固定不低于 HOSTAGE_ENEMIES。"""
         spawns = list(self.map.scav_spawns)
         wanted = self.diff["scavs"]
+        if self.mode == "hostage":
+            # 室内图的刷新点本身就是按房间均匀摆设的,取满即可保证分散
+            wanted = max(wanted, HOSTAGE_ENEMIES)
         if wanted <= len(spawns):
             return random.sample(spawns, wanted) if wanted < len(spawns) else spawns
         px, py = self.map.spawn
@@ -240,9 +245,10 @@ class Raid:
                 if d["cat"] == "weapon":
                     it.state["mag"] = random.randint(0, d["mag"])
                     if random.random() < 0.5:
-                        ammo = ITEMS[d["ammo"]]
-                        lc.container.add_item(Item(d["ammo"],
-                                                    count=random.randint(8, min(30, ammo.get("stack", 30)))))
+                        aid = random.choice(weapon_ammo_ids(it))
+                        ammo = ITEMS[aid]
+                        lc.container.add_item(Item(
+                            aid, count=random.randint(8, min(30, ammo.get("stack", 30)))))
             lc.container.add_item(it)
 
     def _scav_drops(self, kind):
@@ -463,28 +469,28 @@ class Raid:
             if self.fire_edge:
                 audio.play("empty")
             return
+        dmg, pellets, hip, braced_s, rng, _rl, loud, burn = weapon_params(w)
         w.state["mag"] -= 1
         p.fire_cd = d["rof"]
         tx = p.x + math.cos(p.aim) * 22
         ty = p.y + math.sin(p.aim) * 22
-        # 架枪(长按右键)可大幅收拢散布:M139 等重型武器腰射很散
-        spread = d["spread"]
-        if self.braced and d.get("spread_braced") is not None:
-            spread = d["spread_braced"]
-        for _ in range(d["pellets"]):
+        # 架枪(长按右键)用架枪散布;腰射用腰射散布(配件/天赋都会影响)
+        spread = braced_s if self.braced else hip
+        is_rpg = "rocket" in weapon_ammo_ids(w)
+        for _ in range(pellets):
             ang = p.aim + random.uniform(-spread, spread)
-            is_rpg = d.get("ammo") == "rocket"
             spd = 520.0 if is_rpg else 1100.0
             self.bullets.append(dict(x=tx, y=ty, dx=math.cos(ang) * spd,
-                                     dy=math.sin(ang) * spd, dmg=d["dmg"],
-                                     owner="player", ttl=d["range"] / spd,
-                                     rpg=is_rpg))
+                                     dy=math.sin(ang) * spd, dmg=dmg,
+                                     owner="player", ttl=rng / spd,
+                                     rpg=is_rpg, burn=burn,
+                                     blast=weapon_blast_mul(w)))
         audio.play(d["sfx"])
-        self.emit_noise(p.x, p.y, d["loud"])
-        self.add_particles(tx, ty, 3 if not d.get("ammo") == "rocket" else 10,
+        self.emit_noise(p.x, p.y, loud)
+        self.add_particles(tx, ty, 3 if not is_rpg else 10,
                            (255, 210, 90), speed=160)
-        self.shake = min(12, self.shake + (6.0 if d.get("ammo") == "rocket"
-                                          else (2.5 if d["pellets"] > 1 else 1.2)))
+        self.shake = min(12, self.shake + (6.0 if is_rpg
+                                          else (2.5 if pellets > 1 else 1.2)))
 
     def spawn_scav_bullet(self, x, y, ang, dmg, pellets, spread, rng, sfx,
                           rpg=False, src=None):
@@ -520,7 +526,7 @@ class Raid:
                 best, bd = a, d
         return best if best is not None else p
 
-    def explode(self, x, y, dmg, owner, src=None):
+    def explode(self, x, y, dmg, owner, src=None, blast_mul=1.0):
         """火箭弹爆炸:半径内的拾荒者一律吃伤害(不用瞄准);
         玩家被波及则按火箭弹规则判定(穿 6 级甲半血,否则阵亡)。src 为发射者,不吃自己的爆炸。"""
         audio.play("sg")
@@ -528,15 +534,16 @@ class Raid:
         self.add_particles(x, y, 26, (255, 170, 60), speed=240)
         self.add_particles(x, y, 14, (255, 240, 180), speed=150)
         self.emit_noise(x, y, 900)
+        radius = RPG_BLAST_RADIUS * blast_mul
         for s in list(self.scavs):
             if s is src:
                 continue
-            if math.hypot(s.x - x, s.y - y) <= RPG_BLAST_RADIUS:
+            if math.hypot(s.x - x, s.y - y) <= radius:
                 s.damage(dmg)
                 if s.dead:
                     self.kill_scav(s)
         p = self.player
-        if math.hypot(p.x - x, p.y - y) <= RPG_BLAST_RADIUS:
+        if math.hypot(p.x - x, p.y - y) <= radius:
             p.take_damage(dmg, self, rpg=True)
 
     def _update_bullets(self, dt):
@@ -555,7 +562,8 @@ class Raid:
                 if b["ttl"] <= 0:
                     if is_rpg:
                         self.explode(b["x"], b["y"], b["dmg"], b["owner"],
-                                     src=b.get("src"))
+                                     src=b.get("src"),
+                                     blast_mul=b.get("blast", 1.0))
                     dead = True
                     break
                 tx, ty = int(b["x"] // TILE), int(b["y"] // TILE)
@@ -588,6 +596,9 @@ class Raid:
                     for s in self.scavs:
                         if math.hypot(s.x - b["x"], s.y - b["y"]) < s.r + 3:
                             s.damage(b["dmg"])
+                            if b.get("burn"):
+                                s.burn_t = 1.5
+                                s.burn_dps = b["burn"]
                             audio.play("hit")
                             self.add_particles(b["x"], b["y"], 4, (190, 40, 40))
                             if s.dead:
@@ -619,36 +630,38 @@ class Raid:
         if p.weapon is None or p.reloading or p.reload_t > 0:
             return
         w = p.weapon
-        if w.state.get("mag", 0) >= w.def_["mag"]:
+        if w.state.get("mag", 0) >= weapon_capacity(w):
             return
         if p.reserve_count() <= 0:
             self.add_toast("没有可用弹药!", COL["bad"])
             return
-        p.reload_t = 1.6
+        p.reload_t = weapon_params(w)[5]
         p.reloading = True
         audio.play("reload")
 
     def _finish_reload(self):
         p = self.player
         w = p.weapon
+        p.reloading = False        # 装填完成,状态自洽(外部直接调用也安全)
+        p.reload_t = 0.0
         if w is None:
-            # 装填途中卸下武器:直接取消
-            p.reloading = False
-            p.reload_t = 0
             return
-        need = w.def_["mag"] - w.state.get("mag", 0)
+        cap = weapon_capacity(w)
+        need = cap - w.state.get("mag", 0)
         got = 0
+        ids = weapon_ammo_ids(w)
         for placed in list(p.bag.items):
-            if placed.item.iid == w.def_["ammo"] and need > 0:
+            if placed.item.iid in ids and need > 0:
                 take = min(need, placed.item.count)
                 got += take
                 need -= take
+                w.state["loaded"] = placed.item.iid   # 记录实际装填的弹种
                 placed.item.count -= take
                 if placed.item.count <= 0:
                     p.bag.remove_placed(placed)
         if got:
             w.state["mag"] = w.state.get("mag", 0) + got
-            self.add_toast(f"装填完成 {w.state['mag']}/{w.def_['mag']}", COL["good"])
+            self.add_toast(f"装填完成 {w.state['mag']}/{cap}", COL["good"])
 
     def use_med(self, placed):
         p = self.player
@@ -715,6 +728,42 @@ class Raid:
                 return
             p.armor = item
             audio.play("click")
+        elif item.cat == "attach":
+            self.install_attachment(p, placed, p.bag)
+
+    def install_attachment(self, p, placed, src, stash_mode=False):
+        """把配件装到当前武器上(把旧配件放回 src)。"""
+        item = placed.item
+        w = p.weapon
+        slot = item.def_.get("slot")
+        if w is None:
+            self.add_toast("先装备武器才能装配件", COL["bad"])
+            return
+        if slot not in weapon_slots(w.iid):
+            self.add_toast(f"{w.name} 不支持{ATTACH_SLOTS.get(slot, '该')}配件",
+                           COL["bad"], 3.0)
+            return
+        old = weapon_attach(w).get(slot)
+        if old is not None and not src.add_item(Item(old)):
+            self.add_toast("空间不足,无法换下旧配件", COL["bad"])
+            return
+        src.remove_placed(placed)
+        w.state.setdefault("attach", {})[slot] = item.iid
+        cap = weapon_capacity(w)
+        if w.state.get("mag", 0) > cap:
+            w.state["mag"] = cap            # 换小弹夹时截断已装填
+        audio.play("click")
+        self.add_toast(f"已安装 {item.name}({ATTACH_SLOTS.get(slot, '')})",
+                       COL["good"], 3.0)
+
+    def _update_burn(self, dt):
+        """龙息弹燃烧伤害。"""
+        for s in list(self.scavs):
+            if getattr(s, "burn_t", 0.0) > 0:
+                s.burn_t -= dt
+                s.damage(s.burn_dps * dt)
+                if s.dead:
+                    self.kill_scav(s)
 
     def drop_from_bag(self, placed):
         item = self.player.bag.take_placed(placed)
@@ -998,6 +1047,7 @@ class Raid:
             a.update(self, dt)
         for h in self.hostages:
             h.update(self, dt)
+        self._update_burn(dt)
         self._update_channel(dt)
         self._update_bullets(dt)
         for pt in self.particles:
@@ -1075,7 +1125,7 @@ class Raid:
         elif ev.button == 1:
             if placed.item.cat == "med":
                 self.use_med(placed)
-            elif placed.item.cat in ("weapon", "armor"):
+            elif placed.item.cat in ("weapon", "armor", "attach"):
                 self.equip_from_bag(placed)
             else:
                 self.add_toast(f"{placed.item.name}:自动装填消耗 / 右键丢弃",
