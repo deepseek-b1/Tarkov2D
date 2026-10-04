@@ -6,10 +6,24 @@ import pygame
 
 import audio
 from settings import (W, H, COL, BAG_W, BAG_H, RAID_TIME, EXTRACT_TIME,
-                      HOSTAGE_RESCUE_TIME, REVIVE_TIME,
+                      HOSTAGE_RESCUE_TIME, REVIVE_TIME, C4_BLAST_RADIUS,
                       PLAYER, fmt_rub, get_font)
 import uikit
 from uikit import CELL, draw_grid, draw_item_icon, draw_tooltip, draw_button, draw_slot
+
+
+# 全屏叠加层缓存:每帧新建 Surface 太贵(1280×720 SRCALPHA),复用一个
+_overlay_cache = {}
+
+
+def _overlay(key, size, color):
+    key = (key, size)
+    surf = _overlay_cache.get(key)
+    if surf is None:
+        surf = pygame.Surface(size, pygame.SRCALPHA)
+        _overlay_cache[key] = surf
+    surf.fill(color)
+    return surf
 
 
 # ---------- 布局(与 raid.py 交互命中区) ----------
@@ -117,7 +131,7 @@ def draw_raid(raid, screen):
         col = (255, 230, 120) if b["owner"] == "player" else (255, 150, 90)
         pygame.draw.line(screen, col, (nx, ny), (bx, by), 2)
 
-    # 突袭目标:指挥设施(未摧毁 = 高亮工事;已摧毁 = 废墟)
+    # 突袭目标:敌方指挥设施(未摧毁 = 高亮工事;被打坏 = 血条;已摧毁 = 废墟)
     for o in getattr(raid, "objectives", []):
         x, y = o.x + ox, o.y + oy
         if o.destroyed:
@@ -127,14 +141,54 @@ def draw_raid(raid, screen):
             pygame.draw.line(screen, (26, 26, 28), (x - 14, y + 14), (x + 14, y - 14), 5)
             t = get_font(12, bold=True).render(f"{o.name} 已摧毁", True, (150, 150, 156))
             screen.blit(t, t.get_rect(center=(x, y - 32)))
-        else:
-            pygame.draw.rect(screen, (120, 96, 58), (x - 20, y - 20, 40, 40),
+            continue
+        pygame.draw.rect(screen, (120, 96, 58), (x - 20, y - 20, 40, 40),
+                         border_radius=4)
+        pygame.draw.rect(screen, COL["accent"], (x - 20, y - 20, 40, 40), 3,
+                         border_radius=4)
+        pygame.draw.circle(screen, COL["accent"], (int(x), int(y)), 6)
+        t = get_font(13, bold=True).render(o.name, True, COL["accent"])
+        screen.blit(t, t.get_rect(center=(x, y - 34)))
+        _struct_hp_bar(screen, x, y + 28, o, (240, 140, 60))
+
+    # 我方前沿设施(指挥所/通讯室):被敌人打坏会停我方援兵
+    for o in getattr(raid, "friend_structs", []):
+        x, y = o.x + ox, o.y + oy
+        if o.destroyed:
+            pygame.draw.rect(screen, (52, 54, 58), (x - 18, y - 18, 36, 36),
                              border_radius=4)
-            pygame.draw.rect(screen, COL["accent"], (x - 20, y - 20, 40, 40), 3,
-                             border_radius=4)
-            pygame.draw.circle(screen, COL["accent"], (int(x), int(y)), 6)
-            t = get_font(13, bold=True).render(o.name, True, COL["accent"])
-            screen.blit(t, t.get_rect(center=(x, y - 34)))
+            t = get_font(12, bold=True).render(f"{o.name} 已毁", True, (200, 120, 120))
+            screen.blit(t, t.get_rect(center=(x, y - 30)))
+            continue
+        pygame.draw.rect(screen, (48, 78, 62), (x - 18, y - 18, 36, 36),
+                         border_radius=4)
+        pygame.draw.rect(screen, (110, 200, 120), (x - 18, y - 18, 36, 36), 3,
+                         border_radius=4)
+        pygame.draw.circle(screen, (200, 240, 200), (int(x), int(y)), 5)
+        t = get_font(13, bold=True).render(o.name, True, (150, 230, 160))
+        screen.blit(t, t.get_rect(center=(x, y - 32)))
+        _struct_hp_bar(screen, x, y + 26, o, (120, 220, 120))
+        if o.repair_workers:
+            rt = get_font(12, bold=True).render("修理中", True, (235, 220, 130))
+            screen.blit(rt, rt.get_rect(center=(x, y + 42)))
+
+    # 已安放的 C4:爆区圈 + 闪烁标记 + 起爆倒计时
+    for st in getattr(raid, "structures", []):
+        if st.c4 is None:
+            continue
+        x, y = st.x + ox, st.y + oy
+        blink = int(pygame.time.get_ticks() / 240) % 2 == 0
+        col = (255, 70, 60) if blink else (255, 195, 90)
+        rad = C4_BLAST_RADIUS
+        ring = _ring_surface(rad)
+        pygame.draw.circle(ring, (*col, 40), (rad, rad), rad)
+        pygame.draw.circle(ring, (*col, 200), (rad, rad), rad, 3)
+        screen.blit(ring, (x - rad, y - rad))
+        pygame.draw.rect(screen, col, (x - 12, y - 12, 24, 24), border_radius=3)
+        pygame.draw.line(screen, (20, 20, 20), (x - 8, y - 8), (x + 8, y + 8), 3)
+        pygame.draw.line(screen, (20, 20, 20), (x - 8, y + 8), (x + 8, y - 8), 3)
+        t = get_font(15, bold=True).render(f"C4 {max(0.0, st.c4['t']):.1f}s", True, col)
+        screen.blit(t, t.get_rect(center=(x, y - rad - 14)))
 
     # 待落下的友军支援:落点标记 + 倒计时
     for st in getattr(raid, "strikes", []):
@@ -221,8 +275,7 @@ def draw_raid(raid, screen):
                            PLAYER["radius"] + 6, 2)
 
     # 战争迷雾
-    fog = pygame.Surface((W, H), pygame.SRCALPHA)
-    fog.fill(COL["fog"])
+    fog = _overlay("fog", (W, H), COL["fog"])
     pts = raid.map.visibility_polygon(p.x, p.y, 560)
     pts = [(x - raid.cam[0], y - raid.cam[1]) for x, y in pts]
     if len(pts) >= 3:
@@ -231,8 +284,7 @@ def draw_raid(raid, screen):
 
     # 受击红屏
     if p.hurt_flash > 0:
-        vs = pygame.Surface((W, H), pygame.SRCALPHA)
-        vs.fill((180, 20, 20, int(90 * p.hurt_flash)))
+        vs = _overlay("hurt", (W, H), (180, 20, 20, int(90 * p.hurt_flash)))
         screen.blit(vs, (0, 0))
 
     # 撤离点方向指示
@@ -425,11 +477,11 @@ def _draw_hud(raid, screen):
         screen.blit(bg, (20, 16))
         screen.blit(t, (30, 22))
 
-    # 突袭模式:目标进度 + 友军支援积分
+    # 突袭模式:目标进度 + 援兵状态 + 友军支援积分
     if raid.mode == "assault" and not raid.over:
         done = sum(1 for o in raid.objectives if o.destroyed)
         alive = sum(1 for a in raid.allies if not a.downed)
-        info = (f"指挥设施 {done}/{len(raid.objectives)}    "
+        info = (f"设施 {done}/{len(raid.objectives)}    "
                 f"守军 {len(raid.scavs)}   队友 {alive}/{len(raid.allies)}")
         t = get_font(18, bold=True).render(
             info, True, COL["good"] if done >= len(raid.objectives) else COL["accent"])
@@ -437,7 +489,8 @@ def _draw_hud(raid, screen):
         bg.fill((10, 12, 14, 175))
         screen.blit(bg, (20, 16))
         screen.blit(t, (30, 22))
-        _draw_support_panel(raid, screen, 20, 52)
+        h = _draw_reinf_line(raid, screen, 20, 50)
+        _draw_support_panel(raid, screen, 20, 54 + h)
 
     # 提示
     if not (raid.inv_open or raid.loot_target or raid.paused or raid.over):
@@ -481,6 +534,59 @@ def _draw_hud(raid, screen):
         screen.blit(surf, (W // 2 - surf.get_width() // 2, y))
         screen.blit(t, (W // 2 - t.get_width() // 2, y + 4))
         y += 28
+
+
+_ring_cache = {}
+
+
+def _ring_surface(rad):
+    """C4 爆区圈的复用表面(每帧新建太贵)。"""
+    surf = _ring_cache.get(rad)
+    if surf is None:
+        surf = pygame.Surface((rad * 2, rad * 2), pygame.SRCALPHA)
+        _ring_cache[rad] = surf
+    surf.fill((0, 0, 0, 0))
+    return surf
+
+
+def _struct_hp_bar(screen, cx, cy, st, color):
+    """设施血条(只在被打坏后显示,满血不占画面)。"""
+    if st.destroyed or st.hp >= st.max_hp:
+        return
+    bw = 44
+    ratio = max(0.0, st.hp / st.max_hp)
+    pygame.draw.rect(screen, (30, 30, 34), (cx - bw / 2, cy, bw, 6), border_radius=3)
+    pygame.draw.rect(screen, color, (cx - bw / 2, cy, bw * ratio, 6), border_radius=3)
+
+
+def _draw_reinf_line(raid, screen, x, y):
+    """援兵状态:敌方(通讯站+司令)与我方(指挥所+通讯室)各一行 + C4 倒计时。"""
+    f = get_font(14)
+    rows = []
+    ok, why = raid.reinforce_reason("enemy")
+    cnt = max(0, int(raid.enemy_reinf_t))
+    rows.append(("敌援兵:" + (f"{cnt:2d}s" if ok else "已切断") + f"({why})",
+                 (225, 120, 110) if ok else COL["good"]))
+    ok2, why2 = raid.reinforce_reason("ally")
+    cnt2 = max(0, int(raid.ally_reinf_t))
+    rows.append(("我援兵:" + (f"{cnt2:2d}s" if ok2 else "已切断") + f"({why2})",
+                 (150, 210, 150) if ok2 else (225, 120, 110)))
+    c4s = [st for st in raid.structures if st.c4 is not None]
+    if c4s:
+        soon = min(st.c4["t"] for st in c4s)
+        rows.append((f"C4 ×{len(c4s)}  最近起爆 {soon:.1f}s  爆区 ±{C4_BLAST_RADIUS}",
+                     (255, 120, 90)))
+    w = max(f.size(txt)[0] for txt, _c in rows) + 20
+    h = 22 * len(rows) + 8
+    bg = pygame.Surface((w, h), pygame.SRCALPHA)
+    bg.fill((10, 12, 14, 175))
+    screen.blit(bg, (x, y))
+    yy = y + 4
+    for txt, col in rows:
+        t = f.render(txt, True, col)
+        screen.blit(t, (x + 10, yy))
+        yy += 22
+    return h
 
 
 def _draw_support_panel(raid, screen, x, y):
@@ -652,7 +758,8 @@ def _draw_result(raid, screen):
     mm, ss = int(r["time"]) // 60, int(r["time"]) % 60
     if r.get("mode") == "assault":
         line = (f"用时 {mm:02d}:{ss:02d}    击杀 {r['kills']}    "
-                f"支援呼叫 {r.get('support_calls', 0)} 次")
+                f"支援呼叫 {r.get('support_calls', 0)} 次   "
+                f"我方援兵 {r.get('ally_waves', 0)} 波")
     else:
         line = (f"用时 {mm:02d}:{ss:02d}    击杀 {r['kills']}    "
                 f"搜刮 {r['n']} 件  价值 {fmt_rub(r['gained'])}")
@@ -667,8 +774,9 @@ def _draw_result(raid, screen):
         screen.blit(t, t.get_rect(center=(W // 2, 244)))
     elif r.get("mode") == "assault":
         ok = r.get("mission") and r["kind"] == "extract"
-        obj = (f"指挥设施 {r.get('objectives_done', 0)}/{r.get('objectives', 0)}   "
-               f"支援呼叫 {r.get('support_calls', 0)} 次 —— "
+        obj = (f"设施 {r.get('objectives_done', 0)}/{r.get('objectives', 0)}   "
+               f"司令{'已击毙' if r.get('commander_killed') else '逃脱'}   "
+               f"敌援兵 {r.get('enemy_waves', 0)} 波 —— "
                + ("任务完成!要塞已被瘫痪" if ok else "任务失败"))
         t = get_font(20, bold=True).render(obj, True,
                                            COL["good"] if ok else COL["bad"])

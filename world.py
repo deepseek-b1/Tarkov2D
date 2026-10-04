@@ -15,7 +15,8 @@ WATER = "W"
 SOLID = {WALL, TREE, WATER}     # 水域同样不可通行、挡视线
 _LOOT_LETTER = {"C": "crate", "M": "med", "G": "gun", "V": "val"}
 _SCAV_LETTER = {"p": "pistol", "g": "shotgun", "r": "ar", "m": "melee"}
-_SPECIAL = ("S", "1", "2", "3", "X", "Y", "Z", "H", "T", "c", "O", "P", "Q")
+_SPECIAL = ("S", "1", "2", "3", "X", "Y", "Z", "H", "T", "c",
+            "O", "P", "Q", "o", "q")
 
 
 class LootContainer:
@@ -55,7 +56,8 @@ class GameMap:
         self.author_spawn = None   # (x, y) 隐藏头目「作者」
         self.hostage_spawns = []   # [(x, y)] 人质(人质模式)
         self.ally_spawns = []      # [(x, y)] 队友出生点
-        self.objectives = []       # [(名称, (x, y))] 突袭模式要摧毁的指挥设施
+        self.objectives = []       # [(名称, (x, y))] 突袭模式要摧毁的敌方设施
+        self.friend_structures = []  # [(名称, (x, y))] 我方前沿设施(指挥所/通讯室)
         self.corners = []          # [(x, y)] 拐角死角(敌人偏好蹲守)
         self.spawn = None          # (x, y) 像素坐标
 
@@ -95,8 +97,12 @@ class GameMap:
                 elif ch == "c":
                     self.corners.append((cx, cy))
                 elif ch in ("O", "P", "Q"):
-                    from settings import OBJECTIVES
-                    self.objectives.append((OBJECTIVES[ch], (cx, cy)))
+                    from settings import OBJECTIVES, STRUCT_ROLE
+                    self.objectives.append((OBJECTIVES[ch], (cx, cy), STRUCT_ROLE[ch]))
+                elif ch in ("o", "q"):
+                    from settings import ALLY_STRUCTURES, STRUCT_ROLE
+                    self.friend_structures.append(
+                        (ALLY_STRUCTURES[ch], (cx, cy), STRUCT_ROLE[ch]))
                 elif ch == "S":
                     self.spawn = (cx, cy)
                 elif ch in ("1", "2", "3"):

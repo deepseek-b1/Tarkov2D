@@ -982,15 +982,20 @@ def run():
         for iid in GUARD_ARMORS:
             assert ITEMS[iid]["cat"] == "armor" and ITEMS[iid]["level"] == 5
         for key, b in BOSSES.items():
-            assert ITEMS[b["armor"]]["level"] == 5, key
+            # 三张老图头目掉 5 级甲;突袭模式的要塞司令是最高档(掉 6 级甲)
+            lv = ITEMS[b["armor"]]["level"]
+            assert lv == (6 if key == "base" else 5), (key, lv)
             w = ITEMS[b["weapon"]]
-            assert w["cat"] == "weapon" and w.get("boss_only"), key
+            # 要塞司令的奖励是精英机枪 M139(靠 6 级甲门槛,不是 boss_only 货架)
+            if key != "base":
+                assert w.get("boss_only"), key
+                assert trade_cat_match(b["weapon"], "special"), key
+            assert w["cat"] == "weapon", key
             assert w["ammo"] in ITEMS, key
-            # 专属枪械归入「特殊枪械」分区(上架可买)
-            assert trade_cat_match(b["weapon"], "special"), key
             assert b.get("guards", 0) >= 3, key
         # 实战:逐张有头目的地图击杀头目 -> 头目尸体必含 5 级甲 + 专属武器
-        for key in [k for k in MAP_ORDER if BOSSES.get(k)]:
+        # (大本营(突袭)的司令由 t_assault 单独覆盖:那边是 50+ 守军的战场,跑一遍太慢)
+        for key in [k for k in MAP_ORDER if BOSSES.get(k) and k != "base"]:
             g = Game()
             g.save = save_mod.reset_data()
             g.save.map_key = key
@@ -1544,6 +1549,471 @@ def run():
         assert s.hp < hp_hit, (hp_hit, s.hp)
 
     check("配件-弹夹/握把/激光/天赋/弹药分级", t_attach)
+
+    def t_assault():
+        """突袭模式:大本营 50 守军/10 队友/3 座设施/配发满配装备/友军支援/撤离限制。"""
+        from game import Game
+        from world import GameMap
+        from raid import Objective
+        from touch import TouchUI
+        from settings import (MAPS, MAP_ORDER, MODE_ORDER, MODES, OBJECTIVES,
+                              ALLY_STRUCTURES, STRUCT_INFO, ASSAULT_ENEMIES,
+                              ASSAULT_ALLIES, ASSAULT_START_POINTS,
+                              ASSAULT_PLANT_TIME, ASSAULT_KILL_POINTS,
+                              C4_FUSE, C4_BLAST_RADIUS, C4_UNIT_DMG,
+                              ENEMY_REINF_INTERVAL, ENEMY_REINF_SQUAD,
+                              ALLY_REINF_INTERVAL, BOSSES,
+                              SUPPORT, SUPPORT_ORDER, ISSUE_ATTACH, ISSUE_WEAPONS,
+                              weapon_slots, weapon_capacity, weapon_ammo_ids,
+                              TILE, DIFF_ORDER, EXTRACT_TIME, get_font,
+                              W as SW, H as SH)
+        import assault
+        import raid_ui
+        # 1) 大本营地图:50 个守军刷新点 / 10 个队友点 / 敌方 3 座设施 / 我方 2 座设施
+        m = GameMap("base")
+        assert len(m.scav_spawns) >= ASSAULT_ENEMIES, len(m.scav_spawns)
+        assert len(m.ally_spawns) >= ASSAULT_ALLIES, len(m.ally_spawns)
+        assert len(m.objectives) == len(OBJECTIVES), m.objectives
+        assert len(m.friend_structures) == len(ALLY_STRUCTURES), m.friend_structures
+        assert m.boss_spawn and len(m.guard_spawns) >= 5, (m.boss_spawn, m.guard_spawns)
+        assert len(m.extracts) == 2
+        sx, sy = m.spawn
+        st = (int(sx // TILE), int(sy // TILE))
+        assert not m.tile_solid(*st), "出生点在墙里"
+        for name, (ox, oy), role in m.objectives:
+            assert role in STRUCT_INFO, role
+            assert not m.tile_solid(int(ox // TILE), int(oy // TILE))
+            assert m.astar(st, (int(ox // TILE), int(oy // TILE))) is not None, name
+            assert int(oy // TILE) <= 36, (name, "敌方设施应该在要塞内")
+        for name, (ox, oy), role in m.friend_structures:
+            assert role in ("command", "comms"), role
+            assert not m.tile_solid(int(ox // TILE), int(oy // TILE))
+            assert m.astar(st, (int(ox // TILE), int(oy // TILE))) is not None, name
+            assert int(oy // TILE) >= 37, (name, "我方设施应该在要塞外")
+        # 通讯设施两边都有(援兵开关),司令在要塞内
+        assert any(r == "comms" for _n, _p, r in m.objectives)
+        assert any(r == "comms" for _n, _p, r in m.friend_structures)
+        assert any(r == "command" for _n, _p, r in m.friend_structures)
+        bx, by = m.boss_spawn
+        assert not m.tile_solid(int(bx // TILE), int(by // TILE))
+        assert m.astar(st, (int(bx // TILE), int(by // TILE))) is not None, "司令不可达"
+        assert BOSSES["base"]["armor"] == "bt201", BOSSES["base"]["armor"]
+        for kind, (x, y) in m.scav_spawns:
+            assert not m.tile_solid(int(x // TILE), int(y // TILE)), (kind, x, y)
+            assert m.astar(st, (int(x // TILE), int(y // TILE))) is not None, kind
+        for (x, y) in m.ally_spawns:
+            assert not m.tile_solid(int(x // TILE), int(y // TILE))
+        # 守军要铺开:东西南北四个方向都得有人,不能全堆在一个角
+        tx = [int(x // TILE) for _k, (x, y) in m.scav_spawns]
+        ty = [int(y // TILE) for _k, (x, y) in m.scav_spawns]
+        for label, n in (("西", sum(1 for v in tx if v < 30)),
+                         ("东", sum(1 for v in tx if v >= 30)),
+                         ("北", sum(1 for v in ty if v < 18)),
+                         ("南", sum(1 for v in ty if v >= 18))):
+            assert n >= 10, (label, n)
+        # 每个守军刷新点都独占一格(不和物资/队友/目标/撤离点重叠)
+        seen = set()
+        for _k, (x, y) in m.scav_spawns:
+            seen.add((x // TILE, y // TILE))
+        assert len(seen) == len(m.scav_spawns)
+        # 侧栏文案不能超出面板宽度(font 13 下约 294px)
+        f13 = get_font(13)
+        for k in MODE_ORDER:
+            assert f13.size(MODES[k]["desc"])[0] <= 294, (k, MODES[k]["desc"])
+        for k in MAP_ORDER:
+            w = f13.size(MAPS[k]["desc"])[0]
+            assert w <= 294, (k, MAPS[k]["desc"], w)
+        # 2) 藏身处接入:选突袭 -> 强制大本营;突袭下难度按钮不生效
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        h = g.hideout
+        h.show_intro = False
+        h._click(h.mode_rects[MODE_ORDER.index("assault")].center)
+        assert g.save.mode == "assault" and g.save.map_key == "base"
+        h._click(h.map_rects[MAP_ORDER.index("base")].center)
+        assert g.save.mode == "assault" and g.save.map_key == "base"
+        g.save.difficulty = "lockdown"
+        h._click(h.diff_rects[DIFF_ORDER.index("hardened")].center)
+        assert g.save.difficulty == "lockdown", "突袭模式不该能改难度档"
+        h._click(h.map_rects[MAP_ORDER.index("border")].center)
+        assert g.save.mode == "raid", "选普通地图应回到搜打撤"
+        h._click(h.mode_rects[MODE_ORDER.index("hostage")].center)
+        assert g.save.mode == "hostage" and g.save.map_key == "indoor"
+        h._click(h.mode_rects[MODE_ORDER.index("assault")].center)
+        assert g.save.mode == "assault" and g.save.map_key == "base"
+        save_mod.save_data(g.save)
+        assert save_mod.load_data().mode == "assault"
+        # 3) 系统配发装备:随机 / 满配件 / 全是高级配件 / 大背包 / 足量备弹
+        g2 = Game()
+        g2.save = save_mod.reset_data()
+        g2.save.seen_intro = True
+        g2.save.mode = "assault"
+        g2.save.difficulty = "easy"          # 固定强度:简单难度也应该是 50 名守军
+        g2.save.stash.clear()
+        g2.save.bag.clear()
+        g2.save.weapon = Item.weapon("pm", mag=5)
+        g2.save.armor = Item("paca")
+        g2.save.pack = Item("pack_mid")
+        g2.save.apply_pack()
+        g2.save.bag.add_item(Item("a9", count=13))
+        g2.save.stash.add_item(Item("gold"))
+        g2.start_raid()
+        r = g2.raid
+        assert r.mode == "assault" and r.map_key == "base"
+        assert r.diff_key == "assault" and r.diff["name"] == "突袭"
+        assert len(r.scavs) >= ASSAULT_ENEMIES, len(r.scavs)
+        assert len(r.allies) == ASSAULT_ALLIES
+        assert len(r.objectives) == len(OBJECTIVES)
+        assert len(r.friend_structs) == len(ALLY_STRUCTURES)
+        # 要塞司令 + 5 名警卫,而且司令是硬点子
+        boss = r.commander()
+        assert boss is not None and boss.hp >= 400, boss
+        assert len([s for s in r.scavs if s.tag == "guard"]) == 5
+        assert len(r.scavs) == ASSAULT_ENEMIES + 6, len(r.scavs)
+        assert r.support_points == ASSAULT_START_POINTS
+        w = r.player.weapon
+        assert w is not None and w.iid in ISSUE_WEAPONS, w.iid
+        slots = weapon_slots(w.iid)
+        att = w.state.get("attach") or {}
+        assert slots and set(att) == set(slots), (w.iid, att, slots)
+        for slot in slots:
+            assert att[slot] == ISSUE_ATTACH[slot], (slot, att[slot])
+        assert w.state["mag"] == weapon_capacity(w), w.state["mag"]
+        assert r.player.armor.def_["level"] >= 5
+        assert r.player.bag.w * r.player.bag.h >= 40
+        ids = weapon_ammo_ids(w)
+        assert sum(pl.item.count for pl in r.player.bag.items
+                   if pl.item.iid in ids) >= 100, "备弹不足"
+        assert any(pl.item.cat == "med" for pl in r.player.bag.items)
+        rng = random.Random(7)
+        for wp, ar, pk, its in (assault.build(rng) for _ in range(8)):
+            assert set(wp.state.get("attach") or {}) == set(weapon_slots(wp.iid))
+            assert wp.state["mag"] == weapon_capacity(wp)
+        assert len({k[0].iid for k in (assault.build(rng) for _ in range(8))}) >= 2, \
+            "配发武器应该随机"
+        # 4) 友军支援:积分 / 冷却 / 呼叫 / 落弹杀敌 / 击杀涨积分
+        r.support_points = 0
+        ok, why = r.support_state("airstrike")
+        assert not ok and "积分" in why, why
+        assert not r.call_support("airstrike", r.player.x + 300, r.player.y)
+        assert not r.strikes, "积分不足不该产生呼叫"
+        r.support_points = 100
+        tgt = (r.player.x + 380, r.player.y)
+        assert r.call_support("airstrike", *tgt)
+        assert r.support_points == 100 - SUPPORT["airstrike"]["cost"]
+        ok, why = r.support_state("airstrike")
+        assert not ok and "冷却" in why, why
+        assert any(st["kind"] == "airstrike" for st in r.strikes)
+        # 把一队守军堆到落点上,只留这队(顺便让用例跑得快)
+        r.scavs = r.scavs[:12]
+        for i, s in enumerate(r.scavs):
+            s.x = tgt[0] + (i % 4) * 26 - 39
+            s.y = tgt[1] + (i // 4) * 26 - 26
+            s.state = "chase"
+        r.player.hp = 100000          # 用例:玩家不会被打死,专心验证支援
+        kills0, pts0 = r.kills, r.support_points
+        for _ in range(int((SUPPORT["airstrike"]["delay"] + 4) * 60)):
+            r.update(1 / 60, [])
+            if r.kills > kills0:
+                break
+        assert r.kills > kills0, "空袭应该炸死落点上的守军"
+        assert r.support_points > pts0, "击杀守军应该涨支援积分"
+        assert r.support_points - pts0 >= ASSAULT_KILL_POINTS["ar"] * (r.kills - kills0)
+        # 炮火覆盖:一发一发覆盖一片区域(不是一次性炸完)
+        r.support_points = 100
+        r.support_cd["barrage"] = 0.0
+        assert r.call_support("barrage", r.player.x + 500, r.player.y)
+        shells = 0
+        for _ in range(int((SUPPORT["barrage"]["delay"] + 7) * 60)):
+            r.update(1 / 60, [])
+            shells = max(shells, sum(1 for st in r.strikes if st["kind"] == "shell"))
+        assert shells >= 2, shells
+        # 无人机侦察:延时后进入侦察状态
+        r.support_cd["recon"] = 0.0
+        r.support_points = 100
+        assert r.call_support("recon", r.player.x, r.player.y)
+        for _ in range(int((SUPPORT["recon"]["delay"] + 0.5) * 60)):
+            r.update(1 / 60, [])
+        assert r.recon_t > 0, r.recon_t
+        assert r.support_calls >= 3, r.support_calls
+        # 支援误伤自己人:不会像火箭弹那样一炮带走
+        r.support_points = 100
+        r.support_cd["airstrike"] = 0.0
+        r.player.hp = 100
+        r.player.armor = Item("b45")
+        assert r.call_support("airstrike", r.player.x, r.player.y)
+        for _ in range(int((SUPPORT["airstrike"]["delay"] + 1.5) * 60)):
+            r.update(1 / 60, [])
+        assert not r.over, "被自己的空袭打到不该直接阵亡(6 级甲)"
+        assert r.player.hp < 100, "站在自己叫的空袭里应该受伤"
+        # 5) 安放 C4 -> 25 秒起爆 -> 爆区半径内全灭、设施炸毁
+        r.scavs = []
+        r.player.armor = Item("b45")
+        r.player.hp = 100
+        for o in r.objectives:
+            r.player.x, r.player.y = o.x, o.y + 24
+            r.interact()
+            assert r.channel is not None and r.channel["kind"] == "destroy", o.name
+            assert r.channel_need() == ASSAULT_PLANT_TIME
+            for _ in range(int((ASSAULT_PLANT_TIME + 0.8) * 60)):
+                r.update(1 / 60, [])
+                if r.channel is None:
+                    break
+            assert o.c4 is not None and o.c4["t"] > C4_FUSE - 0.5, (o.name, o.c4)
+            assert not o.destroyed, "安好 C4 还没到点,设施不该已经没了"
+            assert r.nearest_interactable()[1] is not o, "已安放 C4 的目标不该再提示安放"
+            # 起爆
+            for _ in range(int((C4_FUSE + 1.0) * 60)):
+                r.update(1 / 60, [])
+                if o.c4 is None:
+                    break
+            assert o.destroyed, f"{o.name} 应该被 C4 炸毁"
+        assert r.objectives_done() and r.allows_extract()
+        # 爆区半径:圈内必伤、圈外不伤
+        g7 = Game()
+        g7.save = save_mod.reset_data()
+        g7.save.seen_intro = True
+        g7.save.mode = "assault"
+        g7.start_raid()
+        r7 = g7.raid
+        dep = next(s for s in r7.objectives if s.role == "depot")
+        r7.scavs = r7.scavs[:3]
+        r7.allies = []
+        r7.player.hp = 100000
+        r7.player.x, r7.player.y = dep.x + 900, dep.y
+        near_s, far_s = r7.scavs[0], r7.scavs[1]
+        near_s.x, near_s.y = dep.x + C4_BLAST_RADIUS - 20, dep.y
+        far_s.x, far_s.y = dep.x + C4_BLAST_RADIUS + 140, dep.y
+        midpoint_s = r7.scavs[2]
+        midpoint_s.x, midpoint_s.y = dep.x, dep.y + C4_BLAST_RADIUS + 140
+        for s in r7.scavs:
+            s.hp = 100000
+            s.d["speed"] = 0.0        # 用例:钉住他们,不然 25 秒里早跑出爆区了
+            s.state = "idle"
+        r7.plant_c4(dep)
+        for _ in range(int((C4_FUSE + 1.0) * 60)):
+            r7.update(1 / 60, [])
+            if dep.c4 is None:
+                break
+        assert dep.destroyed
+        assert near_s.hp < 100000, "半径内的守军必须吃到伤害"
+        assert far_s.hp == 100000 and midpoint_s.hp == 100000, "半径外不该受伤"
+        assert C4_FUSE == 25.0 and C4_BLAST_RADIUS == 170, (C4_FUSE, C4_BLAST_RADIUS)
+        # 站在自己的 C4 爆区里:6 级甲掉一半血(没 6 级甲就会被带走)
+        g8 = Game()
+        g8.save = save_mod.reset_data()
+        g8.save.seen_intro = True
+        g8.save.mode = "assault"
+        g8.start_raid()
+        r8 = g8.raid
+        r8.scavs = []
+        r8.allies = []
+        r8.player.armor = Item("bt201")
+        cmd = next(s for s in r8.objectives if s.role == "command")
+        r8.player.x, r8.player.y = cmd.x, cmd.y + 20
+        r8.interact()
+        for _ in range(int((ASSAULT_PLANT_TIME + 0.8) * 60)):
+            r8.update(1 / 60, [])
+            if r8.channel is None:
+                break
+        for _ in range(int((C4_FUSE + 1.0) * 60)):
+            r8.update(1 / 60, [])
+            if r8.over:
+                break
+        assert not r8.over and r8.player.hp == 50, (r8.over, r8.player.hp)
+        # 5b) 设施能被打坏,而且会被各自一方派人修回来
+        g9 = Game()
+        g9.save = save_mod.reset_data()
+        g9.save.seen_intro = True
+        g9.save.mode = "assault"
+        g9.start_raid()
+        r9 = g9.raid
+        r9.player.hp = 100000
+        comms9 = next(s for s in r9.objectives if s.role == "comms")
+        comms9.damage(comms9.max_hp * 0.5)
+        assert comms9.damaged
+        healed = False
+        for _ in range(int(30 * 60)):
+            r9.update(1 / 60, [])
+            if not comms9.damaged:
+                healed = True
+                break
+        assert healed, f"敌人应该派人把通讯站修回来({comms9.hp:.0f})"
+        # 我方通讯室也一样(队友去修)
+        fq9 = next(s for s in r9.friend_structs if s.role == "comms")
+        fq9.damage(fq9.max_hp * 0.5)
+        healed = False
+        for _ in range(int(25 * 60)):
+            r9.update(1 / 60, [])
+            if not fq9.damaged:
+                healed = True
+                break
+        assert healed, f"队友应该把前沿通讯室修回来({fq9.hp:.0f})"
+        # 5c) 援兵:敌方靠 通讯站+司令,我方靠 指挥所+通讯室
+        g10 = Game()
+        g10.save = save_mod.reset_data()
+        g10.save.seen_intro = True
+        g10.save.mode = "assault"
+        before10 = (g10.save.weapon.iid if g10.save.weapon else None,
+                    g10.save.armor.iid if g10.save.armor else None,
+                    g10.save.pack.iid if g10.save.pack else None,
+                    sorted((pl.x, pl.y, pl.item.iid, pl.item.count)
+                           for pl in g10.save.bag.items),
+                    sorted((pl.x, pl.y, pl.item.iid, pl.item.count)
+                           for pl in g10.save.stash.items))
+        g10.start_raid()
+        r10 = g10.raid
+        r10.player.hp = 100000
+        r10.scavs = [s for s in r10.scavs if s.tag in ("boss", "guard")]
+        n0, a0, ew0 = len(r10.scavs), len(r10.allies), r10.enemy_waves
+        for _ in range(int((ENEMY_REINF_INTERVAL + ALLY_REINF_INTERVAL + 2) * 60)):
+            r10.update(1 / 60, [])
+        assert r10.enemy_waves > ew0, "通讯站还在,敌方就该来援兵"
+        assert len(r10.scavs) >= n0 + ENEMY_REINF_SQUAD
+        assert r10.ally_waves >= 1 and len(r10.allies) > a0, "我方也该有援兵"
+        # 打死司令:援兵照样来(剩下的兵自己会去呼叫总部)
+        boss10 = r10.commander()
+        assert boss10 is not None
+        r10.kill_scav(boss10)
+        assert r10.commander() is None
+        ok, why = r10.reinforce_reason("enemy")
+        assert ok, f"司令死了不该断援兵(总部按通讯站派人):{why}"
+        ew = r10.enemy_waves
+        r10.enemy_reinf_t = 0.1
+        for _ in range(int(4 * 60)):
+            r10.update(1 / 60, [])
+        assert r10.enemy_waves > ew, "司令死后敌方援兵必须继续来"
+        # 炸掉通讯站 -> 联系不上总部,援兵才断
+        c10 = next(s for s in r10.objectives if s.role == "comms")
+        c10.damage(c10.max_hp)
+        ok, why = r10.reinforce_reason("enemy")
+        assert not ok and "通讯" in why, why
+        ew = r10.enemy_waves
+        r10.enemy_reinf_t = 0.1
+        for _ in range(int(3 * 60)):
+            r10.update(1 / 60, [])
+        assert r10.enemy_waves == ew, "通讯站炸了就不该再来敌援兵"
+        # 我方通讯室被毁 -> 我援兵断
+        f10 = next(s for s in r10.friend_structs if s.role == "comms")
+        f10.damage(f10.max_hp)
+        ok, why = r10.reinforce_reason("ally")
+        assert not ok and "通讯" in why, why
+        # 6) 撤离:设施没炸完,站撤离点也没用
+        ex = r10.map.extracts[0][1]
+        r10.player.x, r10.player.y = ex.centerx, ex.centery
+        for _ in range(int((EXTRACT_TIME + 1) * 60)):
+            r10.update(1 / 60, [])
+        assert not r10.over, "设施没炸完不该能撤离"
+        assert "locked" in r10.warned, "应该提示过要先炸设施"
+        assert not r10.allows_extract()
+        # 炸完之后可以撤(也顺便验证结算与存档还原)
+        for o in r10.objectives:
+            o.hp = 0.0
+            o.destroyed = True
+            o.c4 = None
+        assert r10.allows_extract()
+        for _ in range(int((EXTRACT_TIME + 1) * 60)):
+            r10.update(1 / 60, [])
+            if r10.over:
+                break
+        assert r10.over and r10.result["kind"] == "extract", r10.result
+        assert r10.result["mission"] is True
+        assert r10.result["objectives_done"] == len(r10.objectives)
+        assert r10.result["enemy_waves"] >= 1 and r10.result["ally_waves"] >= 1
+        assert r10.result["commander_killed"] is True
+        assert r10.result["support_calls"] == r10.support_calls
+        # 司令尸体:掉 6 级甲 + 专属枪械(M139)
+        boss_corpse = [c for c in r10.containers if c.kind == "boss_corpse"]
+        assert boss_corpse, "击杀司令应该有头目尸体"
+        boss_ids = [p.item.iid for p in boss_corpse[0].container.items]
+        assert "bt201" in boss_ids, boss_ids
+        assert BOSSES["base"]["weapon"] == "m139" and "m139" in boss_ids, boss_ids
+        # 撤离后:配发装备与战利品全部回收,玩家原配置原样还原
+        sd = save_mod.load_data()
+        def _loadout(s):
+            return (s.weapon.iid if s.weapon else None,
+                    s.armor.iid if s.armor else None,
+                    s.pack.iid if s.pack else None,
+                    sorted((pl.x, pl.y, pl.item.iid, pl.item.count)
+                           for pl in s.bag.items),
+                    sorted((pl.x, pl.y, pl.item.iid, pl.item.count)
+                           for pl in s.stash.items))
+        assert _loadout(sd) == before10, (_loadout(sd), before10)
+        # 7) 阵亡也回收:系统装备不进存档,仓库不受影响
+        g4 = Game()
+        g4.save = save_mod.reset_data()
+        g4.save.seen_intro = True
+        g4.save.mode = "assault"
+        stash_before = sorted((pl.x, pl.y, pl.item.iid) for pl in g4.save.stash.items)
+        g4.start_raid()
+        r4 = g4.raid
+        assert r4.player.weapon.iid != "pm", "进突袭应该已经换成配发武器"
+        r4.finish("death")
+        sd4 = save_mod.load_data()
+        assert sd4.weapon.iid == "pm" and sd4.armor is None
+        assert sorted((pl.x, pl.y, pl.item.iid) for pl in sd4.stash.items) == stash_before
+        # 8) 固定强度:三档难度都生成同样规模的守军(含司令与警卫)
+        for diff in DIFF_ORDER:
+            gd = Game()
+            gd.save = save_mod.reset_data()
+            gd.save.mode = "assault"
+            gd.save.difficulty = diff
+            gd.save.seen_intro = True
+            gd.start_raid()
+            assert gd.raid.diff_key == "assault", diff
+            assert len(gd.raid.scavs) == ASSAULT_ENEMIES + 6, (diff, len(gd.raid.scavs))
+            assert gd.raid.commander() is not None
+        # 9) 渲染:突袭 HUD / 援兵行 / 支援面板 / 设施血条 / C4 爆区圈 / 结算页
+        screen = pygame.display.set_mode((SW, SH))
+        g5 = Game()
+        g5.save = save_mod.reset_data()
+        g5.save.seen_intro = True
+        g5.save.mode = "assault"
+        g5.start_raid()
+        r5 = g5.raid
+        r5.support_points = 12
+        r5.recon_t = 5.0
+        r5.objectives[0].destroyed = True
+        r5.objectives[1].damage(r5.objectives[1].max_hp * 0.4)
+        r5.objectives[2].c4 = dict(t=18.0)
+        r5.friend_structs[1].damage(r5.friend_structs[1].max_hp * 0.5)
+        r5.friend_structs[1].repair_workers = [r5.allies[0]]
+        r5.strikes.append(dict(kind="airstrike", x=r5.player.x + 220, y=r5.player.y,
+                               t=1.5, cfg=SUPPORT["airstrike"]))
+        r5.strikes.append(dict(kind="barrage", x=r5.player.x - 220, y=r5.player.y,
+                               t=1.0, cfg=SUPPORT["barrage"]))
+        r5.strikes.append(dict(kind="shell", x=r5.player.x + 40, y=r5.player.y,
+                               t=0.4, cfg=SUPPORT["barrage"]))
+        r5.channel = dict(kind="destroy", ent=r5.objectives[1], t=1.0)
+        g5.draw(screen)                       # 世界里:HUD/援兵/支援/设施/C4/落点/引导条
+        r5.channel = None
+        r5.over = False
+        r5.paused = True
+        g5.draw(screen)
+        r5.paused = False
+        r5.finish("extract")
+        g5.draw(screen)                       # 突袭结算页
+        pygame.display.flip()
+        # 10) 触屏:突袭模式多出三个支援按钮,点了能呼叫
+        g6 = Game()
+        g6.save = save_mod.reset_data()
+        g6.save.seen_intro = True
+        g6.save.mode = "assault"
+        g6.save.touch = True
+        g6.start_raid()
+        r6 = g6.raid
+        assert r6.touch_mode and r6.touch.support
+        lay = r6.touch.button_layout()
+        assert {"sup1", "sup2", "sup3"} <= set(lay), lay.keys()
+        assert "sup1" not in TouchUI().button_layout(), "普通模式不该有支援按钮"
+        g6.draw(pygame.display.set_mode((SW, SH)))
+        ev = pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=lay["sup3"]["pos"])
+        r6.update(1 / 60, [ev])
+        assert (r6.recon_t > 0 or any(st["kind"] == "recon" for st in r6.strikes)), \
+            "触屏支援按钮应该能呼叫"
+
+    check("突袭模式-大本营/配发装备/友军支援/撤离限制", t_assault)
 
     ok = all(r[1] for r in results)
     report = ["Tarkov2D selftest " + ("PASS" if ok else "FAIL"), ""]

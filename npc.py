@@ -2,7 +2,7 @@
 """人质模式的两类己方 NPC:队友(Ally)与人质(Hostage)。"""
 import math
 
-from settings import ALLY_HP, ALLY_RANGE, TILE
+from settings import ALLY_HP, ALLY_RANGE, REPAIR_RANGE, TILE
 
 
 class Walker:
@@ -59,19 +59,40 @@ class Ally(Walker):
         self.downed = False
         self.fire_cd = 0.0
         self.name = "队友"
+        self.repair_target = None   # 被派去修的设施(突袭模式)
 
     def nearest_enemy(self, raid):
-        best, bd = None, ALLY_RANGE
+        """最近的可见敌人。先按距离粗筛再算视线(大本营 50 名守军时省很多)。"""
+        cands = []
         for s in raid.scavs:
             d = math.hypot(s.x - self.x, s.y - self.y)
-            if d < bd and raid.map.los_clear(self.x, self.y, s.x, s.y):
-                best, bd = s, d
-        return best
+            if d < ALLY_RANGE:
+                cands.append((d, s))
+        if not cands:
+            return None
+        cands.sort(key=lambda t: t[0])
+        for _d, s in cands[:8]:
+            if raid.map.los_clear(self.x, self.y, s.x, s.y):
+                return s
+        return None
 
     def update(self, raid, dt):
         self.repath_t -= dt
         if self.downed:
             return
+        # 被派去修设施:先跑过去站住(回血由 Raid._assign_repair 结算)
+        st = self.repair_target
+        if st is not None:
+            if st.destroyed or not st.damaged:
+                self.repair_target = None
+            else:
+                if math.hypot(st.x - self.x, st.y - self.y) > REPAIR_RANGE:
+                    self._repath(raid, st.x, st.y)
+                    self._follow(raid, dt, 175)
+                else:
+                    self.path = []
+                self.aim = math.atan2(st.y - self.y, st.x - self.x)
+                return
         self.fire_cd -= dt
         p = raid.player
         tgt = self.nearest_enemy(raid)

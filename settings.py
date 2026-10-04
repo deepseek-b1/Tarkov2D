@@ -3,7 +3,7 @@
 import pygame
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "1.1.2"
+GAME_VERSION = "1.3.1"
 # 更新清单地址(可换成自建服务器 / GitHub raw;留空则只认 EXE 同目录的 version.json)
 UPDATE_MANIFEST_URL = "http://127.0.0.1:8765/version.json"
 UPDATE_TIMEOUT = 3   # 检查 / 下载超时(秒)
@@ -15,7 +15,8 @@ TILE = 32
 RAID_TIME = 12 * 60          # 战局时长(秒)
 EXTRACT_TIME = 3.0           # 撤离引导(秒)
 INTERACT_DIST = 56           # 搜刮交互距离(像素)
-STASH_W, STASH_H = 10, 8     # 藏身处仓库
+STASH_W, STASH_H = 10, 20    # 藏身处仓库(格子多了,藏身处用滚轮上下翻)
+STASH_VIEW_ROWS = 8          # 仓库面板一次能看到几行(其余靠滚轮)
 BAG_W, BAG_H = 4, 2          # 无背包时的口袋容量(装备背包后按 grid 扩容)
 
 PLAYER = dict(hp=100, speed=235, walk=115, radius=12)
@@ -226,10 +227,10 @@ ITEMS.update({
     "solar": dict(name="太阳能板", cat="misc", w=3, h=2, color=(70, 96, 132), price=72000),
 })
 
-# 机密文件:天价孤品,仅在「强化封锁」的保险箱里固定刷出
+# 机密文件:孤品,仅在「强化封锁」的保险箱里固定刷出
 CLASSIFIED = "doc"
 ITEMS[CLASSIFIED] = dict(name="机密文件", cat="misc", w=1, h=1,
-                         color=(240, 232, 190), price=10000000000)
+                         color=(240, 232, 190), price=5000000)
 DOC_HARDENED_COUNT = 1   # 每局强化封锁刷几份机密文件(9=每个保险箱各一份)
 
 
@@ -253,6 +254,9 @@ SCAV_DROPS = {
     "shotgun": ("mp133", "a12db", 4, 8),
     "ar": ("ak74", "a545", 10, 25),
 }
+
+# 拾荒者 AI 降级距离:超过这个距离又没在追击的敌人不算视线/寻路(省算力,迷雾里看不见)
+SCAV_LOD_DIST = 1300
 
 # ---------- 难度档位(作用于拾荒者属性与物资) ----------
 # hp/dmg/speed/view:倍率; spread/rof:倍率(越大越不准/越慢); scavs:数量; rolls:搜刮次数; loot:弹药量倍率
@@ -320,6 +324,11 @@ BOSSES = {
                  spread=0.075, rof=0.13, auto=True, burst=4, pause=1.3,
                  range=900, view=520, armor="korund", weapon="pkp",
                  guard_weapon="akm", guards=4, guard_hp=110, guard_dmg=13),
+    # 突袭模式:大本营的「要塞司令」。他不死 + 通讯站没炸 -> 敌人援兵源源不断
+    "base": dict(name="要塞司令 沃罗宁", hp=460, speed=150, dmg=20, pellets=1,
+                 spread=0.05, rof=0.11, auto=True, burst=6, pause=0.9,
+                 range=880, view=580, armor="bt201", weapon="m139",
+                 guard_weapon="akm", guards=5, guard_hp=120, guard_dmg=14),
 }
 GUARD_ARMOR_DROP = 0.4                  # 手下掉 5 级甲的概率
 GUARD_ARMORS = ["b23", "zhuk", "korund"]
@@ -534,7 +543,7 @@ INTERACT_RANGE = 64        # 人质/队友交互距离(像素)
 # 独立模式:固定强度(不走 简单/封锁/强化封锁 三档),系统配发装备,友军支援要花积分
 ASSAULT_ENEMIES = 50       # 大本营守军数量(固定)
 ASSAULT_ALLIES = 10        # 突击队队友数量
-ASSAULT_DESTROY_TIME = 3.5 # 摧毁指挥设施的引导时间(秒)
+ASSAULT_PLANT_TIME = 3.5   # 安放 C4 的引导时间(秒)
 ASSAULT_START_POINTS = 10  # 开局支援积分
 ASSAULT_RESERVE_AMMO = 240 # 配发装备的备弹
 # 击杀守军获得支援积分(按兵种给分)
@@ -543,8 +552,46 @@ ASSAULT_KILL_POINTS = {"melee": 1, "pistol": 1, "shotgun": 2, "ar": 2}
 ASSAULT_DIFF = dict(name="突袭", hp=1.0, dmg=0.85, spread=1.15, rof=1.15,
                     view=0.95, speed=0.95, scavs=ASSAULT_ENEMIES, rolls=2,
                     loot=1.0, desc="大本营守军(固定强度)", loot_desc="弹药补给")
+
+# ---------- C4(突袭模式拆设施用的炸药) ----------
+C4_FUSE = 25.0             # 安放后 25 秒起爆
+C4_BLAST_RADIUS = 170      # 起爆半径(像素,约 5 格):范围内单位一律吃伤害
+C4_UNIT_DMG = 420          # 对人员的伤害(按爆炸规则:没 6 级甲会被一炮带走)
+C4_STRUCT_DMG = 1400       # 对设施的伤害(一次就够炸毁)
+C4_PLANT_RANGE = 64        # 能安放 C4 的距离
+
+# ---------- 设施(指挥所/通讯室/弹药库):能炸也能修 ----------
+STRUCT_INFO = {
+    "command": dict(label="指挥所", hp=900),
+    "comms": dict(label="通讯", hp=900),
+    "depot": dict(label="弹药库", hp=900),
+}
+ALLY_STRUCT_HP = 600       # 我方前沿设施血量(被打坏会停援兵)
+STRUCT_BULLET_DMG = 1.0    # 枪弹对设施的基础伤害(效率远不如 C4)
+STRUCT_BULLET_MUL = 0.10   # 再按子弹伤害加成
+REPAIR_RATE = 14.0         # 每个修理单位每秒修多少血
+REPAIR_RANGE = 60          # 站多近才能修
+REPAIR_MAX_WORKERS = 2     # 一座设施最多几个人同时修
+REPAIR_SEARCH = 900        # 只派这个距离内的人去修
+
+# ---------- 援兵(突袭模式) ----------
+# 敌方:通讯塔 + 指挥官 都还在 -> 援兵源源不断;任意一个没了就断
+ENEMY_REINF_INTERVAL = 22.0
+ENEMY_REINF_SQUAD = 4
+ENEMY_REINF_CAP = 62       # 场上守军上限(含头目/手下)
+ENEMY_REINF_MIN_DIST = 620 # 援兵不会空降在玩家脸上
+# 我方:前沿指挥所 + 前沿通讯室 都还在 -> 队友也不断补进来
+ALLY_REINF_INTERVAL = 26.0
+ALLY_REINF_SQUAD = 1
+ALLY_REINF_CAP = 14
+
 # 需要摧毁的指挥设施:地图标记 -> 名称
 OBJECTIVES = {"O": "指挥所", "P": "弹药库", "Q": "通讯站"}
+# 我方的前沿设施(突袭模式):通讯室被打坏,队友会去修
+ALLY_STRUCTURES = {"o": "前沿指挥所", "q": "前沿通讯室"}
+# 设施角色(决定谁是"援兵开关")
+STRUCT_ROLE = {"O": "command", "P": "depot", "Q": "comms",
+               "o": "command", "q": "comms"}
 # 系统配发装备(突袭模式):武器池 / 顶级配件 / 护甲 / 背包 / 药品
 # 只挑配件槽位齐全的枪,保证"满配件";每种槽位都给最好的那件
 ISSUE_WEAPONS = ["m4a1", "akm", "ak74", "mp5", "vector", "asval", "m700"]

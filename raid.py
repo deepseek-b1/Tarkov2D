@@ -14,9 +14,16 @@ from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       RPG_HALF_HP_ARMOR_LEVEL, TOUCH, MODES, MODE_MAP,
                       HOSTAGE_COUNT, HOSTAGE_ENEMIES, ALLY_COUNT,
                       HOSTAGE_RESCUE_TIME, REVIVE_TIME, INTERACT_RANGE, ALLY_DMG,
-                      ASSAULT_ENEMIES, ASSAULT_ALLIES, ASSAULT_DESTROY_TIME,
+                      ASSAULT_ENEMIES, ASSAULT_ALLIES, ASSAULT_PLANT_TIME,
                       ASSAULT_START_POINTS, ASSAULT_KILL_POINTS, ASSAULT_DIFF,
                       SUPPORT, SUPPORT_ORDER,
+                      C4_FUSE, C4_BLAST_RADIUS, C4_UNIT_DMG, C4_STRUCT_DMG,
+                      C4_PLANT_RANGE, STRUCT_INFO, ALLY_STRUCT_HP,
+                      STRUCT_BULLET_DMG, STRUCT_BULLET_MUL, REPAIR_RATE,
+                      REPAIR_RANGE, REPAIR_MAX_WORKERS, REPAIR_SEARCH,
+                      ENEMY_REINF_INTERVAL, ENEMY_REINF_SQUAD, ENEMY_REINF_CAP,
+                      ENEMY_REINF_MIN_DIST, ALLY_REINF_INTERVAL,
+                      ALLY_REINF_SQUAD, ALLY_REINF_CAP,
                       weapon_params, weapon_capacity, weapon_ammo_ids,
                       weapon_slots, weapon_attach, weapon_blast_mul, ATTACH_SLOTS,
                       fmt_rub, get_font)
@@ -27,14 +34,53 @@ from npc import Ally, Hostage
 from touch import TouchUI
 
 
-class Objective:
-    """突袭模式:要塞里的指挥设施,安放炸药(按 E 站定)摧毁。"""
+class Structure:
+    """战场设施:突袭模式里敌我双方都有指挥/通讯设施。
 
-    def __init__(self, name, x, y):
+    能被打坏(枪弹效率很低,C4 一发入魂),也能被各自一方派人修回来。
+    指挥设施 + 通讯设施是"援兵开关"。
+    """
+
+    def __init__(self, name, x, y, role, side, hp):
         self.name = name
         self.x, self.y = x, y
-        self.r = 20
+        self.role = role            # command / comms / depot
+        self.side = side            # enemy / ally
+        self.r = 22
+        self.max_hp = float(hp)
+        self.hp = float(hp)
         self.destroyed = False
+        self.c4 = None              # 已安放的 C4:{"t": 剩余秒数}
+        self.repair_workers = []    # 正在修它的单位
+
+    @property
+    def damaged(self):
+        return not self.destroyed and self.hp < self.max_hp
+
+    @property
+    def label(self):
+        return STRUCT_INFO.get(self.role, {}).get("label", "设施")
+
+    def damage(self, n):
+        if self.destroyed:
+            return
+        self.hp = max(0.0, self.hp - n)
+        if self.hp <= 0:
+            self.hp = 0.0
+            self.destroyed = True
+            self.c4 = None
+
+    def repair(self, n):
+        if self.destroyed:
+            return
+        self.hp = min(self.max_hp, self.hp + n)
+
+
+class Objective(Structure):
+    """突袭模式:要塞里的敌方指挥设施(安放 C4 炸掉)。"""
+
+    def __init__(self, name, x, y, role):
+        super().__init__(name, x, y, role, "enemy", STRUCT_INFO[role]["hp"])
 
 
 class Player:
@@ -153,9 +199,10 @@ class Raid:
             random.shuffle(self.scavs)
             self.scavs = self.scavs[:HOSTAGE_ENEMIES]
         elif self.mode == "assault":
-            # 突袭:大本营守军 50 名(固定,无头目/手下/作者)
+            # 突袭:大本营守军 50 名 + 要塞司令与警卫(无「作者」)
             random.shuffle(self.scavs)
             self.scavs = self.scavs[:ASSAULT_ENEMIES]
+            self._spawn_boss_and_guards()
         else:
             self._spawn_boss_and_guards()
             self._spawn_author()
@@ -165,10 +212,21 @@ class Raid:
             if self.mode in ("hostage", "assault") else []
         self.hostages = [Hostage(x, y) for x, y in self.map.hostage_spawns[:HOSTAGE_COUNT]] \
             if self.mode == "hostage" else []
-        # 突袭目标:要炸掉的指挥设施
-        self.objectives = [Objective(n, x, y) for n, (x, y) in self.map.objectives] \
-            if self.mode == "assault" else []
-        self.channel = None       # 救人质 / 拉起队友 / 炸设施的引导状态
+        # 突袭目标:要炸掉的敌方指挥设施 + 我方前沿设施(指挥所/通讯室)
+        self.structures = []
+        if self.mode == "assault":
+            self.structures += [Objective(n, x, y, role)
+                                for n, (x, y), role in self.map.objectives]
+            self.structures += [Structure(n, x, y, role, "ally", ALLY_STRUCT_HP)
+                                for n, (x, y), role in self.map.friend_structures]
+        self.objectives = [s for s in self.structures if s.side == "enemy"]
+        self.friend_structs = [s for s in self.structures if s.side == "ally"]
+        self.channel = None       # 救人质 / 拉起队友 / 安放 C4 的引导状态
+        # 援兵:敌方靠「通讯站 + 指挥官」,我方靠「前沿指挥所 + 前沿通讯室」
+        self.enemy_reinf_t = ENEMY_REINF_INTERVAL if self.mode == "assault" else 0.0
+        self.ally_reinf_t = ALLY_REINF_INTERVAL if self.mode == "assault" else 0.0
+        self.enemy_waves = 0
+        self.ally_waves = 0
         # 友军支援(仅突袭模式):积分靠击杀赚,呼叫要花积分
         self.support_points = ASSAULT_START_POINTS if self.mode == "assault" else 0
         self.support_cd = {k: 0.0 for k in SUPPORT_ORDER}
@@ -192,15 +250,24 @@ class Raid:
             self.add_toast("强化封锁:机密文件已刷新,藏在保险箱之一",
                            COL["accent"], 4.5)
         if self.boss_cfg is not None:
-            self.add_toast(f"头目 {self.boss_cfg['name']} 在场 —— 击杀可爆 5 级甲与专属枪械",
-                           COL["accent"], 4.0)
+            if self.mode == "assault":
+                self.add_toast(f"头目 {self.boss_cfg['name']} 在场 —— 击杀可爆 6 级甲与"
+                               "精英机枪 M139(他镇守指挥所,但敌方援兵是总部按通讯站派的)",
+                               COL["accent"], 5.0)
+            else:
+                self.add_toast(
+                    f"头目 {self.boss_cfg['name']} 在场 —— 击杀可爆 5 级甲与专属枪械",
+                    COL["accent"], 4.0)
         if self.mode == "hostage":
             self.add_toast(f"任务:救出 {HOSTAGE_COUNT} 名人质后撤离 —— 拐角有死角,小心埋伏",
                            COL["accent"], 5.0)
         if self.mode == "assault":
-            self.add_toast(f"任务:炸掉 {len(self.objectives)} 座指挥设施(按 E 安放炸药)后撤出要塞",
-                           COL["accent"], 5.0)
-            self.add_toast(f"友军支援已就绪:10 名突击队员随你进攻 · 1/2/3 呼叫支援",
+            self.add_toast(f"任务:给 {len(self.objectives)} 座指挥设施安 C4"
+                           f"(按 E 安放,{int(C4_FUSE)} 秒后起爆,爆区 ±{C4_BLAST_RADIUS})",
+                           COL["accent"], 6.0)
+            self.add_toast("想掐断敌方援兵:炸掉通讯站(他们联系不上总部就没人可派了);"
+                           "打死司令只掉装备,不影响援兵", COL["good"], 6.0)
+            self.add_toast("友军支援 1 空袭 / 2 炮火覆盖 / 3 无人机侦察(击杀换积分)",
                            COL["good"], 5.0)
         if any(getattr(s, "tag", None) == "author" for s in self.scavs):
             self.add_toast("警报:隐藏头目「作者」携 RPG 在场!(没穿 6 级甲别硬碰)",
@@ -388,8 +455,8 @@ class Raid:
             if d < bd:
                 best, bd, kind = a, d, "revive"
         for o in self.objectives:
-            if o.destroyed:
-                continue
+            if o.destroyed or o.c4 is not None:
+                continue          # 炸过的、已经安好 C4 的都不用再管
             d = math.hypot(o.x - p.x, o.y - p.y)
             if d < bd:
                 best, bd, kind = o, d, "destroy"
@@ -399,7 +466,7 @@ class Raid:
         """引导类交互所需的秒数。"""
         k = kind or (self.channel["kind"] if self.channel else None)
         return {"rescue": HOSTAGE_RESCUE_TIME, "revive": REVIVE_TIME,
-                "destroy": ASSAULT_DESTROY_TIME}.get(k, 1.0)
+                "destroy": ASSAULT_PLANT_TIME}.get(k, 1.0)
 
     def objectives_done(self):
         return len(self.objectives) > 0 and all(o.destroyed for o in self.objectives)
@@ -462,17 +529,8 @@ class Raid:
                 if done >= len(self.hostages):
                     self.add_toast("全部人质已解救!带队撤离!", COL["accent"], 5.0)
             elif kind == "destroy":
-                ent.destroyed = True
-                done = sum(1 for o in self.objectives if o.destroyed)
-                audio.play("sg")
-                self.shake = min(14, self.shake + 10)
-                self.add_particles(ent.x, ent.y, 30, (255, 170, 60), speed=220)
-                self.emit_noise(ent.x, ent.y, 900)
-                self.add_toast(f"{ent.name} 已摧毁({done}/{len(self.objectives)})",
-                               COL["good"], 3.4)
-                if self.objectives_done():
-                    self.add_toast("全部指挥设施已摧毁!撤出要塞!",
-                                   COL["accent"], 5.0)
+                # 安放 C4:25 秒后起爆,爆区半径内一律吃伤害
+                self.plant_c4(ent)
             else:
                 ent.revive()
                 audio.play("heal")
@@ -502,6 +560,13 @@ class Raid:
             self.containers.append(corpse)
             self.add_toast(f"击杀头目 {scav.d['name']}!已掉落 5 级甲与专属枪械",
                            COL["accent"], 4.0)
+            if self.mode == "assault":
+                if self.comms_alive("enemy"):
+                    self.add_toast("司令死了,但通讯站还在 —— 剩下的兵会直接呼叫总部,"
+                                   "援兵照样来!", COL["bad"], 4.5)
+                else:
+                    self.add_toast("司令已击毙,通讯站也炸了 —— 总部派人也没人接头了",
+                                   COL["good"], 4.5)
             return
         corpse = LootContainer("corpse", cx, cy)
         for it in self._scav_drops(scav.kind):
@@ -598,11 +663,11 @@ class Raid:
         return best if best is not None else p
 
     def explode(self, x, y, dmg, owner, src=None, blast_mul=1.0, radius=None,
-                friendly=False):
-        """火箭弹/支援火力爆炸:半径内的拾荒者一律吃伤害(不用瞄准);
+                friendly=False, struct_dmg=None):
+        """火箭弹/支援火力/C4 爆炸:半径内的拾荒者一律吃伤害(不用瞄准);
         玩家被波及则按火箭弹规则判定(穿 6 级甲半血,否则阵亡)。src 为发射者,不吃自己的爆炸。
-        radius 可覆盖溅射半径(友军支援用);friendly=True 时对玩家按普通伤害结算
-        (护甲减伤,不会被自己叫的空袭一炮带走)。"""
+        radius 可覆盖溅射半径(友军支援/C4 用);friendly=True 时对玩家按普通伤害结算
+        (护甲减伤,不会被自己叫的空袭一炮带走);struct_dmg 为对设施的伤害。"""
         audio.play("sg")
         self.shake = min(14, self.shake + 8)
         self.add_particles(x, y, 26, (255, 170, 60), speed=240)
@@ -616,6 +681,10 @@ class Raid:
                 s.damage(dmg)
                 if s.dead:
                     self.kill_scav(s)
+        if self.structures:
+            self.damage_structures_at(x, y, rad,
+                                      dmg if struct_dmg is None else struct_dmg,
+                                      owner=owner)
         p = self.player
         if math.hypot(p.x - x, p.y - y) <= rad:
             if friendly:
@@ -654,6 +723,23 @@ class Raid:
                         self.add_particles(b["x"], b["y"], 3, (200, 200, 160), speed=60)
                     dead = True
                     break
+                # 设施也能被枪弹啃(效率很低,想拆还是得靠 C4)
+                if self.structures:
+                    for st in self.structures:
+                        if st.destroyed:
+                            continue
+                        own = (b["owner"] in ("player", "ally")) == (st.side == "ally")
+                        if own:
+                            continue
+                        if math.hypot(st.x - b["x"], st.y - b["y"]) < st.r:
+                            st.damage(STRUCT_BULLET_DMG + b["dmg"] * STRUCT_BULLET_MUL)
+                            self.add_particles(b["x"], b["y"], 3, (210, 200, 150))
+                            if st.destroyed:
+                                self.add_toast(f"{st.name} 被摧毁!", COL["accent"], 3.4)
+                            dead = True
+                            break
+                    if dead:
+                        break
                 if is_rpg:
                     # 火箭弹:碰到人/被挡就引爆,溅射范围内都吃伤害(不必精确瞄准)
                     for s in list(self.scavs):
@@ -935,6 +1021,185 @@ class Raid:
             self.explode(sh["x"], sh["y"], sh["dmg"], "support",
                          radius=sh["radius"], friendly=True)
 
+    # ---------- 设施 / C4 / 援兵(突袭模式) ----------
+    def comms_alive(self, side):
+        return any(s.role == "comms" and not s.destroyed
+                   for s in self.structures if s.side == side)
+
+    def command_alive(self, side):
+        return any(s.role == "command" and not s.destroyed
+                   for s in self.structures if s.side == side)
+
+    def commander(self):
+        for s in self.scavs:
+            if getattr(s, "tag", None) == "boss":
+                return s
+        return None
+
+    def reinforce_reason(self, side):
+        """援兵还能不能来 + 原因(给 HUD/提示用)。
+
+        敌方靠的是「通讯站连总部」:通讯站在,总部就一直往前沿调遣敌人 ——
+        司令死不死都一样(剩下的兵自己也会去呼叫总部要人)。
+        """
+        if side == "ally":
+            if not self.command_alive("ally"):
+                return False, "前沿指挥所被毁"
+            if not self.comms_alive("ally"):
+                return False, "前沿通讯室被毁"
+            return True, "指挥所+通讯室完好"
+        if not self.comms_alive("enemy"):
+            return False, "通讯站已炸毁,联系不上总部"
+        return True, "通讯站在,总部持续调遣"
+
+    def plant_c4(self, ent):
+        """在设施上安放 C4(25 秒后起爆,爆区半径固定)。"""
+        ent.c4 = dict(t=C4_FUSE)
+        audio.play("click")
+        self.add_toast(f"C4 已安放:{ent.name} —— {int(C4_FUSE)} 秒后起爆!"
+                       f"(爆区半径 {C4_BLAST_RADIUS},快离开)", COL["bad"], 4.5)
+
+    def _update_c4(self, dt):
+        for st in self.structures:
+            if st.c4 is None or st.destroyed:
+                continue
+            st.c4["t"] -= dt
+            if st.c4["t"] <= 0:
+                self.detonate_c4(st)
+
+    def detonate_c4(self, ent):
+        """C4 起爆:爆区半径内所有单位吃伤害,设施直接炸毁。"""
+        ent.c4 = None
+        audio.play("sg")
+        self.add_toast(f"{ent.name} 的 C4 起爆!", COL["accent"], 3.4)
+        self.explode(ent.x, ent.y, C4_UNIT_DMG, "player",
+                     radius=C4_BLAST_RADIUS, struct_dmg=C4_STRUCT_DMG)
+        if not self.objectives_done() and ent.side == "enemy" and ent.destroyed:
+            done = sum(1 for o in self.objectives if o.destroyed)
+            self.add_toast(f"敌方设施已摧毁 {done}/{len(self.objectives)}",
+                           COL["good"], 3.4)
+        if self.objectives_done():
+            self.add_toast("全部指挥设施已摧毁!撤出要塞!", COL["accent"], 5.0)
+
+    def _assign_repair(self, st, pool, dt):
+        """派最近的人去修设施(双方通用)。"""
+        st.repair_workers = [w for w in st.repair_workers
+                             if getattr(w, "hp", 1) > 0
+                             and not getattr(w, "downed", False)
+                             and getattr(w, "repair_target", None) is st]
+        if st.destroyed or not st.damaged:
+            return
+        if len(st.repair_workers) < REPAIR_MAX_WORKERS:
+            cands = []
+            for u in pool:
+                if getattr(u, "repair_target", None) is not None:
+                    continue
+                d = math.hypot(u.x - st.x, u.y - st.y)
+                if d <= REPAIR_SEARCH:
+                    cands.append((d, u))
+            cands.sort(key=lambda t: t[0])
+            for _d, u in cands[:REPAIR_MAX_WORKERS - len(st.repair_workers)]:
+                u.repair_target = st
+                st.repair_workers.append(u)
+        # 站到位的修理单位按秒回血
+        rate = REPAIR_RATE * dt * len([w for w in st.repair_workers
+                                       if math.hypot(w.x - st.x, w.y - st.y)
+                                       <= REPAIR_RANGE])
+        if rate:
+            st.repair(rate)
+
+    def _update_repair(self, dt):
+        if self.mode != "assault":
+            return
+        for st in self.friend_structs:
+            self._assign_repair(st, self.allies, dt)
+        for st in self.objectives:
+            self._assign_repair(st, self.scavs, dt)
+        # 修好了/目标没了就放人
+        for st in self.structures:
+            if st.destroyed or not st.damaged:
+                for w in st.repair_workers:
+                    if getattr(w, "repair_target", None) is st:
+                        w.repair_target = None
+                st.repair_workers = []
+
+    def _spawn_enemy_wave(self):
+        """敌方援兵:从要塞纵深赶来的守军。"""
+        p = self.player
+        spots = [pos for _k, pos in self.map.scav_spawns
+                 if math.hypot(pos[0] - p.x, pos[1] - p.y) >= ENEMY_REINF_MIN_DIST]
+        if not spots:
+            spots = [pos for _k, pos in self.map.scav_spawns]
+        random.shuffle(spots)
+        kinds = ["ar", "ar", "shotgun", "pistol"]
+        for i in range(int(ENEMY_REINF_SQUAD)):
+            if len(self.scavs) >= ENEMY_REINF_CAP:
+                break
+            x, y = spots[i % len(spots)]
+            s = Scav(kinds[i % len(kinds)], x + random.randint(-10, 10),
+                     y + random.randint(-10, 10), self.diff)
+            s.state = "search"
+            s.alert = (p.x, p.y)
+            self.scavs.append(s)
+        self.enemy_waves += 1
+        audio.play("kill")
+        self.add_toast(f"敌方援兵抵达(第 {self.enemy_waves} 波)!"
+                       "总部通过通讯站在往前沿调人 —— 想断援兵只能炸通讯站",
+                       COL["bad"], 3.6)
+
+    def _spawn_ally_wave(self):
+        """我方援兵:从前沿指挥所补上来的突击队员。"""
+        if len(self.allies) >= ALLY_REINF_CAP:
+            return
+        base = None
+        for st in self.friend_structs:
+            if st.role == "command" and not st.destroyed:
+                base = st
+                break
+        if base is None and self.friend_structs:
+            base = self.friend_structs[0]
+        if base is None:
+            return
+        n = int(ALLY_REINF_SQUAD)
+        for i in range(n):
+            if len(self.allies) >= ALLY_REINF_CAP:
+                break
+            spot = self.map.walkable_near(int(base.x // TILE) + i,
+                                          int(base.y // TILE)) or \
+                (int(base.x // TILE), int(base.y // TILE))
+            self.allies.append(Ally(spot[0] * TILE + TILE // 2,
+                                    spot[1] * TILE + TILE // 2))
+        self.ally_waves += 1
+        audio.play("pickup")
+        self.add_toast(f"我方援兵加入战场(第 {self.ally_waves} 波)", COL["good"], 3.2)
+
+    def _update_reinforce(self, dt):
+        if self.mode != "assault":
+            return
+        if self.reinforce_reason("enemy")[0]:
+            self.enemy_reinf_t -= dt
+            if self.enemy_reinf_t <= 0:
+                self.enemy_reinf_t = ENEMY_REINF_INTERVAL
+                self._spawn_enemy_wave()
+        if self.reinforce_reason("ally")[0]:
+            self.ally_reinf_t -= dt
+            if self.ally_reinf_t <= 0:
+                self.ally_reinf_t = ALLY_REINF_INTERVAL
+                self._spawn_ally_wave()
+
+    def damage_structures_at(self, x, y, radius, dmg, owner="player"):
+        """爆炸波及设施:自己人的爆炸不会炸自己人的设施。"""
+        for st in self.structures:
+            if st.destroyed:
+                continue
+            own = (owner in ("player", "ally")) == (st.side == "ally")
+            if own:
+                continue
+            if math.hypot(st.x - x, st.y - y) <= radius + st.r:
+                st.damage(dmg)
+                if st.destroyed:
+                    self.add_toast(f"{st.name} 被炸毁!", COL["accent"], 3.4)
+
     def _update_burn(self, dt):
         """龙息弹燃烧伤害。"""
         for s in list(self.scavs):
@@ -1051,6 +1316,10 @@ class Raid:
                            objectives_done=objs_done,
                            support_calls=self.support_calls,
                            support_points=self.support_points,
+                           enemy_waves=self.enemy_waves,
+                           ally_waves=self.ally_waves,
+                           commander_killed=(self.mode == "assault"
+                                             and self.commander() is None),
                            mission=mission)
         self.game.raid_finished(self.result)
 
@@ -1255,6 +1524,9 @@ class Raid:
         self._update_burn(dt)
         self._update_channel(dt)
         self._update_support(dt)
+        self._update_c4(dt)
+        self._update_repair(dt)
+        self._update_reinforce(dt)
         self._update_bullets(dt)
         for pt in self.particles:
             pt["ttl"] -= dt

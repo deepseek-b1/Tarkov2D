@@ -3,7 +3,7 @@
 import math
 import random
 
-from settings import SCAVS, TILE
+from settings import SCAVS, TILE, SCAV_LOD_DIST, REPAIR_RANGE
 
 
 class Scav:
@@ -37,6 +37,7 @@ class Scav:
         self.path = []            # [tile]
         self.path_i = 0
         self.repath_t = 0.0
+        self.path_interval = 0.6  # 重算路径的间隔(远端的守军放宽,省算力)
         self.alert = None         # 听声/最后目击点
         self.search_t = 0.0
         self.shoot_t = 0.0
@@ -46,6 +47,7 @@ class Scav:
         self.hit_flash = 0.0
         self.burn_t = 0.0        # 燃烧剩余时间(龙息弹)
         self.burn_dps = 0.0
+        self.repair_target = None  # 被派去修的设施(突袭模式:通讯站被打坏要修)
 
     @property
     def pos(self):
@@ -62,8 +64,9 @@ class Scav:
             self.search_t = 0.0
             self.path = []
 
-    def sees_player(self, raid):
-        p = raid.threat_for(self)
+    def sees_player(self, raid, target=None):
+        """目标是否在视野内且视线通畅。target 已算过时直接传入,避免重复选目标。"""
+        p = raid.threat_for(self) if target is None else target
         dist = math.hypot(p.x - self.x, p.y - self.y)
         if dist > self.d["view"]:
             return False
@@ -98,7 +101,7 @@ class Scav:
     def _repath(self, raid, target_px, force=False):
         if not force and self.repath_t > 0:
             return
-        self.repath_t = 0.6
+        self.repath_t = self.path_interval
         start = (int(self.x // TILE), int(self.y // TILE))
         goal = (int(target_px[0] // TILE), int(target_px[1] // TILE))
         path = raid.map.astar(start, goal)
@@ -112,9 +115,33 @@ class Scav:
     def update(self, raid, dt):
         p = raid.threat_for(self)      # 目标可能是玩家,也可能是暴露的队友
         dist = math.hypot(p.x - self.x, p.y - self.y)
-        see = self.sees_player(raid)
         self.hit_flash = max(0.0, self.hit_flash - dt)
         self.repath_t -= dt
+        # 被派去修设施:先跑过去站住(回血由 Raid._assign_repair 结算)
+        st = self.repair_target
+        if st is not None:
+            if st.destroyed or not st.damaged:
+                self.repair_target = None
+            else:
+                if math.hypot(st.x - self.x, st.y - self.y) > REPAIR_RANGE:
+                    self._repath(raid, (st.x, st.y))
+                    self._follow_path(raid, dt, self.d["speed"])
+                else:
+                    self.path = []
+                self.facing = math.atan2(st.y - self.y, st.x - self.x)
+                return
+        # AI 降级:离玩家很远的守军不必每帧算视线/寻路(玩家在迷雾里也看不到),
+        # 50 人大本营要靠这个把帧率稳住
+        self.path_interval = 0.6 if dist <= SCAV_LOD_DIST else 1.6
+        far = dist > SCAV_LOD_DIST
+        if far and self.state != "chase":
+            if self.state == "idle":
+                self.wander_t -= dt
+                if self.wander_t <= 0:
+                    self.wander_t = random.uniform(1.5, 4.0)
+            self._follow_path(raid, dt, self.d["speed"] * 0.45)
+            return
+        see = self.sees_player(raid, p)
         self.shoot_t -= dt
 
         if see:
