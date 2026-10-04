@@ -14,6 +14,9 @@ from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       RPG_HALF_HP_ARMOR_LEVEL, TOUCH, MODES, MODE_MAP,
                       HOSTAGE_COUNT, HOSTAGE_ENEMIES, ALLY_COUNT,
                       HOSTAGE_RESCUE_TIME, REVIVE_TIME, INTERACT_RANGE, ALLY_DMG,
+                      ASSAULT_ENEMIES, ASSAULT_ALLIES, ASSAULT_DESTROY_TIME,
+                      ASSAULT_START_POINTS, ASSAULT_KILL_POINTS, ASSAULT_DIFF,
+                      SUPPORT, SUPPORT_ORDER,
                       weapon_params, weapon_capacity, weapon_ammo_ids,
                       weapon_slots, weapon_attach, weapon_blast_mul, ATTACH_SLOTS,
                       fmt_rub, get_font)
@@ -22,6 +25,16 @@ from world import GameMap, LootContainer
 from enemy import Scav
 from npc import Ally, Hostage
 from touch import TouchUI
+
+
+class Objective:
+    """突袭模式:要塞里的指挥设施,安放炸药(按 E 站定)摧毁。"""
+
+    def __init__(self, name, x, y):
+        self.name = name
+        self.x, self.y = x, y
+        self.r = 20
+        self.destroyed = False
 
 
 class Player:
@@ -107,19 +120,24 @@ class Player:
 class Raid:
     def __init__(self, game, difficulty=None):
         self.game = game
-        self.diff_key = difficulty if difficulty in DIFFICULTIES else \
-            (getattr(game.save, "difficulty", None) or "lockdown")
-        if self.diff_key not in DIFFICULTIES:
-            self.diff_key = "lockdown"
-        self.diff = DIFFICULTIES[self.diff_key]
         self.mode = getattr(game.save, "mode", "raid")
         if self.mode not in MODES:
             self.mode = "raid"
+        if self.mode == "assault":
+            # 突袭是独立模式:固定强度,不参与 简单/封锁/强化封锁 三档
+            self.diff_key = "assault"
+            self.diff = ASSAULT_DIFF
+        else:
+            self.diff_key = difficulty if difficulty in DIFFICULTIES else \
+                (getattr(game.save, "difficulty", None) or "lockdown")
+            if self.diff_key not in DIFFICULTIES:
+                self.diff_key = "lockdown"
+            self.diff = DIFFICULTIES[self.diff_key]
         map_key = MODE_MAP.get(self.mode) or getattr(game.save, "map_key", "border")
         self.map_key = map_key if map_key in MAPS else "border"
         self.boss_cfg = BOSSES.get(self.map_key)
         self.touch_mode = bool(getattr(game.save, "touch", False))
-        self.touch = TouchUI() if self.touch_mode else None
+        self.touch = TouchUI(support=self.mode == "assault") if self.touch_mode else None
         self.aim_locked = None
         self.map = GameMap(self.map_key)
         self.map_surf = self.map.prerender()
@@ -134,15 +152,29 @@ class Raid:
             # 人质模式:匪徒固定 20 名(刷新点按房间均匀分布),没有头目/手下/作者
             random.shuffle(self.scavs)
             self.scavs = self.scavs[:HOSTAGE_ENEMIES]
+        elif self.mode == "assault":
+            # 突袭:大本营守军 50 名(固定,无头目/手下/作者)
+            random.shuffle(self.scavs)
+            self.scavs = self.scavs[:ASSAULT_ENEMIES]
         else:
             self._spawn_boss_and_guards()
             self._spawn_author()
-        # 人质模式的己方单位:3 名队友 + 4 名人质
-        self.allies = [Ally(x, y) for x, y in self.map.ally_spawns[:ALLY_COUNT]] \
-            if self.mode == "hostage" else []
+        # 己方单位:人质模式 3 名队友,突袭模式 10 名突击队员
+        ally_n = ASSAULT_ALLIES if self.mode == "assault" else ALLY_COUNT
+        self.allies = [Ally(x, y) for x, y in self.map.ally_spawns[:ally_n]] \
+            if self.mode in ("hostage", "assault") else []
         self.hostages = [Hostage(x, y) for x, y in self.map.hostage_spawns[:HOSTAGE_COUNT]] \
             if self.mode == "hostage" else []
-        self.channel = None       # 解救人质 / 拉起队友的引导状态
+        # 突袭目标:要炸掉的指挥设施
+        self.objectives = [Objective(n, x, y) for n, (x, y) in self.map.objectives] \
+            if self.mode == "assault" else []
+        self.channel = None       # 救人质 / 拉起队友 / 炸设施的引导状态
+        # 友军支援(仅突袭模式):积分靠击杀赚,呼叫要花积分
+        self.support_points = ASSAULT_START_POINTS if self.mode == "assault" else 0
+        self.support_cd = {k: 0.0 for k in SUPPORT_ORDER}
+        self.strikes = []         # 待生效的支援:{kind,x,y,t,cfg}
+        self.recon_t = 0.0        # 无人机侦察剩余时间(秒)
+        self.support_calls = 0
         self.containers = list(self.map.loot)
         # 强化封锁:机密文件固定刷在保险箱(先放入,保证有位置)
         if self.diff_key == "hardened" and DOC_HARDENED_COUNT > 0:
@@ -165,6 +197,11 @@ class Raid:
         if self.mode == "hostage":
             self.add_toast(f"任务:救出 {HOSTAGE_COUNT} 名人质后撤离 —— 拐角有死角,小心埋伏",
                            COL["accent"], 5.0)
+        if self.mode == "assault":
+            self.add_toast(f"任务:炸掉 {len(self.objectives)} 座指挥设施(按 E 安放炸药)后撤出要塞",
+                           COL["accent"], 5.0)
+            self.add_toast(f"友军支援已就绪:10 名突击队员随你进攻 · 1/2/3 呼叫支援",
+                           COL["good"], 5.0)
         if any(getattr(s, "tag", None) == "author" for s in self.scavs):
             self.add_toast("警报:隐藏头目「作者」携 RPG 在场!(没穿 6 级甲别硬碰)",
                            COL["bad"], 5.0)
@@ -335,7 +372,7 @@ class Raid:
         return x, y
 
     def nearest_interactable(self):
-        """人质模式:最近的可交互对象(未解救人质 / 倒地球友)。"""
+        """最近的可交互对象:未解救人质 / 倒地球友 / 突袭模式要炸的指挥设施。"""
         p = self.player
         best, bd, kind = None, INTERACT_RANGE, None
         for h in self.hostages:
@@ -350,10 +387,29 @@ class Raid:
             d = math.hypot(a.x - p.x, a.y - p.y)
             if d < bd:
                 best, bd, kind = a, d, "revive"
+        for o in self.objectives:
+            if o.destroyed:
+                continue
+            d = math.hypot(o.x - p.x, o.y - p.y)
+            if d < bd:
+                best, bd, kind = o, d, "destroy"
         return (kind, best) if best is not None else (None, None)
 
+    def channel_need(self, kind=None):
+        """引导类交互所需的秒数。"""
+        k = kind or (self.channel["kind"] if self.channel else None)
+        return {"rescue": HOSTAGE_RESCUE_TIME, "revive": REVIVE_TIME,
+                "destroy": ASSAULT_DESTROY_TIME}.get(k, 1.0)
+
+    def objectives_done(self):
+        return len(self.objectives) > 0 and all(o.destroyed for o in self.objectives)
+
+    def allows_extract(self):
+        """突袭模式必须先把指挥设施全炸掉才能撤离。"""
+        return self.mode != "assault" or self.objectives_done()
+
     def interact(self):
-        """E / 搜刮按钮:优先救人质、拉队友,其次搜刮容器。"""
+        """E / 搜刮按钮:优先救人质、拉队友、炸设施,其次搜刮容器。"""
         if self.channel is not None:
             self.channel = None
             return
@@ -373,12 +429,12 @@ class Raid:
                 audio.play("click")
 
     def _update_channel(self, dt):
-        """解救人质 / 拉起队友的引导进度(需要站定且保持在附近)。"""
+        """解救人质 / 拉起队友 / 炸设施的引导进度(需要站定且保持在附近)。"""
         if self.channel is None or self.over:
             return
         p = self.player
         ent = self.channel["ent"]
-        need = HOSTAGE_RESCUE_TIME if self.channel["kind"] == "rescue" else REVIVE_TIME
+        need = self.channel_need()
         d = math.hypot(ent.x - p.x, ent.y - p.y)
         keys = pygame.key.get_pressed()
         moving = any(keys[k] for k in (pygame.K_w, pygame.K_a, pygame.K_s, pygame.K_d,
@@ -390,7 +446,7 @@ class Raid:
             self.channel = None
             self.add_toast("离太远了,引导中断", COL["bad"])
             return
-        self.channel["t"] += dt                  # 站定推进(边走边救也能完成,但更慢)
+        self.channel["t"] += dt                  # 站定推进(边走边做也能完成,但更慢)
         if moving:
             self.channel["t"] -= dt * 0.5
         if self.channel["t"] < 0:
@@ -405,6 +461,18 @@ class Raid:
                 self.add_toast(f"解救人质 {done}/{len(self.hostages)}", COL["good"], 3.0)
                 if done >= len(self.hostages):
                     self.add_toast("全部人质已解救!带队撤离!", COL["accent"], 5.0)
+            elif kind == "destroy":
+                ent.destroyed = True
+                done = sum(1 for o in self.objectives if o.destroyed)
+                audio.play("sg")
+                self.shake = min(14, self.shake + 10)
+                self.add_particles(ent.x, ent.y, 30, (255, 170, 60), speed=220)
+                self.emit_noise(ent.x, ent.y, 900)
+                self.add_toast(f"{ent.name} 已摧毁({done}/{len(self.objectives)})",
+                               COL["good"], 3.4)
+                if self.objectives_done():
+                    self.add_toast("全部指挥设施已摧毁!撤出要塞!",
+                                   COL["accent"], 5.0)
             else:
                 ent.revive()
                 audio.play("heal")
@@ -413,6 +481,9 @@ class Raid:
     def kill_scav(self, scav):
         self.scavs.remove(scav)
         self.kills += 1
+        if self.mode == "assault":
+            # 击杀守军换支援积分(硬点子给得多)
+            self.support_points += ASSAULT_KILL_POINTS.get(scav.kind, 1)
         audio.play("kill")
         tag = getattr(scav, "tag", None)
         cx, cy = self._corpse_pos(int(scav.x), int(scav.y))
@@ -526,25 +597,33 @@ class Raid:
                 best, bd = a, d
         return best if best is not None else p
 
-    def explode(self, x, y, dmg, owner, src=None, blast_mul=1.0):
-        """火箭弹爆炸:半径内的拾荒者一律吃伤害(不用瞄准);
-        玩家被波及则按火箭弹规则判定(穿 6 级甲半血,否则阵亡)。src 为发射者,不吃自己的爆炸。"""
+    def explode(self, x, y, dmg, owner, src=None, blast_mul=1.0, radius=None,
+                friendly=False):
+        """火箭弹/支援火力爆炸:半径内的拾荒者一律吃伤害(不用瞄准);
+        玩家被波及则按火箭弹规则判定(穿 6 级甲半血,否则阵亡)。src 为发射者,不吃自己的爆炸。
+        radius 可覆盖溅射半径(友军支援用);friendly=True 时对玩家按普通伤害结算
+        (护甲减伤,不会被自己叫的空袭一炮带走)。"""
         audio.play("sg")
         self.shake = min(14, self.shake + 8)
         self.add_particles(x, y, 26, (255, 170, 60), speed=240)
         self.add_particles(x, y, 14, (255, 240, 180), speed=150)
         self.emit_noise(x, y, 900)
-        radius = RPG_BLAST_RADIUS * blast_mul
+        rad = RPG_BLAST_RADIUS * blast_mul if radius is None else radius
         for s in list(self.scavs):
             if s is src:
                 continue
-            if math.hypot(s.x - x, s.y - y) <= radius:
+            if math.hypot(s.x - x, s.y - y) <= rad:
                 s.damage(dmg)
                 if s.dead:
                     self.kill_scav(s)
         p = self.player
-        if math.hypot(p.x - x, p.y - y) <= radius:
-            p.take_damage(dmg, self, rpg=True)
+        if math.hypot(p.x - x, p.y - y) <= rad:
+            if friendly:
+                if self.mode == "assault":
+                    self.add_toast("被友军火力波及!", COL["bad"], 2.6)
+                p.take_damage(dmg * 0.5, self)
+            else:
+                p.take_damage(dmg, self, rpg=True)
 
     def _update_bullets(self, dt):
         alive = []
@@ -756,6 +835,106 @@ class Raid:
         self.add_toast(f"已安装 {item.name}({ATTACH_SLOTS.get(slot, '')})",
                        COL["good"], 3.0)
 
+    # ---------- 友军支援(突袭模式) ----------
+    def support_state(self, key):
+        """返回 (是否可用, 说明文字)。"""
+        cfg = SUPPORT[key]
+        if self.mode != "assault" or self.over:
+            return False, "只有突袭模式能呼叫友军支援"
+        cd = self.support_cd.get(key, 0.0)
+        if cd > 0:
+            return False, f"{cfg['name']}冷却中({int(cd) + 1}s)"
+        if self.support_points < cfg["cost"]:
+            return False, f"积分不足:{self.support_points}/{cfg['cost']}"
+        return True, ""
+
+    def _support_target(self):
+        """支援落点:电脑 = 鼠标位置;手机 = 锁定的敌人(没有就取身前一段距离)。"""
+        p = self.player
+        if self.touch_mode:
+            if self.aim_locked is not None:
+                return self.aim_locked.x, self.aim_locked.y
+            return p.x + math.cos(p.aim) * 320, p.y + math.sin(p.aim) * 320
+        mpx, mpy = pygame.mouse.get_pos()
+        return self.cam[0] + mpx, self.cam[1] + mpy
+
+    def call_support(self, key, x, y):
+        """呼叫友军支援:花积分,延迟后落到 (x, y)。"""
+        if key not in SUPPORT:
+            return False
+        ok, why = self.support_state(key)
+        if not ok:
+            self.add_toast(why, COL["bad"], 2.8)
+            audio.play("empty")
+            return False
+        cfg = SUPPORT[key]
+        self.support_points -= cfg["cost"]
+        self.support_cd[key] = cfg["cd"]
+        self.support_calls += 1
+        self.strikes.append(dict(kind=key, x=x, y=y, t=cfg["delay"], cfg=cfg))
+        if key == "recon":
+            self.add_toast(f"无人机已在路上(-{cfg['cost']} 积分):{cfg['delay']:.0f}s 后标记守军",
+                           COL["accent"], 3.2)
+        elif key == "barrage":
+            self.add_toast(f"炮火覆盖呼叫成功(-{cfg['cost']} 积分):{cfg['delay']:.0f}s 后落弹",
+                           COL["accent"], 3.4)
+        else:
+            self.add_toast(f"空袭呼叫成功(-{cfg['cost']} 积分):{cfg['delay']:.0f}s 后投弹",
+                           COL["accent"], 3.4)
+        audio.play("click")
+        return True
+
+    def _update_support(self, dt):
+        """支援计时:冷却、延迟、无人机侦察、落弹。"""
+        if self.mode != "assault":
+            return
+        for k in self.support_cd:
+            if self.support_cd[k] > 0:
+                self.support_cd[k] = max(0.0, self.support_cd[k] - dt)
+        self.recon_t = max(0.0, self.recon_t - dt)
+        if not self.strikes:
+            return
+        keep = []
+        for st in self.strikes:
+            if st["kind"] == "shell":
+                keep.append(st)          # 落弹只需倒计时,下一段处理
+                continue
+            st["t"] -= dt
+            if st["t"] > 0:
+                keep.append(st)
+                continue
+            kind, cfg = st["kind"], st["cfg"]
+            if kind == "recon":
+                self.recon_t = float(cfg["dur"])
+                self.add_toast(f"无人机到位:守军位置全图标记 {int(cfg['dur'])}s",
+                               COL["good"], 3.2)
+                audio.play("pickup")
+            else:
+                # 空袭 / 炮火覆盖:展开成一串落弹(炮弹带各自的延时)
+                n = int(cfg["bombs"]) if kind == "airstrike" else int(cfg["shells"])
+                gap = 0.22 if kind == "airstrike" else cfg["gap"]
+                for i in range(n):
+                    ang = random.uniform(0, math.tau)
+                    rad = random.uniform(0, cfg["scatter"])
+                    keep.append(dict(kind="shell", x=st["x"] + math.cos(ang) * rad,
+                                     y=st["y"] + math.sin(ang) * rad, t=i * gap,
+                                     cfg=cfg, radius=cfg["radius"], dmg=cfg["dmg"]))
+                audio.play("sg")
+        self.strikes = []
+        ready = []
+        for st in keep:
+            if st["kind"] == "shell":
+                st["t"] -= dt            # 落弹的延时(展开时已经扣过一帧,这里只扣延迟)
+                if st["t"] <= 0:
+                    ready.append(st)
+                else:
+                    self.strikes.append(st)
+            else:
+                self.strikes.append(st)
+        for sh in ready:
+            self.explode(sh["x"], sh["y"], sh["dmg"], "support",
+                         radius=sh["radius"], friendly=True)
+
     def _update_burn(self, dt):
         """龙息弹燃烧伤害。"""
         for s in list(self.scavs):
@@ -856,14 +1035,23 @@ class Raid:
         # 会在放回物品/部分堆叠转移时失真
         gained = max(0, int(self._loadout_value() - self.start_value))
         rescued = sum(1 for h in self.hostages if h.rescued)
+        objs_done = sum(1 for o in self.objectives if o.destroyed)
+        if self.mode == "hostage":
+            mission = len(self.hostages) > 0 and rescued >= len(self.hostages)
+        elif self.mode == "assault":
+            mission = self.objectives_done()
+        else:
+            mission = True
         self.result = dict(kind=kind, kills=self.kills, gained=gained,
                            n=len(self.loot_log), time=RAID_TIME - self.time_left,
                            entries=self.loot_log,
                            mode=self.mode, rescued=rescued,
                            hostages=len(self.hostages),
-                           mission=(self.mode != "hostage" or (
-                               len(self.hostages) > 0
-                               and rescued >= len(self.hostages))))
+                           objectives=len(self.objectives),
+                           objectives_done=objs_done,
+                           support_calls=self.support_calls,
+                           support_points=self.support_points,
+                           mission=mission)
         self.game.raid_finished(self.result)
 
     # ---------- 每帧 ----------
@@ -911,6 +1099,12 @@ class Raid:
                 elif ev.key == pygame.K_h:
                     if not (self.inv_open or self.loot_target):
                         self.quick_heal()
+                elif ev.key in (pygame.K_1, pygame.K_2, pygame.K_3) and self.mode == "assault":
+                    # 友军支援快捷呼叫:1 空袭 / 2 炮火覆盖 / 3 无人机侦察
+                    if not (self.inv_open or self.loot_target):
+                        idx = {pygame.K_1: 0, pygame.K_2: 1, pygame.K_3: 2}[ev.key]
+                        tx, ty = self._support_target()
+                        self.call_support(SUPPORT_ORDER[idx], tx, ty)
             elif ev.type == pygame.MOUSEBUTTONDOWN:
                 if self.paused:
                     self._handle_pause_click(ev.pos)
@@ -1000,6 +1194,10 @@ class Raid:
                 elif name == "bag":
                     self.loot_target = None
                     self.inv_open = not self.inv_open
+                elif name in ("sup1", "sup2", "sup3"):
+                    idx = {"sup1": 0, "sup2": 1, "sup3": 2}[name]
+                    tx, ty = self._support_target()
+                    self.call_support(SUPPORT_ORDER[idx], tx, ty)
         else:
             held = pygame.mouse.get_pressed()[0]
             self.braced = bool(pygame.mouse.get_pressed()[2])   # 右键=架枪
@@ -1029,6 +1227,13 @@ class Raid:
             if r.collidepoint(p.x, p.y):
                 zone = name
                 break
+        if zone is not None and not self.allows_extract():
+            # 突袭模式:指挥设施没炸完不让撤
+            if "locked" not in self.warned:
+                self.warned.add("locked")
+                self.add_toast("先炸掉全部指挥设施才能撤离!", COL["bad"], 3.6)
+            zone = None
+            self.extract_t = max(0.0, self.extract_t - dt * 3)
         if zone is not None and not moving and not p.reloading:
             if self.extract_t == 0:
                 self.add_toast(f"开始撤离:{zone}", COL["accent"])
@@ -1049,6 +1254,7 @@ class Raid:
             h.update(self, dt)
         self._update_burn(dt)
         self._update_channel(dt)
+        self._update_support(dt)
         self._update_bullets(dt)
         for pt in self.particles:
             pt["ttl"] -= dt

@@ -1,7 +1,8 @@
 name: Build Android APK
 
-# 用法:把项目推到 GitHub → 仓库 Actions 页面点 "Run workflow"
-# 构建完成后在 Artifacts 里下载 Tarkov2D-apk(zip,里面是 apk,传到手机安装即可)
+# Builds a native arm64 Android APK with buildozer + python-for-android.
+# Trigger manually from the Actions tab, or push a v* tag.
+# Artifact: Tarkov2D-apk (contains bin/*.apk).
 
 on:
   workflow_dispatch:
@@ -19,27 +20,22 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: 安装系统依赖
+      - name: Install system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y git zip unzip openjdk-17-jdk autoconf automake libtool \
             libtool-bin libltdl-dev pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev \
             libtinfo6 cmake libffi-dev libssl-dev gettext
-          echo "===== 校验 libffi 配方要求的宏是否就位 ====="
-          echo -n "LT_SYS_SYMBOL_USCORE 出现次数: "
-          grep -c "LT_SYS_SYMBOL_USCORE" /usr/share/aclocal/libtool.m4 /usr/share/aclocal/ltdl.m4 2>/dev/null | tr '\n' ' '
-          echo
 
-      - name: 安装 buildozer
+      - name: Install buildozer
         run: |
           pip install --upgrade pip
           pip install "buildozer>=1.5.0" "cython<3.1"
 
-      # Ubuntu 的 libtool 2.4.7 里没有 LT_SYS_SYMBOL_USCORE 宏(老 libtool 才有),
-      # 而 libffi 的 configure.ac 要用它 —— 一旦 autoreconf 重新生成 aclocal.m4 就报
-      # "possibly undefined macro: LT_SYS_SYMBOL_USCORE" 直接中断构建。
-      # 这些包自带的 configure 本来就是完整可用的,所以有 configure 就跳过 autoreconf。
-      - name: 修补 autoreconf(绕开 libtool 老宏缺失)
+      # Ubuntu libtool 2.4.7 lacks LT_SYS_SYMBOL_USCORE which some autotools
+      # recipes regenerate. Those tarballs ship a working configure already,
+      # so skip autoreconf whenever one is present.
+      - name: Patch autoreconf
         run: |
           mkdir -p "$HOME/.binshim"
           cat > "$HOME/.binshim/autoreconf" <<'EOF'
@@ -48,75 +44,80 @@ jobs:
             case "$a" in
               -*) ;;
               *) if [ -f "$a/configure" ]; then
-                   echo "[shim] skip autoreconf for $a (pre-generated configure exists)"
+                   echo "[shim] skip autoreconf for $a"
                    exit 0
                  fi ;;
             esac
           done
           if [ -f ./configure ]; then
-            echo "[shim] skip autoreconf in $PWD (pre-generated configure exists)"
+            echo "[shim] skip autoreconf in $PWD"
             exit 0
           fi
-          echo "[shim] pass-through to real autoreconf"
           exec /usr/bin/autoreconf "$@"
           EOF
           chmod +x "$HOME/.binshim/autoreconf"
-          "$HOME/.binshim/autoreconf" --help || true
           echo "$HOME/.binshim" >> "$GITHUB_PATH"
 
-      - name: 缓存 SDK/NDK
+      - name: Cache SDK/NDK
         uses: actions/cache@v4
         with:
           path: ~/.buildozer
           key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
 
-      # 第一趟:把工具链和 hostpython3 建出来(会在 pygame 处失败,continue-on-error 兜住)
-      - name: 预热(建 hostpython3)
+      # Warmup: builds the toolchain and hostpython3. It is expected to fail
+      # later on (at pygame) during the first pass.
+      - name: Warmup (build hostpython3)
         continue-on-error: true
         timeout-minutes: 70
         run: buildozer -v android debug
 
-      # 第二趟:把 Cython 装进 hostpython3 再正式构建
-      - name: 装 Cython 并构建
+      # p4a runs pygame setup.py with its own hostpython3, so Cython has to be
+      # installed there and not in the runner system python.
+      - name: Install Cython into hostpython3 and build
         run: |
           HP="$PWD/.buildozer/android/platform/build-arm64-v8a/build/other_builds/hostpython3/desktop/hostpython3/native-build/root/usr/local/bin/python3"
           if [ ! -x "$HP" ]; then
             HP=$(find "$HOME/.buildozer" "$PWD/.buildozer" -type f -path "*hostpython3*" -name "python3*" 2>/dev/null | head -1)
           fi
           echo "hostpython3: $HP"
-          test -x "$HP" || { echo "!! hostpython3 不存在,预热没建出来"; exit 1; }
+          test -x "$HP" || { echo "!! hostpython3 not built by warmup"; exit 1; }
           "$HP" -m pip install -q "cython<3.1" wheel setuptools
           "$HP" -c "import Cython; print('Cython', Cython.__version__)"
           buildozer -v android debug
 
-      - name: 显示产物
+      - name: Show artifacts
         run: ls -lh bin/ || true
 
-      # Self-check: the whole reason this build exists is that surface.so used to
-      # reference an undefined arm64 symbol. Verify it here instead of finding
-      # out on the phone.
-      - name: 校验 surface.so 的符号与架构
+      # Self-check: this build exists because surface.so used to reference
+      # undefined aarch64 symbols. Verify them here instead of on the phone.
+      - name: Verify surface.so symbols and arch
         run: |
           SO=$(find "$PWD/.buildozer" -path "*dists*" -name "surface.so" 2>/dev/null | head -1)
-          if [ -z "$SO" ]; then
-            SO=$(find "$PWD/.buildozer" -name "surface*.so" 2>/dev/null | head -1)
-          fi
+          [ -z "$SO" ] && SO=$(find "$PWD/.buildozer" -name "surface*.so" 2>/dev/null | head -1)
           echo "surface.so: $SO"
-          if [ -z "$SO" ]; then echo "!! 没找到 surface.so,跳过校验"; exit 0; fi
-          echo "--- 架构 ---"
+          if [ -z "$SO" ]; then echo "!! surface.so not found, skipping"; exit 0; fi
+          echo "--- arch (must be ARM aarch64, not x86_64) ---"
           file "$SO" || true
-          echo "--- 符号 alphablit_alpha_sse2_argb_surf_alpha ---"
-          nm -D "$SO" 2>/dev/null | grep -i alphablit || echo "(nm -D 无输出,试符号表)"
-          nm "$SO" 2>/dev/null | grep -i "alphablit_alpha_sse2_argb_surf_alpha" || true
+          echo "--- alphablit_alpha_sse2_argb_surf_alpha (must be T) ---"
+          nm -D "$SO" 2>/dev/null | grep alphablit || true
           if nm -D "$SO" 2>/dev/null | grep -q "alphablit_alpha_sse2_argb_surf_alpha"; then
-            echo ">>> 符号已定义 ✅ (T = defined text symbol)"
-          elif nm -D "$SO" 2>/dev/null | grep -q "alphablit_alpha_sse2_argb_surf_alpha"; then
-            echo ">>> 符号仍是 U(未定义) ❌"
+            if nm -D "$SO" 2>/dev/null | grep "alphablit_alpha_sse2_argb_surf_alpha" | grep -q " T "; then
+              echo ">>> OK: symbol is DEFINED (T)"
+            else
+              echo ">>> BAD: symbol present but still undefined (U)"
+            fi
           else
-            echo ">>> 该符号既未定义也不在动态表(可能已被静态解析) ⚠️"
+            echo ">>> WARN: symbol absent from dynamic table"
+          fi
+          echo "--- pg_has_avx2 (must be ABSENT on arm64) ---"
+          if nm -D "$SO" 2>/dev/null | grep -q "pg_has_avx2"; then
+            echo ">>> BAD: pg_has_avx2 still referenced, dlopen will fail on phone"
+            nm -D "$SO" 2>/dev/null | grep "pg_has_avx2"
+          else
+            echo ">>> OK: pg_has_avx2 not referenced"
           fi
 
-      - name: 上传 APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Tarkov2D-apk

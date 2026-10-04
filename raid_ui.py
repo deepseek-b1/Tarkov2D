@@ -117,11 +117,49 @@ def draw_raid(raid, screen):
         col = (255, 230, 120) if b["owner"] == "player" else (255, 150, 90)
         pygame.draw.line(screen, col, (nx, ny), (bx, by), 2)
 
-    # 拾荒者(仅玩家视线内可见)
+    # 突袭目标:指挥设施(未摧毁 = 高亮工事;已摧毁 = 废墟)
+    for o in getattr(raid, "objectives", []):
+        x, y = o.x + ox, o.y + oy
+        if o.destroyed:
+            pygame.draw.rect(screen, (58, 56, 54), (x - 20, y - 20, 40, 40),
+                             border_radius=4)
+            pygame.draw.line(screen, (26, 26, 28), (x - 14, y - 14), (x + 14, y + 14), 5)
+            pygame.draw.line(screen, (26, 26, 28), (x - 14, y + 14), (x + 14, y - 14), 5)
+            t = get_font(12, bold=True).render(f"{o.name} 已摧毁", True, (150, 150, 156))
+            screen.blit(t, t.get_rect(center=(x, y - 32)))
+        else:
+            pygame.draw.rect(screen, (120, 96, 58), (x - 20, y - 20, 40, 40),
+                             border_radius=4)
+            pygame.draw.rect(screen, COL["accent"], (x - 20, y - 20, 40, 40), 3,
+                             border_radius=4)
+            pygame.draw.circle(screen, COL["accent"], (int(x), int(y)), 6)
+            t = get_font(13, bold=True).render(o.name, True, COL["accent"])
+            screen.blit(t, t.get_rect(center=(x, y - 34)))
+
+    # 待落下的友军支援:落点标记 + 倒计时
+    for st in getattr(raid, "strikes", []):
+        sx, sy = st["x"] + ox, st["y"] + oy
+        cfg = st["cfg"]
+        if st["kind"] == "shell":
+            pygame.draw.circle(screen, (255, 150, 60), (int(sx), int(sy)), 6)
+            continue
+        rad = cfg.get("radius", 80)
+        col = (255, 90, 90) if st["kind"] == "airstrike" else (255, 170, 60)
+        pygame.draw.circle(screen, col, (int(sx), int(sy)), int(rad), 2)
+        pygame.draw.line(screen, col, (sx - 14, sy), (sx + 14, sy), 2)
+        pygame.draw.line(screen, col, (sx, sy - 14), (sx, sy + 14), 2)
+        label = cfg["name"] if st["kind"] != "recon" else "无人机"
+        t = get_font(14, bold=True).render(f"{label} {max(0.0, st['t']):.1f}s", True, col)
+        screen.blit(t, t.get_rect(center=(sx, sy - rad - 12)))
+
+    # 拾荒者(仅玩家视线内可见;无人机侦察期间全图标记)
+    recon = getattr(raid, "recon_t", 0.0) > 0
     for s in raid.scavs:
-        if not raid.map.los_clear(p.x, p.y, s.x, s.y):
+        if not recon and not raid.map.los_clear(p.x, p.y, s.x, s.y):
             continue
         x, y = s.x + ox, s.y + oy
+        if recon:
+            pygame.draw.circle(screen, (90, 200, 220), (int(x), int(y)), s.r + 5, 1)
         body = COL["scav"] if s.hit_flash <= 0 else (255, 200, 180)
         pygame.draw.circle(screen, body, (int(x), int(y)), s.r)
         pygame.draw.circle(screen, (30, 30, 34), (int(x), int(y)), s.r, 2)
@@ -215,6 +253,20 @@ def draw_raid(raid, screen):
             fake.center = (int(near.x), int(near.y))
             _edge_arrow(screen, raid, "人质", fake, ox, oy)
 
+    # 突袭模式:指向最近的未摧毁指挥设施
+    if raid.mode == "assault":
+        near, nd = None, 1e9
+        for o in raid.objectives:
+            if o.destroyed:
+                continue
+            d = math.hypot(o.x - raid.player.x, o.y - raid.player.y)
+            if d < nd:
+                near, nd = o, d
+        if near is not None and nd > 340:
+            fake = pygame.Rect(0, 0, 2, 2)
+            fake.center = (int(near.x), int(near.y))
+            _edge_arrow(screen, raid, near.name, fake, ox, oy)
+
     # 辅助瞄准(手机):锁定标记
     if raid.aim_locked is not None:
         lx = raid.aim_locked.x + ox
@@ -237,13 +289,14 @@ def draw_raid(raid, screen):
 
     # 解救人质 / 拉起队友 引导进度条
     if raid.channel is not None:
-        need = HOSTAGE_RESCUE_TIME if raid.channel["kind"] == "rescue" else REVIVE_TIME
+        need = raid.channel_need()
         ratio = min(1.0, raid.channel["t"] / need)
         bw = 90
         bx = px - bw / 2
         by = py - 52
         pygame.draw.rect(screen, (30, 30, 36), (bx, by, bw, 9), border_radius=4)
-        pygame.draw.rect(screen, COL["good"], (bx, by, bw * ratio, 9), border_radius=4)
+        col = COL["accent"] if raid.channel["kind"] == "destroy" else COL["good"]
+        pygame.draw.rect(screen, col, (bx, by, bw * ratio, 9), border_radius=4)
 
     _draw_hud(raid, screen)
 
@@ -372,23 +425,41 @@ def _draw_hud(raid, screen):
         screen.blit(bg, (20, 16))
         screen.blit(t, (30, 22))
 
+    # 突袭模式:目标进度 + 友军支援积分
+    if raid.mode == "assault" and not raid.over:
+        done = sum(1 for o in raid.objectives if o.destroyed)
+        alive = sum(1 for a in raid.allies if not a.downed)
+        info = (f"指挥设施 {done}/{len(raid.objectives)}    "
+                f"守军 {len(raid.scavs)}   队友 {alive}/{len(raid.allies)}")
+        t = get_font(18, bold=True).render(
+            info, True, COL["good"] if done >= len(raid.objectives) else COL["accent"])
+        bg = pygame.Surface((t.get_width() + 20, 32), pygame.SRCALPHA)
+        bg.fill((10, 12, 14, 175))
+        screen.blit(bg, (20, 16))
+        screen.blit(t, (30, 22))
+        _draw_support_panel(raid, screen, 20, 52)
+
     # 提示
     if not (raid.inv_open or raid.loot_target or raid.paused or raid.over):
         prompt = None
         for name, r in raid.map.extracts:
             if r.collidepoint(raid.player.x, raid.player.y):
-                prompt = "撤离区:保持不动完成撤离"
+                prompt = ("撤离区:保持不动完成撤离" if raid.allows_extract()
+                          else "先炸掉全部指挥设施才能撤离")
                 break
         if prompt is None and raid.channel is not None:
-            need = HOSTAGE_RESCUE_TIME if raid.channel["kind"] == "rescue" else REVIVE_TIME
-            label = "解救人质中" if raid.channel["kind"] == "rescue" else "拉起队友中"
+            need = raid.channel_need()
+            label = {"rescue": "解救人质中", "revive": "拉起队友中",
+                     "destroy": "安放炸药中"}.get(raid.channel["kind"], "进行中")
             prompt = f"{label}…{int(min(1.0, raid.channel['t'] / need) * 100)}%"
-        if prompt is None and raid.mode == "hostage":
+        if prompt is None and raid.mode in ("hostage", "assault"):
             kind, _ent = raid.nearest_interactable()
             if kind == "rescue":
                 prompt = "E  解救人质"
             elif kind == "revive":
                 prompt = "E  拉起队友"
+            elif kind == "destroy":
+                prompt = "E  安放炸药(摧毁设施)"
         if prompt is None:
             lc = raid.nearest_container()
             if lc is not None:
@@ -410,6 +481,38 @@ def _draw_hud(raid, screen):
         screen.blit(surf, (W // 2 - surf.get_width() // 2, y))
         screen.blit(t, (W // 2 - t.get_width() // 2, y + 4))
         y += 28
+
+
+def _draw_support_panel(raid, screen, x, y):
+    """友军支援面板:积分 + 三个呼叫(热键/点击按钮)。"""
+    from settings import SUPPORT, SUPPORT_ORDER
+    f = get_font(15, bold=True)
+    t = f.render(f"友军支援   积分 {raid.support_points}", True, COL["accent"])
+    w = 268
+    bg = pygame.Surface((w, 34 + 24 * len(SUPPORT_ORDER)), pygame.SRCALPHA)
+    bg.fill((10, 12, 14, 175))
+    screen.blit(bg, (x, y))
+    screen.blit(t, (x + 10, y + 6))
+    if getattr(raid, "recon_t", 0.0) > 0:
+        rt = get_font(13, bold=True).render(f"侦察中 {int(raid.recon_t)}s", True,
+                                            (90, 200, 220))
+        screen.blit(rt, (x + w - rt.get_width() - 10, y + 8))
+    fs = get_font(14)
+    yy = y + 32
+    for i, key in enumerate(SUPPORT_ORDER):
+        cfg = SUPPORT[key]
+        ok, why = raid.support_state(key)
+        cd = raid.support_cd.get(key, 0.0)
+        if ok:
+            col, tag = COL["good"], "就绪"
+        elif cd > 0:
+            col, tag = COL["text_dim"], f"冷却 {int(cd) + 1}s"
+        else:
+            col, tag = COL["bad"], f"缺 {cfg['cost'] - raid.support_points} 分"
+        line = f"[{i + 1}] {cfg['name']:<5s} {cfg['cost']:>2d} 分   {tag}"
+        t = fs.render(line, True, col)
+        screen.blit(t, (x + 10, yy))
+        yy += 24
 
 
 def ITEMS_CAL(d):
@@ -547,7 +650,12 @@ def _draw_result(raid, screen):
     screen.blit(t, t.get_rect(center=(W // 2, 150)))
 
     mm, ss = int(r["time"]) // 60, int(r["time"]) % 60
-    line = f"用时 {mm:02d}:{ss:02d}    击杀 {r['kills']}    搜刮 {r['n']} 件  价值 {fmt_rub(r['gained'])}"
+    if r.get("mode") == "assault":
+        line = (f"用时 {mm:02d}:{ss:02d}    击杀 {r['kills']}    "
+                f"支援呼叫 {r.get('support_calls', 0)} 次")
+    else:
+        line = (f"用时 {mm:02d}:{ss:02d}    击杀 {r['kills']}    "
+                f"搜刮 {r['n']} 件  价值 {fmt_rub(r['gained'])}")
     t = get_font(20).render(line, True, COL["text"])
     screen.blit(t, t.get_rect(center=(W // 2, 210)))
     if r.get("mode") == "hostage":
@@ -557,8 +665,19 @@ def _draw_result(raid, screen):
         t = get_font(20, bold=True).render(obj, True,
                                            COL["good"] if ok else COL["bad"])
         screen.blit(t, t.get_rect(center=(W // 2, 244)))
+    elif r.get("mode") == "assault":
+        ok = r.get("mission") and r["kind"] == "extract"
+        obj = (f"指挥设施 {r.get('objectives_done', 0)}/{r.get('objectives', 0)}   "
+               f"支援呼叫 {r.get('support_calls', 0)} 次 —— "
+               + ("任务完成!要塞已被瘫痪" if ok else "任务失败"))
+        t = get_font(20, bold=True).render(obj, True,
+                                           COL["good"] if ok else COL["bad"])
+        screen.blit(t, t.get_rect(center=(W // 2, 244)))
+        t = get_font(15).render("系统配发装备与战利品已回收,仓库配置未变动",
+                                True, COL["text_dim"])
+        screen.blit(t, t.get_rect(center=(W // 2, 274)))
 
-    if r["entries"]:
+    if r["entries"] and r.get("mode") != "assault":
         f = get_font(16)
         y = 260
         for e in r["entries"][:12]:

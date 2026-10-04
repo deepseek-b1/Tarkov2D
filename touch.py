@@ -19,22 +19,33 @@ BUTTONS = [
     ("bag", "背包", (0.955, 0.44), 40),
 ]
 
+# 突袭模式追加:友军支援快捷按钮(1 空袭 / 2 炮火覆盖 / 3 无人机侦察)
+SUPPORT_BUTTONS = [
+    ("sup1", "空袭", (0.575, 0.40), 34),
+    ("sup2", "炮火", (0.655, 0.315), 34),
+    ("sup3", "侦察", (0.735, 0.245), 34),
+]
+
 
 class TouchUI:
     """触屏输入状态机:摇杆 + 按钮(支持多指同时操作)。"""
 
-    def __init__(self):
+    def __init__(self, support=False):
         self.touches = {}        # id -> (x, y)
         self.stick_id = None
         self.stick_base = (0, 0)
         self.stick_vec = (0.0, 0.0)
         self.pressed = {}        # id -> button name
         self.just_pressed = []   # 本帧新按下的按钮名(供点射用)
+        self.support = support   # 是否显示友军支援按钮(突袭模式)
 
     # ---------- 几何 ----------
+    def buttons(self):
+        return BUTTONS + SUPPORT_BUTTONS if self.support else BUTTONS
+
     def button_layout(self):
         out = {}
-        for name, label, (rx, ry), r in BUTTONS:
+        for name, label, (rx, ry), r in self.buttons():
             out[name] = dict(label=label, pos=(int(W * rx), int(H * ry)), r=r)
         return out
 

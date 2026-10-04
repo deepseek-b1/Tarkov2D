@@ -517,8 +517,9 @@ def weapon_blast_mul(item):
 MODES = {
     "raid": dict(name="搜打撤", desc="自由搜刮 · 找撤离点撤离"),
     "hostage": dict(name="人质解救", desc="室内近战 · 20 名匪徒分守八间房 · 救出 4 名人质"),
+    "assault": dict(name="突袭", desc="强攻敌巢 · 50 守军 · 友军空袭支援"),
 }
-MODE_ORDER = ["raid", "hostage"]
+MODE_ORDER = ["raid", "hostage", "assault"]
 HOSTAGE_COUNT = 4          # 人质数量
 HOSTAGE_ENEMIES = 20       # 人质模式的敌人数量下限(地图上的刷新点按房间均匀布置)
 ALLY_COUNT = 3             # 队友数量
@@ -528,6 +529,42 @@ ALLY_RANGE = 520
 HOSTAGE_RESCUE_TIME = 2.5  # 解救人质引导时间(秒)
 REVIVE_TIME = 2.0          # 拉起倒地球友的引导时间(秒)
 INTERACT_RANGE = 64        # 人质/队友交互距离(像素)
+
+# ---------- 突袭模式(强攻敌人老巢) ----------
+# 独立模式:固定强度(不走 简单/封锁/强化封锁 三档),系统配发装备,友军支援要花积分
+ASSAULT_ENEMIES = 50       # 大本营守军数量(固定)
+ASSAULT_ALLIES = 10        # 突击队队友数量
+ASSAULT_DESTROY_TIME = 3.5 # 摧毁指挥设施的引导时间(秒)
+ASSAULT_START_POINTS = 10  # 开局支援积分
+ASSAULT_RESERVE_AMMO = 240 # 配发装备的备弹
+# 击杀守军获得支援积分(按兵种给分)
+ASSAULT_KILL_POINTS = {"melee": 1, "pistol": 1, "shotgun": 2, "ar": 2}
+# 突袭模式固定强度(不是给玩家选的难度档;name 只用于 HUD 显示)
+ASSAULT_DIFF = dict(name="突袭", hp=1.0, dmg=0.85, spread=1.15, rof=1.15,
+                    view=0.95, speed=0.95, scavs=ASSAULT_ENEMIES, rolls=2,
+                    loot=1.0, desc="大本营守军(固定强度)", loot_desc="弹药补给")
+# 需要摧毁的指挥设施:地图标记 -> 名称
+OBJECTIVES = {"O": "指挥所", "P": "弹药库", "Q": "通讯站"}
+# 系统配发装备(突袭模式):武器池 / 顶级配件 / 护甲 / 背包 / 药品
+# 只挑配件槽位齐全的枪,保证"满配件";每种槽位都给最好的那件
+ISSUE_WEAPONS = ["m4a1", "akm", "ak74", "mp5", "vector", "asval", "m700"]
+ISSUE_ATTACH = {"mag": "mag_drum_big", "grip": "grip_ang",
+                "laser": "laser_ir", "stock": "stock_heavy"}
+ISSUE_ARMORS = ["bt201", "b45", "b23", "zhuk", "korund"]
+ISSUE_PACKS = ["pack_xl", "pack_large"]
+ISSUE_MEDS = ["surgery", "ai2", "syringe", "medkit"]
+# 友军支援:花钱(积分)呼叫,延迟后落在指定区域
+SUPPORT_ORDER = ["airstrike", "barrage", "recon"]
+SUPPORT = {
+    "airstrike": dict(name="空袭", cost=8, cd=50.0, delay=3.2, radius=210,
+                      dmg=260, bombs=3, scatter=80,
+                      desc="航空炸弹 · 大范围高伤"),
+    "barrage": dict(name="炮火覆盖", cost=6, cd=35.0, delay=2.2, radius=165,
+                    shells=10, gap=0.34, dmg=115, scatter=115,
+                    desc="持续炮击一片区域"),
+    "recon": dict(name="无人机侦察", cost=4, cd=30.0, delay=1.2, dur=14.0,
+                  desc="短时标记全部守军"),
+}
 
 # ---------- 手机(触屏)模式 ----------
 TOUCH = dict(

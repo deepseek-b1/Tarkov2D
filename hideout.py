@@ -21,7 +21,7 @@ def _layout():
     return dict(
         stash_panel=pygame.Rect(30, 100, 470, 430),
         loadout_panel=pygame.Rect(516, 100, 390, 430),
-        side_panel=pygame.Rect(922, 100, 330, 430),
+        side_panel=pygame.Rect(922, 100, 330, 438),
         weapon=pygame.Rect(542, 146, 110, 84),
         armor=pygame.Rect(662, 146, 110, 84),
         pack=pygame.Rect(782, 146, 110, 84),
@@ -51,11 +51,15 @@ class Hideout:
         self.view = "stash"    # stash / trade
         self.lay = _layout()
         sp = self.lay["side_panel"]
-        self.map_rects = [pygame.Rect(sp.x + 18 + i * 78, sp.y + 66, 74, 32)
-                          for i in range(len(MAP_ORDER))]
-        self.mode_rects = [pygame.Rect(sp.x + 18 + i * 158, sp.y + 144, 150, 32)
+        # 地图按钮改两行排布(现在有 5 张图)
+        self.map_rects = []
+        for i in range(len(MAP_ORDER)):
+            row, col = divmod(i, 3)
+            self.map_rects.append(pygame.Rect(
+                sp.x + 18 + col * 100, sp.y + 62 + row * 34, 92, 30))
+        self.mode_rects = [pygame.Rect(sp.x + 18 + i * 100, sp.y + 172, 92, 30)
                            for i in range(len(MODE_ORDER))]
-        self.diff_rects = [pygame.Rect(sp.x + 18 + i * 100, sp.y + 222, 92, 32)
+        self.diff_rects = [pygame.Rect(sp.x + 18 + i * 100, sp.y + 248, 92, 30)
                            for i in range(3)]
         # 交易所:仓库网格 66,150 / 分区标签 / 商品行(双列可滚动) / 返回按钮
         self.trade_stash_grid = (66, 150)
@@ -152,11 +156,16 @@ class Hideout:
         lay = self.lay
         audio.play("click")
 
-        # 地图选择(人质大楼 = 人质模式专用图)
+        # 地图选择(人质大楼/大本营 = 专用模式地图)
         for i, key in enumerate(MAP_ORDER):
             if self.map_rects[i].collidepoint(pos):
                 sd.map_key = key
-                sd.mode = "hostage" if key == "indoor" else "raid"
+                if key == "indoor":
+                    sd.mode = "hostage"
+                elif key == "base":
+                    sd.mode = "assault"
+                elif sd.mode in ("hostage", "assault"):
+                    sd.mode = "raid"
                 save_mod.save_data(sd)
                 self.say(f"出战地图已设为「{MAPS[key]['name']}」:{MAPS[key]['desc']}",
                          COL["accent"], ttl=3.2)
@@ -174,15 +183,22 @@ class Hideout:
                          COL["accent"], ttl=3.2)
                 return
 
-        # 难度选择
-        for i, key in enumerate(DIFF_ORDER):
-            if self.diff_rects[i].collidepoint(pos):
-                sd.difficulty = key
-                save_mod.save_data(sd)
-                d = DIFFICULTIES[key]
-                self.say(f"难度已设为「{d['name']}」:{d['desc']},{d['loot_desc']}",
-                         COL["accent"], ttl=3.2)
-                return
+        # 难度选择(突袭模式是固定强度的独立模式,没有难度档)
+        if sd.mode == "assault":
+            for r in self.diff_rects:
+                if r.collidepoint(pos):
+                    self.say("突袭模式是固定强度,不适用难度档(系统会配发满配装备)",
+                             COL["bad"], 3.0)
+                    return
+        else:
+            for i, key in enumerate(DIFF_ORDER):
+                if self.diff_rects[i].collidepoint(pos):
+                    sd.difficulty = key
+                    save_mod.save_data(sd)
+                    d = DIFFICULTIES[key]
+                    self.say(f"难度已设为「{d['name']}」:{d['desc']},{d['loot_desc']}",
+                             COL["accent"], ttl=3.2)
+                    return
 
         # 底部按钮
         if lay["intro_btn"].collidepoint(pos):
@@ -492,30 +508,39 @@ class Hideout:
                 screen.blit(ft, ft.get_rect(center=r.center))
 
         t = get_font(17, bold=True).render("出战地图", True, COL["accent"])
-        screen.blit(t, (sp.x + 18, sp.y + 42))
+        screen.blit(t, (sp.x + 18, sp.y + 38))
         draw_choice(self.map_rects, MAP_ORDER,
                     {k: MAPS[k].get("short", MAPS[k]["name"]) for k in MAP_ORDER},
                     sd.map_key)
         t = get_font(13).render(MAPS[sd.map_key]["desc"], True, COL["text_dim"])
-        screen.blit(t, (sp.x + 18, sp.y + 102))
+        screen.blit(t, (sp.x + 18, sp.y + 132))
 
         t = get_font(17, bold=True).render("游戏模式", True, COL["accent"])
-        screen.blit(t, (sp.x + 18, sp.y + 120))
+        screen.blit(t, (sp.x + 18, sp.y + 148))
         draw_choice(self.mode_rects, MODE_ORDER,
                     {k: MODES[k]["name"] for k in MODE_ORDER}, sd.mode)
         t = get_font(13).render(MODES[sd.mode]["desc"], True,
-                                COL["good"] if sd.mode == "hostage" else COL["text_dim"])
-        screen.blit(t, (sp.x + 18, sp.y + 180))
+                                COL["good"] if sd.mode != "raid" else COL["text_dim"])
+        screen.blit(t, (sp.x + 18, sp.y + 206))
 
+        assault_run = sd.mode == "assault"
         t = get_font(17, bold=True).render("战局难度", True, COL["accent"])
-        screen.blit(t, (sp.x + 18, sp.y + 198))
-        draw_choice(self.diff_rects, DIFF_ORDER,
-                    {k: DIFFICULTIES[k]["name"] for k in DIFF_ORDER}, sd.difficulty)
-        d = DIFFICULTIES[sd.difficulty]
-        t = get_font(13).render(f"{d['desc']} · {d['loot_desc']}", True, COL["text_dim"])
-        screen.blit(t, (sp.x + 18, sp.y + 258))
+        screen.blit(t, (sp.x + 18, sp.y + 224))
+        if assault_run:
+            # 突袭模式:固定强度,不给难度档
+            for i, ln in enumerate(("突袭模式为固定强度(不适用难度档)",
+                                    "系统随机配发满配高级装备,战后回收")):
+                t = get_font(13).render(ln, True, COL["text_dim"])
+                screen.blit(t, (sp.x + 18, sp.y + 246 + i * 20))
+        else:
+            draw_choice(self.diff_rects, DIFF_ORDER,
+                        {k: DIFFICULTIES[k]["name"] for k in DIFF_ORDER}, sd.difficulty)
+            d = DIFFICULTIES[sd.difficulty]
+            t = get_font(13).render(f"{d['desc']} · {d['loot_desc']}", True,
+                                    COL["text_dim"])
+            screen.blit(t, (sp.x + 18, sp.y + 282))
 
-        y = sp.y + 282
+        y = sp.y + 302
         lines = [
             f"出击 {st['raids']} 次    撤离 {st['extracts']} 次",
             f"阵亡 {st['deaths']} 次    击杀 {st['kills']} 人",
@@ -525,11 +550,13 @@ class Hideout:
             "弹匣空自动换弹 · H 打药 · E 搜刮/救人",
             "TAB 背包 · 死亡会丢失带入的装备!",
         ]
+        if assault_run:
+            lines[-1] = "TAB 背包 · 1/2/3 呼叫友军支援"
         for ln in lines:
             col = COL["text_dim"] if ln == "" else COL["text"]
             t = f.render(ln, True, col)
             screen.blit(t, (sp.x + 18, y))
-            y += 20
+            y += 18
 
         # ---- 按钮 ----
         draw_button(screen, lay["intro_btn"], "玩法简介",

@@ -16,6 +16,7 @@ and the game dies in pygame.display.set_mode() with exit status 255.
 Fix: build with the SIMD blitter path disabled so pygame uses plain C code.
 This is the ONLY difference from the upstream recipe.
 """
+import os
 from os.path import exists, join
 
 from pythonforandroid.recipe import CompiledComponentsPythonRecipe
@@ -145,8 +146,24 @@ class Pygame2Recipe(CompiledComponentsPythonRecipe):
         env['USE_SDL2'] = '1'
         env["PYGAME_CROSS_COMPILE"] = "TRUE"
         env["PYGAME_ANDROID"] = "TRUE"
-        # Keep the SIMD blitters from being inlined away: sse2neon.h marks its
-        # helpers FORCE_INLINE, and without this the symbol can stay undefined.
+
+        # FIX 2: force pygame's AVX2 detection off.
+        # pygame's setup.py does:
+        #     if os.environ.get('PYGAME_DETECT_AVX2', '') != '':
+        #         avx2_filenames = ['simd_blitters_avx2']
+        #         ... and then enables -mavx2 whenever platform.machine() is
+        #         x86/amd64 -- which is exactly what the CI runner reports, even
+        #         though we cross-compile for arm64.
+        # The result is that surface.so references pg_has_avx2(), which is not
+        # compiled for aarch64, so dlopen fails on the phone with
+        #     cannot locate symbol "pg_has_avx2"
+        # aarch64 has no AVX2 at all, so detecting it is pointless here.
+        for key in ("PYGAME_DETECT_AVX2", "MAC_ARCH"):
+            env.pop(key, None)
+        os.environ.pop("PYGAME_DETECT_AVX2", None)
+
+        # Keep the SIMD blitters from being inlined away (sse2neon.h marks its
+        # helpers FORCE_INLINE) and make sure the ARM NEON path is on.
         cflags = env.get("CFLAGS", "")
         for flag in ("-fno-inline-functions", "-DPG_ENABLE_ARM_NEON"):
             if flag not in cflags:
