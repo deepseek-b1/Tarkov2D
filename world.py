@@ -15,8 +15,23 @@ WATER = "W"
 SOLID = {WALL, TREE, WATER}     # 水域同样不可通行、挡视线
 _LOOT_LETTER = {"C": "crate", "M": "med", "G": "gun", "V": "val"}
 _SCAV_LETTER = {"p": "pistol", "g": "shotgun", "r": "ar", "m": "melee"}
-_SPECIAL = ("S", "1", "2", "3", "X", "Y", "Z", "H", "T", "c",
-            "O", "P", "Q", "o", "q", "A")
+_SPECIAL = ("S", "1", "2", "3", "4", "5", "6", "7",
+            "X", "Y", "Z", "H", "T", "c",
+            "O", "P", "Q", "o", "q", "A", "N", "K")
+
+_INF = float("inf")
+_RAY_DIRS = {}
+
+
+def _ray_dirs(n):
+    """按角度预生成射线方向:每帧 140 次 cos/sin 是白花的。"""
+    dirs = _RAY_DIRS.get(n)
+    if dirs is None:
+        step = math.tau / n
+        dirs = tuple((math.cos(i * step), math.sin(i * step)) for i in range(n))
+        _RAY_DIRS[n] = dirs
+    return dirs
+
 
 
 class LootContainer:
@@ -44,7 +59,13 @@ class GameMap:
         self.map_key = map_key
         self.map_name = MAPS[map_key]["name"]
         extracts_def = MAPS[map_key]["extracts"]
-        rows = [r.ljust(MW, ".")[:MW] for r in MAPS[map_key]["rows"]]
+        raw = MAPS[map_key]["rows"]
+        # 每张地图用自己的尺寸(剧情模式的城区图比老图大),不再写死全局 MW/MH
+        self.mw = max([len(r) for r in raw] + [MW])
+        self.mh = max(len(raw), MH)
+        rows = [r.ljust(self.mw, ".")[:self.mw] for r in raw]
+        while len(rows) < self.mh:            # 补足行数,保证瓦片表尺寸一致
+            rows.append("." * self.mw)
         self.tiles = []            # 每格字符:'#'墙 'T'树 'W'水 '.'野外 'B'室内
         self.solid = []            # bool:阻挡移动
         self.block_sight = []      # bool:阻挡视线
@@ -59,6 +80,8 @@ class GameMap:
         self.objectives = []       # [(名称, (x, y))] 突袭模式要摧毁的敌方设施
         self.friend_structures = []  # [(名称, (x, y))] 我方前沿设施(指挥所/通讯室)
         self.supplies = []         # [(名称, (x, y))] 我方补给点(弹药库)
+        self.story_npcs = []       # [(x, y)] 剧情 NPC 站位(身份由 story.py 按坐标认领)
+        self.story_points = []     # [(x, y)] 剧情交互点(搜索/下载/取得/炸药…)同理由坐标认领
         self.corners = []          # [(x, y)] 拐角死角(敌人偏好蹲守)
         self.spawn = None          # (x, y) 像素坐标
 
@@ -69,7 +92,7 @@ class GameMap:
                     # 看邻居推断地板类型,避免室内出现草地色块
                     nb = [rows[ny][nx] for ny, nx in
                           ((ty - 1, tx), (ty + 1, tx), (ty, tx - 1), (ty, tx + 1))
-                          if 0 <= ny < MH and 0 <= nx < MW]
+                          if 0 <= ny < self.mh and 0 <= nx < self.mw]
                     ch = "B" if "B" in nb else "."
                 trow.append(ch)
                 srow.append(ch in SOLID)
@@ -107,18 +130,22 @@ class GameMap:
                 elif ch == "A":
                     from settings import ALLY_SUPPLY
                     self.supplies.append((ALLY_SUPPLY[ch], (cx, cy)))
+                elif ch == "N":
+                    self.story_npcs.append((cx, cy))
+                elif ch == "K":
+                    self.story_points.append((cx, cy))
                 elif ch == "S":
                     self.spawn = (cx, cy)
-                elif ch in ("1", "2", "3"):
+                elif ch in ("1", "2", "3", "4", "5", "6", "7"):
                     r = pygame.Rect(0, 0, TILE * 3, TILE * 3)
                     r.center = (cx, cy)
                     self.extracts.append((extracts_def[ch], r))
 
-        self.px_w, self.px_h = MW * TILE, MH * TILE
+        self.px_w, self.px_h = self.mw * TILE, self.mh * TILE
 
     # ---- 碰撞 ----
     def tile_solid(self, tx, ty):
-        if tx < 0 or ty < 0 or tx >= MW or ty >= MH:
+        if tx < 0 or ty < 0 or tx >= self.mw or ty >= self.mh:
             return True
         return self.solid[ty][tx]
 
@@ -152,37 +179,117 @@ class GameMap:
 
     # ---- 视线 ----
     def los_clear(self, x1, y1, x2, y2):
-        dist = math.hypot(x2 - x1, y2 - y1)
-        if dist < 1:
+        """两点间是否无遮挡:沿格子 DDA 推进,不重不漏。
+
+        原来是每 10px 采样一次,既慢(每条线几十次浮点除法)又会漏掉细墙;
+        DDA 只走实际跨越的格子,且每步一次比较一次加法。
+        """
+        if abs(x2 - x1) < 1.0 and abs(y2 - y1) < 1.0:
             return True
-        steps = int(dist // 10) + 1
-        dx = (x2 - x1) / dist
-        dy = (y2 - y1) / dist
-        for i in range(1, steps):
-            t = i * 10.0
-            tx = int((x1 + dx * t) // TILE)
-            ty = int((y1 + dy * t) // TILE)
-            if tx < 0 or ty < 0 or tx >= MW or ty >= MH:
+        tile = TILE
+        bs = self.block_sight
+        tx = int(x1 // tile)
+        ty = int(y1 // tile)
+        dx = x2 - x1
+        dy = y2 - y1
+        if dx > 0.0:
+            step_x = 1
+            tmax_x = ((tx + 1) * tile - x1) / dx
+            tdx = tile / dx
+        elif dx < 0.0:
+            step_x = -1
+            tmax_x = (tx * tile - x1) / dx
+            tdx = -tile / dx
+        else:
+            step_x = 0
+            tmax_x = _INF
+            tdx = _INF
+        if dy > 0.0:
+            step_y = 1
+            tmax_y = ((ty + 1) * tile - y1) / dy
+            tdy = tile / dy
+        elif dy < 0.0:
+            step_y = -1
+            tmax_y = (ty * tile - y1) / dy
+            tdy = -tile / dy
+        else:
+            step_y = 0
+            tmax_y = _INF
+            tdy = _INF
+        while True:
+            if tmax_x < tmax_y:
+                if tmax_x > 1.0:
+                    return True
+                tx += step_x
+                tmax_x += tdx
+            else:
+                if tmax_y > 1.0:
+                    return True
+                ty += step_y
+                tmax_y += tdy
+            if tx < 0 or ty < 0 or tx >= self.mw or ty >= self.mh or bs[ty][tx]:
                 return False
-            if self.block_sight[ty][tx]:
-                return False
-        return True
 
     def visibility_polygon(self, x, y, radius, n=140):
-        """玩家视野多边形(用于战争迷雾)。"""
+        """玩家视野多边形(用于战争迷雾)。
+
+        逐格 DDA 推进,而不是每 12px 采样一次:
+          * 步数从固定的 radius/12(560 → 47 步)降到实际跨越的格数(约 25 步);
+          * 每步只有一次比较 + 一次加法,原来是 2 次乘法、2 次浮点除法和 2 次取整;
+          * 命中墙时取「进入墙格」的精确距离,迷雾边缘正好压在墙面上,不再渗进墙里。
+        方向向量按 n 缓存,省掉每帧 140 次 cos/sin。
+        """
+        tile = TILE
+        bs = self.block_sight
+        tx0 = int(x // tile)
+        ty0 = int(y // tile)
         pts = []
-        step = math.tau / n
-        for i in range(n):
-            a = i * step
-            dx, dy = math.cos(a), math.sin(a)
-            d = 0.0
-            while d < radius:
-                d += 12.0
-                tx = int((x + dx * d) // TILE)
-                ty = int((y + dy * d) // TILE)
-                if tx < 0 or ty < 0 or tx >= MW or ty >= MH or self.block_sight[ty][tx]:
+        append = pts.append
+        for dx, dy in _ray_dirs(n):
+            if dx > 0.0:
+                step_x = 1
+                tmax_x = ((tx0 + 1) * tile - x) / dx
+                tdx = tile / dx
+            elif dx < 0.0:
+                step_x = -1
+                tmax_x = (tx0 * tile - x) / dx
+                tdx = -tile / dx
+            else:
+                step_x = 0
+                tmax_x = _INF
+                tdx = _INF
+            if dy > 0.0:
+                step_y = 1
+                tmax_y = ((ty0 + 1) * tile - y) / dy
+                tdy = tile / dy
+            elif dy < 0.0:
+                step_y = -1
+                tmax_y = (ty0 * tile - y) / dy
+                tdy = -tile / dy
+            else:
+                step_y = 0
+                tmax_y = _INF
+                tdy = _INF
+            tx = tx0
+            ty = ty0
+            d = radius
+            while True:
+                if tmax_x < tmax_y:
+                    if tmax_x >= radius:
+                        break
+                    hit_t = tmax_x
+                    tx += step_x
+                    tmax_x += tdx
+                else:
+                    if tmax_y >= radius:
+                        break
+                    hit_t = tmax_y
+                    ty += step_y
+                    tmax_y += tdy
+                if tx < 0 or ty < 0 or tx >= self.mw or ty >= self.mh or bs[ty][tx]:
+                    d = hit_t
                     break
-            pts.append((x + dx * min(d, radius), y + dy * min(d, radius)))
+            append((x + dx * d, y + dy * d))
         return pts
 
     # ---- A* 寻路(4向,格坐标) ----
@@ -231,8 +338,8 @@ class GameMap:
     def prerender(self):
         surf = pygame.Surface((self.px_w, self.px_h))
         rnd = random.Random(7)
-        for ty in range(MH):
-            for tx in range(MW):
+        for ty in range(self.mh):
+            for tx in range(self.mw):
                 ch = self.tiles[ty][tx]
                 x, y = tx * TILE, ty * TILE
                 if ch == WATER:
@@ -254,8 +361,8 @@ class GameMap:
                     c = tuple(max(0, v - 14) for v in base)
                     surf.fill(c, (px, py, 2, 2))
         # 墙/树画在地面之上
-        for ty in range(MH):
-            for tx in range(MW):
+        for ty in range(self.mh):
+            for tx in range(self.mw):
                 ch = self.tiles[ty][tx]
                 x, y = tx * TILE, ty * TILE
                 if ch == WALL:

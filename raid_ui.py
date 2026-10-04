@@ -26,6 +26,62 @@ def _overlay(key, size, color):
     return surf
 
 
+# 压暗层(战争迷雾):
+# 原来是「全屏 SRCALPHA 压暗 + 用透明多边形打洞 + 整屏 alpha 混合」,
+# 1280×720 实测 ~16ms(i5-4210U)。换成不透明表面做乘性压暗后只要 ~2ms:
+#   * 不透明表面没有 alpha 通道要算,fill/polygon 都走快速路径;
+#   * BLEND_RGB_MULT 是 SDL 的快路径,整屏只要 0.8ms(alpha 混合要 8.6ms)。
+# 观感基本一致:亮部完全一样(255 → 75),暗部最多差 8/255(约 3%)。
+_rgb_cache = {}
+
+
+def _darken_layer(key, size, rgba):
+    surf = _rgb_cache.get(key)
+    if surf is None:
+        surf = pygame.Surface(size)
+        _rgb_cache[key] = surf
+    a = rgba[3]
+    surf.fill(tuple(min(255, (255 - a) + (rgba[i] * a) // 255) for i in range(3)))
+    return surf
+
+
+# 撤离区呼吸边框:每帧给每个撤离点新建 Surface + 重画圆角框太浪费。
+# 按尺寸复用一个,只有呼吸亮度跨过一档才重画。
+_extract_cache = {}
+_EXTRACT_STEP = 6
+
+
+def _extract_border(size, rgb, alpha):
+    step = alpha // _EXTRACT_STEP
+    ent = _extract_cache.get(size)
+    if ent is None:
+        ent = [-1, pygame.Surface(size, pygame.SRCALPHA)]
+        _extract_cache[size] = ent
+    if ent[0] != step:
+        s = ent[1]
+        s.fill((0, 0, 0, 0))
+        pygame.draw.rect(s, (*rgb, step * _EXTRACT_STEP), s.get_rect(), 4, border_radius=6)
+        ent[0] = step
+    return ent[1]
+
+
+# 粒子:按 (颜色, 半径, 透明度档) 缓存小图,别每颗每帧都新建 Surface + 画圆
+_particle_cache = {}
+
+
+def _particle_sprite(color, radius, alpha):
+    key = (color, radius, alpha // 16)
+    s = _particle_cache.get(key)
+    if s is None:
+        d = radius * 2 + 2
+        s = pygame.Surface((d, d), pygame.SRCALPHA)
+        pygame.draw.circle(s, (*color, key[2] * 16), (radius + 1, radius + 1), radius)
+        if len(_particle_cache) > 256:
+            _particle_cache.clear()
+        _particle_cache[key] = s
+    return s
+
+
 # ---------- 布局(与 raid.py 交互命中区) ----------
 def inv_layout(bag_w=6, bag_h=4):
     panel = pygame.Rect(W // 2 - 420, 120, 840, 470)
@@ -93,9 +149,7 @@ def draw_raid(raid, screen):
     # 撤离区呼吸边框
     pulse = (math.sin(ticks / 400.0) + 1) / 2
     for name, r in raid.map.extracts:
-        c = (*COL["extract"], int(90 + 100 * pulse))
-        s = pygame.Surface(r.size, pygame.SRCALPHA)
-        pygame.draw.rect(s, c, s.get_rect(), 4, border_radius=6)
+        s = _extract_border(r.size, COL["extract"], int(90 + 100 * pulse))
         screen.blit(s, (r.x + ox, r.y + oy))
 
     # 动态战利品(普通尸体 / 头目尸体 / 地面堆)
@@ -218,6 +272,108 @@ def draw_raid(raid, screen):
         t = get_font(15, bold=True).render(f"C4 {max(0.0, st.c4['t']):.1f}s", True, col)
         screen.blit(t, t.get_rect(center=(x, y - rad - 14)))
 
+    # 剧情模式:关键点与 NPC 标记
+    if raid.mode == "story":
+        import story as story_mod
+        # 待决定的俘虏:画三个小人;选完之后变成"被放走(往南走)/被处决(尸体)"
+        cap = story_mod.CITY_AT.get("captives")
+        if cap and raid.story_mission is not None \
+                and raid.story_mission["id"] == "d1_1":
+            cx = cap[0] * 32 + 16 + ox
+            cy = cap[1] * 32 + 16 + oy
+            st_cap = getattr(raid, "captive_state", None)
+            cs_now = getattr(raid, "cutscene", None)
+            for dx, dy in ((-14, 6), (0, -6), (14, 8)):
+                fx, fy = cx + dx, cy + dy
+                if st_cap == "freed":
+                    prog = min(1.0, cs_now["t"] / cs_now["dur"]) \
+                        if (cs_now and cs_now["kind"] == "rescue") else 1.0
+                    fx, fy = fx + 52 * prog, fy + 46 * prog
+                    pygame.draw.circle(screen, (120, 220, 130), (int(fx), int(fy)), 7)
+                    pygame.draw.circle(screen, (30, 50, 34), (int(fx), int(fy)), 7, 2)
+                elif st_cap == "dead":
+                    pygame.draw.ellipse(screen, (120, 40, 40),
+                                        (fx - 12, fy - 6, 24, 13))
+                    pygame.draw.line(screen, (60, 24, 24),
+                                     (fx - 8, fy), (fx + 8, fy), 3)
+                else:
+                    pygame.draw.circle(screen, (196, 200, 210), (int(fx), int(fy)), 7)
+                    pygame.draw.circle(screen, (50, 52, 60), (int(fx), int(fy)), 7, 2)
+            if st_cap is None:
+                lab0 = get_font(12, bold=True).render("被俘的拾荒者", True,
+                                                     (214, 218, 228))
+                screen.blit(lab0, lab0.get_rect(center=(cx, cy - 30)))
+
+        for t in raid.story_targets:
+            x, y = t.x + ox, t.y + oy
+            if x < -60 or x > W + 60 or y < -60 or y > H + 60:
+                continue
+            done = (t.obj is not None
+                    and story_mod.is_done(raid.game.save, t.obj["id"]))
+            if t.dia is not None or t.kind == "talk":
+                col = (120, 210, 255)              # NPC / 对话点
+            else:
+                col = COL["good"] if done else COL["accent"]
+            if done:
+                pygame.draw.circle(screen, col, (int(x), int(y)), 7, 2)
+                pygame.draw.line(screen, col, (x - 4, y), (x + 4, y), 2)
+            else:
+                pts = [(x, y - 9), (x + 9, y), (x, y + 9), (x - 9, y)]
+                pygame.draw.polygon(screen, col, pts)
+                pygame.draw.polygon(screen, (20, 22, 26), pts, 2)
+            lab = get_font(12, bold=True).render(t.name, True, col)
+            screen.blit(lab, lab.get_rect(center=(x, y - 20)))
+
+        # 剧情演出:扩散光环 + 中心特效(救人/处决/给药/抢夺)
+        cs = getattr(raid, "cutscene", None)
+        if cs is not None:
+            prog = min(1.0, cs["t"] / max(0.01, cs["dur"]))
+            fx, fy = cs["x"] + ox, cs["y"] + oy
+            col = {"rescue": (120, 220, 130), "shoot": (230, 90, 70),
+                   "aid": (130, 220, 150), "rob": (230, 150, 70),
+                   "refuse": (170, 175, 185),
+                   "track": (130, 210, 240)}.get(cs["kind"], COL["accent"])
+            for k in range(3):
+                q = (prog + k * 0.28) % 1.0
+                rr = int(14 + 62 * q)
+                ring = _ring_surface(rr)
+                pygame.draw.circle(ring, (*col, int(200 * (1 - q))), (rr, rr), rr, 3)
+                screen.blit(ring, (fx - rr, fy - rr))
+            if cs["kind"] == "shoot":
+                fl = _ring_surface(28)
+                pygame.draw.circle(fl, (255, 240, 190, int(230 * (1 - prog))),
+                                   (28, 28), int(10 + 18 * (1 - prog)))
+                screen.blit(fl, (fx - 28, fy - 28))
+            elif cs["kind"] == "aid":
+                cross = pygame.Surface((28, 28), pygame.SRCALPHA)
+                pygame.draw.rect(cross, (*col, 235), (10, 3, 8, 22), border_radius=2)
+                pygame.draw.rect(cross, (*col, 235), (3, 10, 22, 8), border_radius=2)
+                screen.blit(cross, (fx - 14, fy - 14 - int(prog * 28)))
+
+        # 飘字:信任变化 / 选择结果
+        for f in getattr(raid, "floaters", []):
+            a = max(0.0, 1.0 - f["t"] / f["dur"])
+            txt = get_font(16, bold=True).render(f["text"], True, f["col"])
+            bg = pygame.Surface((txt.get_width() + 14, 24), pygame.SRCALPHA)
+            bg.fill((10, 12, 14, int(190 * a)))
+            fx, fy = f["x"] + ox, f["y"] + oy - int(f["t"] * 22)
+            screen.blit(bg, (fx - bg.get_width() // 2, fy))
+            screen.blit(txt, txt.get_rect(center=(fx, fy + 12)))
+
+        # 录音字幕:屏幕下方那串字幕
+        sub = getattr(raid, "subtitle", None)
+        if sub is not None:
+            a = min(1.0, sub["t"] / 1.2)
+            txt = get_font(18, bold=True).render(sub["text"], True, (238, 240, 246))
+            bw = min(W - 120, txt.get_width() + 40)
+            bar = pygame.Surface((bw, 40), pygame.SRCALPHA)
+            bar.fill((8, 10, 12, int(210 * a)))
+            screen.blit(bar, (W // 2 - bw // 2, H - 150))
+            screen.blit(txt, txt.get_rect(center=(W // 2, H - 130)))
+            t2 = get_font(13, bold=True).render("▶ 录音", True,
+                                               (240, 190, 90))
+            screen.blit(t2, (W // 2 - bw // 2 + 12, H - 146))
+
     # 待落下的友军支援:落点标记 + 倒计时
     for st in getattr(raid, "strikes", []):
         sx, sy = st["x"] + ox, st["y"] + oy
@@ -284,10 +440,9 @@ def draw_raid(raid, screen):
     # 粒子
     for pt in raid.particles:
         a = pt["ttl"] / pt["max_ttl"]
-        c = (*pt["color"], int(255 * a))
-        s = pygame.Surface((8, 8), pygame.SRCALPHA)
-        pygame.draw.circle(s, c, (4, 4), int(pt["size"] * a + 1))
-        screen.blit(s, (pt["x"] + ox - 4, pt["y"] + oy - 4))
+        rad = int(pt["size"] * a + 1)
+        s = _particle_sprite(pt["color"], rad, int(255 * a))
+        screen.blit(s, (pt["x"] + ox - rad - 1, pt["y"] + oy - rad - 1))
 
     # 玩家
     px, py = p.x + ox, p.y + oy
@@ -302,15 +457,16 @@ def draw_raid(raid, screen):
         pygame.draw.circle(screen, (255, 60, 50), (int(px), int(py)),
                            PLAYER["radius"] + 6, 2)
 
-    # 战争迷雾
-    fog = _overlay("fog", (W, H), COL["fog"])
+    # 战争迷雾(乘性压暗,见文件头的 _darken_layer 说明)
+    fog = _darken_layer("fog", (W, H), COL["fog"])
     pts = raid.map.visibility_polygon(p.x, p.y, 560)
     pts = [(x - raid.cam[0], y - raid.cam[1]) for x, y in pts]
     if len(pts) >= 3:
-        pygame.draw.polygon(fog, (0, 0, 0, 0), pts)
-    screen.blit(fog, (0, 0))
+        pygame.draw.polygon(fog, (255, 255, 255), pts)
+    screen.blit(fog, (0, 0), special_flags=pygame.BLEND_RGB_MULT)
 
-    # 受击红屏
+    # 受击红屏(保持原来的红色蒙版观感:
+    # 试过改成加色闪光只快 1.3ms,不值得动画面)
     if p.hurt_flash > 0:
         vs = _overlay("hurt", (W, H), (180, 20, 20, int(90 * p.hurt_flash)))
         screen.blit(vs, (0, 0))
@@ -393,8 +549,71 @@ def draw_raid(raid, screen):
         _draw_loot_window(raid, screen)
     if raid.paused:
         _draw_pause(raid, screen)
+    if raid.dialogue is not None:
+        _draw_dialogue(raid, screen)
     if raid.over:
         _draw_result(raid, screen)
+
+
+def _draw_dialogue(raid, screen):
+    """对白面板:说话人名字牌 + 台词 + 分支选项(没有立绘,只有名字)。"""
+    d = raid.dialogue
+    panel = pygame.Rect(W // 2 - 460, H - 300, 920, 210)
+    dark = pygame.Surface((W, H), pygame.SRCALPHA)
+    dark.fill((0, 0, 0, 90))
+    screen.blit(dark, (0, 0))
+    uikit.draw_panel(screen, panel, None)
+    # 名字牌
+    name = get_font(20, bold=True).render(d["speaker"], True, (18, 20, 24))
+    plate = pygame.Rect(panel.x + 26, panel.y - 16, name.get_width() + 34, 34)
+    pygame.draw.rect(screen, COL["accent"], plate, border_radius=8)
+    screen.blit(name, name.get_rect(center=plate.center))
+    f = get_font(19)
+    y = panel.y + 30
+    if d["reply"] is not None:
+        lines = [d["reply"]]
+    else:
+        lines = d["lines"][:d["idx"] + 1]
+    for ln in lines[-3:]:
+        t = f.render(ln, True, COL["text"])
+        screen.blit(t, (panel.x + 30, y))
+        y += 30
+    mx, my = pygame.mouse.get_pos()
+    if d["reply"] is not None:
+        t = get_font(16, bold=True).render("点击 / 按 E 继续", True, COL["text_dim"])
+        screen.blit(t, (panel.right - t.get_width() - 26, panel.bottom - 34))
+        return
+    if d["idx"] < len(d["lines"]) - 1:
+        t = get_font(16, bold=True).render("点击 / 按 E 继续", True, COL["text_dim"])
+        screen.blit(t, (panel.right - t.get_width() - 26, panel.bottom - 34))
+        return
+    if d["choices"]:
+        t = get_font(15, bold=True).render("选择(按数字键或点击):", True, COL["accent"])
+        screen.blit(t, (panel.x + 30, panel.bottom - 118))
+        for i, c in enumerate(d["choices"]):
+            r = pygame.Rect(panel.x + 30, panel.bottom - 96 + i * 30,
+                            panel.w - 60, 26)
+            hover = r.collidepoint(mx, my)
+            pygame.draw.rect(screen, COL["panel_hi"] if hover else COL["panel"],
+                             r, border_radius=5)
+            pygame.draw.rect(screen, COL["accent"] if hover else COL["border"],
+                             r, 1, border_radius=5)
+            ft = get_font(15).render(f"{i + 1}. {c['text']}", True,
+                                     COL["accent"] if hover else COL["text"])
+            screen.blit(ft, (r.x + 10, r.y + 4))
+    else:
+        t = get_font(16, bold=True).render("点击 / 按 E 结束对话", True, COL["text_dim"])
+        screen.blit(t, (panel.right - t.get_width() - 26, panel.bottom - 34))
+
+
+def dialogue_layout(raid):
+    """对白选项的命中区(点击选择用)。"""
+    d = raid.dialogue
+    if d is None or d["reply"] is not None or not d["choices"]:
+        return []
+    panel = pygame.Rect(W // 2 - 460, H - 300, 920, 210)
+    return [pygame.Rect(panel.x + 30, panel.bottom - 96 + i * 30, panel.w - 60, 26)
+            for i in range(len(d["choices"]))]
 
 
 def _edge_arrow(screen, raid, name, r, ox, oy):
@@ -520,6 +739,41 @@ def _draw_hud(raid, screen):
         h = _draw_reinf_line(raid, screen, 20, 50)
         _draw_support_panel(raid, screen, 20, 54 + h)
 
+    # 剧情模式:第几天/时段 + 目标勾选 + 状态
+    if raid.mode == "story" and not raid.over:
+        import story as story_mod
+        sd = raid.game.save
+        s = story_mod.st(sd)
+        m = story_mod.mission(sd)
+        head = (f"第 {s['day']} 天 · {story_mod.PERIODS[min(3, s['period'])]} · "
+                f"{story_mod.mission_title(sd)}")
+        lines = [head]
+        if m is not None:
+            for o in m["objects"]:
+                if o["kind"] == "extract":
+                    continue
+                mark = "✓" if story_mod.is_done(sd, o["id"]) else "□"
+                lines.append(f"  {mark} {o['name']}")
+        lines.append(f"数据板 {s['boards']}/3 · 录音 {s['tapes']}/12 · "
+                     f"灰狼{story_mod.wolf_state(sd)} · 艾琳{story_mod.erin_state(sd)} · "
+                     f"通缉{story_mod.wanted_state(sd)}")
+        items = s["flags"].get("items", [])
+        if items:
+            lines.append("携带:" + "、".join(items))
+        f = get_font(15)
+        w = max(f.size(ln)[0] for ln in lines) + 24
+        bh = 22 * len(lines) + 12
+        bg = pygame.Surface((w, bh), pygame.SRCALPHA)
+        bg.fill((10, 12, 14, 180))
+        screen.blit(bg, (20, 96))
+        yy = 102
+        for i, ln in enumerate(lines):
+            col = (COL["accent"] if i == 0 else
+                   (COL["good"] if "✓" in ln[:4] else COL["text"]))
+            t = f.render(ln, True, col)
+            screen.blit(t, (32, yy))
+            yy += 22
+
     # 提示
     if not (raid.inv_open or raid.loot_target or raid.paused or raid.over):
         prompt = None
@@ -530,10 +784,9 @@ def _draw_hud(raid, screen):
                 break
         if prompt is None and raid.channel is not None:
             need = raid.channel_need()
-            label = {"rescue": "解救人质中", "revive": "拉起队友中",
-                     "destroy": "安放炸药中"}.get(raid.channel["kind"], "进行中")
+            label = raid.channel_label()
             prompt = f"{label}…{int(min(1.0, raid.channel['t'] / need) * 100)}%"
-        if prompt is None and raid.mode in ("hostage", "assault"):
+        if prompt is None and raid.mode in ("hostage", "assault", "story"):
             kind, _ent = raid.nearest_interactable()
             if kind == "rescue":
                 prompt = "E  解救人质"
@@ -543,6 +796,18 @@ def _draw_hud(raid, screen):
                 prompt = "E  安放炸药(摧毁设施)"
             elif kind == "supply":
                 prompt = "E  补充弹药(弹药库)"
+            elif kind == "story":
+                o = _ent.obj
+                if o is None or o["kind"] == "talk":
+                    prompt = f"E  与 {_ent.name} 交谈"
+                elif o["kind"] == "kill":
+                    prompt = f"E  {o['name']}(先清掉守军)"
+                elif o["kind"] == "download":
+                    prompt = f"E  下载:{o['name']}"
+                elif o["kind"] == "take":
+                    prompt = f"E  取得:{o['name']}"
+                else:
+                    prompt = f"E  {o['name']}"
         if prompt is None:
             lc = raid.nearest_container()
             if lc is not None:
@@ -827,6 +1092,30 @@ def _draw_result(raid, screen):
                                 True, COL["text_dim"])
         screen.blit(t, t.get_rect(center=(W // 2, 274)))
 
+    elif r.get("mode") == "story":
+        sd = raid.game.save
+        import story as story_mod
+        s = story_mod.st(sd)
+        note = r.get("story_note", "")
+        if note:
+            t = get_font(16).render(note, True, COL["accent"])
+            screen.blit(t, t.get_rect(center=(W // 2, 244)))
+        if s.get("ending"):
+            data = story_mod.ENDINGS[s["ending"]]
+            t = get_font(22, bold=True).render(data["name"], True, COL["good"])
+            screen.blit(t, t.get_rect(center=(W // 2, 286)))
+            for i, ln in enumerate(story_mod.wrap(data["text"], 46)[:3]):
+                t = get_font(16).render(ln, True, COL["text"])
+                screen.blit(t, t.get_rect(center=(W // 2, 318 + i * 24)))
+            t = get_font(18, bold=True).render(f"「{data['line']}」", True,
+                                               COL["accent"])
+            screen.blit(t, t.get_rect(center=(W // 2, 404)))
+        else:
+            t = get_font(15).render(
+                f"数据板 {s['boards']}/3 · 录音 {s['tapes']}/12 · "
+                f"灰狼{story_mod.wolf_state(sd)} · 艾琳{story_mod.erin_state(sd)} · "
+                f"通缉{story_mod.wanted_state(sd)}", True, COL["text_dim"])
+            screen.blit(t, t.get_rect(center=(W // 2, 276)))
     if r["entries"] and r.get("mode") != "assault":
         f = get_font(16)
         y = 260

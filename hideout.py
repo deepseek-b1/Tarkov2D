@@ -14,7 +14,7 @@ from settings import (W, H, COL, fmt_rub, get_font, DIFF_ORDER, DIFFICULTIES,
                       trade_buy_price, trade_sell_price, STASH_VIEW_ROWS,
                       MODE_DIFF, DEPTS, TASKS,
                       armor_allows, MAPS, MAP_ORDER, MODES, MODE_ORDER, MODE_MAP)
-from inventory import Item, Placed, try_move
+from inventory import Item, Placed, organize, try_move
 import uikit
 from uikit import draw_grid, draw_button, draw_slot, draw_tooltip
 
@@ -33,8 +33,11 @@ def _layout():
         start=pygame.Rect(542, 548, 340, 54),
         supply=pygame.Rect(30, 548, 220, 46),
         reset=pygame.Rect(262, 548, 220, 46),
-        trade=pygame.Rect(922, 548, 160, 46),
-        tasks=pygame.Rect(1092, 548, 160, 46),
+        trade=pygame.Rect(922, 548, 106, 46),
+        tasks=pygame.Rect(1032, 548, 106, 46),
+        story=pygame.Rect(1142, 548, 106, 46),
+        organize=pygame.Rect(374, 106, 116, 24),      # 仓库:一键整理
+        stash_all=pygame.Rect(712, 106, 184, 24),     # 出战配置:放回仓库并整理
         trade_stash=pygame.Rect(30, 100, 470, 570),
         trade_goods=pygame.Rect(530, 100, 720, 570),
     )
@@ -60,7 +63,7 @@ class Hideout:
             row, col = divmod(i, 3)
             self.map_rects.append(pygame.Rect(
                 sp.x + 18 + col * 100, sp.y + 62 + row * 34, 92, 30))
-        self.mode_rects = [pygame.Rect(sp.x + 18 + i * 100, sp.y + 172, 92, 30)
+        self.mode_rects = [pygame.Rect(sp.x + 18 + i * 71, sp.y + 172, 68, 30)
                            for i in range(len(MODE_ORDER))]
         self.diff_rects = [pygame.Rect(sp.x + 18 + i * 100, sp.y + 248, 92, 30)
                            for i in range(3)]
@@ -79,7 +82,7 @@ class Hideout:
         self.task_close = pygame.Rect(1140, 76, 100, 36)
         # 交易所:仓库网格 66,150 / 分区标签 / 商品行(双列可滚动) / 返回按钮
         self.trade_stash_grid = (66, 150)
-        self.trade_stash_view_h = 12 * 40     # 交易所左侧仓库可见高度(其余滚轮翻)
+        self.trade_stash_view_h = 9 * 40      # 交易所左侧仓库可见高度(其余滚轮翻)
         self.trade_cat = None            # 当前分区(None = 全部)
         self.trade_scroll = 0.0          # 滚轮偏移(像素)
         self.trade_tab_rects = [
@@ -87,9 +90,94 @@ class Hideout:
         self.trade_view_top = 178        # 商品区可见范围
         self.trade_view_bottom = 178 + TRADE_PAGE_H
         self.trade_close = pygame.Rect(1140, 76, 100, 36)
+        # 批量出售:开关 / 快捷选择 / 出售 / 清空 + 确认框
+        self.sell_mode = False
+        self.sell_sel = []                    # 选中的 Placed(按点击顺序)
+        self.sell_ask = None                  # 待确认:{items, total}
+        self.sell_toggle = pygame.Rect(66, 540, 176, 30)
+        self.sell_junk = pygame.Rect(252, 540, 108, 30)
+        self.sell_ammo = pygame.Rect(368, 540, 108, 30)
+        self.sell_go = pygame.Rect(66, 578, 410, 34)
+        self.sell_clear = pygame.Rect(66, 618, 410, 26)
+        self.sell_ask_panel = pygame.Rect(W // 2 - 290, H // 2 - 130, 580, 260)
+        self.sell_ask_yes = pygame.Rect(self.sell_ask_panel.x + 50,
+                                        self.sell_ask_panel.bottom - 84, 220, 48)
+        self.sell_ask_no = pygame.Rect(self.sell_ask_panel.right - 270,
+                                       self.sell_ask_panel.bottom - 84, 220, 48)
         # 玩法简介(首次启动自动弹出)
         self.show_intro = not getattr(self.game.save, "seen_intro", False)
         self.intro_page = 0
+
+    # ---- 批量出售 ----
+    def sell_selected(self):
+        """当前仍有效的选中项(物品被卖掉/整理后就自动剔除)。"""
+        sd = self.game.save
+        self.sell_sel = [p for p in self.sell_sel if p in sd.stash.items]
+        return self.sell_sel
+
+    def sell_total(self):
+        return sum(trade_sell_price(p.item) for p in self.sell_selected())
+
+    def _sell_pick(self, cats):
+        """快捷选择:把仓库里这些类别的物品全部选中(再次点击则取消这些)。"""
+        sd = self.game.save
+        sel = self.sell_selected()
+        targets = [p for p in sd.stash.items if p.item.cat in cats]
+        if targets and all(p in sel for p in targets):
+            self.sell_sel = [p for p in sel if p not in targets]   # 再点一次 = 取消
+        else:
+            for p in targets:
+                if p not in sel:
+                    sel.append(p)
+            self.sell_sel = sel
+        return len(targets)
+
+    def _sell_do(self):
+        """确认出售:把选中的东西一次性卖掉。"""
+        sd = self.game.save
+        items = [p for p in (self.sell_ask or {}).get("items", [])
+                 if p in sd.stash.items]
+        total = sum(trade_sell_price(p.item) for p in items)
+        n = 0
+        for p in items:
+            sd.stash.remove_placed(p)
+            n += 1
+        self.sell_ask = None
+        self.sell_sel = []
+        if n == 0:
+            return False, "物品已变化,没有可卖的东西"
+        sd.rubles += total
+        save_mod.save_data(sd)
+        return True, f"批量出售 {n} 件 +{fmt_rub(total)}"
+
+    def _draw_sell_ask(self, screen):
+        """批量出售确认框。"""
+        dark = pygame.Surface((W, H), pygame.SRCALPHA)
+        dark.fill((0, 0, 0, 130))
+        screen.blit(dark, (0, 0))
+        panel = self.sell_ask_panel
+        uikit.draw_panel(screen, panel, "批量出售")
+        ask = self.sell_ask or {}
+        n = len(ask.get("items", []))
+        f = get_font(17)
+        lines = [f"确定卖掉选中的 {n} 件物品?",
+                 f"合计可得 {fmt_rub(ask.get('total', 0))}"
+                 f"(回收价 = 原价 60%,卖错了只能高价买回)"]
+        y = panel.y + 58
+        for ln in lines:
+            t = f.render(ln, True, COL["text"])
+            screen.blit(t, (panel.x + 34, y))
+            y += 32
+        names = "、".join(p.item.name for p in ask.get("items", [])[:6])
+        if n > 6:
+            names += f" 等 {n} 件"
+        t = get_font(14).render(names, True, COL["text_dim"])
+        screen.blit(t, (panel.x + 34, y + 6))
+        mx, my = pygame.mouse.get_pos()
+        draw_button(screen, self.sell_ask_yes, "出售",
+                    self.sell_ask_yes.collidepoint(mx, my))
+        draw_button(screen, self.sell_ask_no, "取消",
+                    self.sell_ask_no.collidepoint(mx, my))
 
     # ---- 交易站:分区商品与滚动 ----
     def trade_goods(self):
@@ -148,6 +236,66 @@ class Hideout:
         gx = int((pos[0] - ox) // 40)
         gy = int((pos[1] - oy + int(self.stash_scroll)) // 40)
         return self.game.save.stash.at(gx, gy)
+
+    # ---- 一键整理 / 一键放回仓库 ----
+    def organize_stash(self):
+        """一键整理仓库:合并同类堆叠、卷起背包、按类别分区分区摆放。"""
+        sd = self.game.save
+        before = len(sd.stash.items)
+        ok, overflow = organize(sd.stash)
+        if not ok:
+            names = "、".join(it.name for it in overflow[:3])
+            return False, f"整理后放不下({names} 等),先卖掉或用掉一些东西"
+        save_mod.save_data(sd)
+        audio.play("click")
+        return True, (f"仓库已整理:{before} 件 → {len(sd.stash.items)} 件"
+                      "(子弹并组 · 背包卷起 · 枪/甲/子弹各归一片)")
+
+    def stash_all_and_organize(self):
+        """把出战背包 + 武器/护甲/背包全部放回仓库并整理。
+
+        全程先在克隆仓库上试算:只要有一件放不下,就【什么都不动】并提示,
+        避免出现"武器卸了、背包还在"这种做一半的状态。
+        """
+        from inventory import Container
+        sd = self.game.save
+        stash = Container.deserialize(sd.stash.w, sd.stash.h, sd.stash.serialize())
+        carry = list(sd.bag.items)
+        slots = []
+        for name in ("weapon", "armor", "pack"):
+            it = getattr(sd, name)
+            if it is None:
+                continue
+            clone = self._clone_item(it)
+            if clone.state.get("rolled"):
+                clone.state.pop("rolled", None)      # 放回仓库时按展开尺寸算空间
+            slots.append((name, clone))
+        blocked = []
+        for placed in carry:
+            if not stash.add_item(placed.item):
+                blocked.append(placed.item.name)
+        for _name, clone in slots:
+            if not stash.add_item(clone):
+                blocked.append(clone.name)
+        if blocked:
+            return False, ("仓库放不下:" + "、".join(blocked[:3])
+                           + " —— 什么都没动,先卖掉或用掉一些再试")
+        ok, overflow = organize(stash)
+        if not ok:
+            names = "、".join(it.name for it in overflow[:3])
+            return False, f"整理后放不下({names} 等),什么都没动,先清点空间"
+        # 全部试算通过:正式落盘
+        for placed in carry:
+            sd.bag.remove_placed(placed)
+        for name, _clone in slots:
+            setattr(sd, name, None)
+        sd.stash = stash
+        if sd.pack is None:
+            sd.apply_pack()          # 背包已空,安全退回口袋容量
+        save_mod.save_data(sd)
+        audio.play("click")
+        moved = len(carry) + len(slots)
+        return True, f"已放回 {moved} 件并整理好仓库(枪/甲/子弹分区,背包已卷起)"
 
     # ---- 背包卷起 / 展开 ----
     def _toggle_roll(self, container, placed):
@@ -306,7 +454,8 @@ class Hideout:
                     self.task_scroll = max(0.0, min(self.task_scroll,
                                                     self.task_max_scroll()))
             elif ev.type == pygame.KEYDOWN:
-                if ev.key == pygame.K_ESCAPE and self.view in ("trade", "task"):
+                if ev.key == pygame.K_ESCAPE and self.view in ("trade", "task",
+                                                               "story"):
                     self.view = "stash"
                     save_mod.save_data(self.game.save)
                     audio.play("click")
@@ -319,6 +468,8 @@ class Hideout:
                     self._trade_click(ev.pos)
                 elif self.view == "task":
                     self._task_click(ev.pos)
+                elif self.view == "story":
+                    self._story_click(ev.pos)
                 else:
                     self._click(ev.pos)
                 return
@@ -328,7 +479,7 @@ class Hideout:
         lay = self.lay
         audio.play("click")
 
-        # 地图选择(人质大楼/大本营 = 专用模式地图)
+        # 地图选择(人质大楼/大本营/卡斯卡德 = 专用模式地图)
         for i, key in enumerate(MAP_ORDER):
             if self.map_rects[i].collidepoint(pos):
                 sd.map_key = key
@@ -336,7 +487,9 @@ class Hideout:
                     sd.mode = "hostage"
                 elif key == "base":
                     sd.mode = "assault"
-                elif sd.mode in ("hostage", "assault"):
+                elif key == "city":
+                    sd.mode = "story"
+                elif sd.mode in ("hostage", "assault", "story"):
                     sd.mode = "raid"
                 save_mod.save_data(sd)
                 self.say(f"出战地图已设为「{MAPS[key]['name']}」:{MAPS[key]['desc']}",
@@ -355,11 +508,13 @@ class Hideout:
                          COL["accent"], ttl=3.2)
                 return
 
-        # 难度选择(突袭/人质解救是固定强度,没有难度档)
-        if sd.mode == "assault" or sd.mode in MODE_DIFF:
+        # 难度选择(突袭/人质/剧情是固定强度,没有难度档)
+        if sd.mode in ("assault", "story") or sd.mode in MODE_DIFF:
             fixed_txt = ("突袭模式是固定强度,不适用难度档(系统会配发满配装备)"
-                         if sd.mode == "assault"
-                         else "人质解救固定为强化封锁强度,不适用难度档")
+                         if sd.mode == "assault" else
+                         "剧情模式为固定强度(《灰区二日》有分支与结局,不吃难度档)"
+                         if sd.mode == "story" else
+                         "人质解救固定为强化封锁强度,不适用难度档")
             for r in self.diff_rects:
                 if r.collidepoint(pos):
                     self.say(fixed_txt, COL["bad"], 3.0)
@@ -397,6 +552,18 @@ class Hideout:
             self.view = "task"
             self.task_scroll = 0.0
             audio.play("click")
+            return
+        if lay["story"].collidepoint(pos):
+            self.view = "story"
+            audio.play("click")
+            return
+        if lay["organize"].collidepoint(pos):
+            ok, msg = self.organize_stash()
+            self.say(msg, COL["good"] if ok else COL["bad"], 3.4)
+            return
+        if lay["stash_all"].collidepoint(pos):
+            ok, msg = self.stash_all_and_organize()
+            self.say(msg, COL["good"] if ok else COL["bad"], 3.6)
             return
         if lay["supply"].collidepoint(pos) and not sd.any_weapon():
             sd.weapon = Item.weapon("pm", mag=8)
@@ -478,7 +645,8 @@ class Hideout:
                 elif item.cat == "attach":
                     self._install_attachment(sd, placed)
                 elif item.cat == "pack":
-                    idx = sd.stash.items.index(placed)
+                    idx = next((i for i, p in enumerate(sd.stash.items)
+                                if p is placed), -1)
                     ok, msg = self._try_equip_pack(idx)
                     self.say(msg, COL["good"] if ok else COL["bad"], 3.0)
                 else:
@@ -534,28 +702,37 @@ class Hideout:
         return Item.from_dict(it.serialize()) if it is not None else None
 
     def _try_equip_pack(self, idx):
-        """从仓库第 idx 件物品装备背包。"""
+        """从仓库第 idx 件物品装备背包(全程克隆试算,失败绝不动存档)。"""
         from inventory import Container
         from settings import pack_grid
         sd = self.game.save
-        if idx >= len(sd.stash.items):
+        if idx < 0 or idx >= len(sd.stash.items):
             return False, "物品已变化"
-        new_pack = sd.stash.items[idx].item
+        live = sd.stash.items[idx]
+        new_pack = live.item
         if new_pack.cat != "pack":
             return False, ""
-        new_pack.state.pop("rolled", None)     # 装备时自动展开(卷起的包不能用)
-        # 克隆后再试算,任何一步失败都不改动真实存档
+        # 关键:先克隆试算,别动真身 —— 卷起的背包一旦就地展开,就会撑破它
+        # 原来占的格子(变成越界物品),之后任何摆放/探测都会直接崩。
         stash = Container.deserialize(sd.stash.w, sd.stash.h, sd.stash.serialize())
         bag = Container.deserialize(sd.bag.w, sd.bag.h, sd.bag.serialize())
+        # 克隆里是复制出来的新对象,所以按 (iid, 坐标) 认人,不能按身份或旧下标
+        target = next((p for p in stash.items
+                       if p.item.iid == new_pack.iid
+                       and p.x == live.x and p.y == live.y), None)
+        if target is None:
+            return False, "物品已变化"
         pack = self._clone_item(sd.pack)
         gw, gh = pack_grid(new_pack.iid)
         new_bag, overflow = bag.resized(gw, gh)
-        stash.remove_placed(stash.items[idx])
+        stash.remove_placed(target)
         for it in overflow:
             if not stash.add_item(it):
                 return False, f"背包收窄到 {gw}×{gh},放不下的东西仓库也塞不下"
         if pack is not None and not stash.add_item(pack):
             return False, "仓库空间不足,无法换下旧背包"
+        # 试算全部通过,这时才真正把新背包展开并装到身上
+        new_pack.state.pop("rolled", None)
         sd.bag, sd.stash, sd.pack = new_bag, stash, new_pack
         save_mod.save_data(sd)
         return True, f"已装备 {new_pack.name},携行 {gw}×{gh} 格"
@@ -585,19 +762,66 @@ class Hideout:
     def _trade_click(self, pos):
         sd = self.game.save
         audio.play("click")
+        # 批量出售的确认框最优先
+        if self.sell_ask is not None:
+            if self.sell_ask_yes.collidepoint(pos):
+                ok, msg = self._sell_do()
+                self.say(msg, COL["good"] if ok else COL["bad"], 3.4)
+            elif self.sell_ask_no.collidepoint(pos):
+                self.sell_ask = None
+                self.say("已取消批量出售", COL["text_dim"])
+            return
         if self.trade_close.collidepoint(pos):
             self.view = "stash"
+            self.sell_mode = False
+            self.sell_sel = []
             save_mod.save_data(sd)
             return
+        # 批量出售的按钮
+        if self.sell_toggle.collidepoint(pos):
+            self.sell_mode = not self.sell_mode
+            if not self.sell_mode:
+                self.sell_sel = []
+            return
+        if self.sell_mode:
+            if self.sell_junk.collidepoint(pos):
+                n = self._sell_pick(("misc", "valuable"))
+                self.say(f"已选中 {n} 件杂物/值钱货" if self.sell_selected()
+                         else f"已取消 {n} 件杂物/值钱货", COL["accent"], 2.4)
+                return
+            if self.sell_ammo.collidepoint(pos):
+                n = self._sell_pick(("ammo",))
+                self.say(f"已选中 {n} 组子弹" if self.sell_selected()
+                         else f"已取消 {n} 组子弹", COL["accent"], 2.4)
+                return
+            if self.sell_clear.collidepoint(pos):
+                self.sell_sel = []
+                self.say("已清空选择", COL["text_dim"], 2.0)
+                return
+            if self.sell_go.collidepoint(pos):
+                sel = self.sell_selected()
+                if not sel:
+                    self.say("先在左边点选要卖的物品(或点快捷选择)", COL["bad"], 3.0)
+                    return
+                self.sell_ask = dict(items=list(sel), total=self.sell_total())
+                return
         # 分区标签
         for i, (label, cat) in enumerate(TRADE_TABS):
             if self.trade_tab_rects[i].collidepoint(pos):
                 self.trade_cat = cat
                 self.trade_scroll = 0.0
                 return
-        # 出售:点击仓库物品(要算上滚轮偏移)
+        # 点仓库物品:批量模式下 = 选中/取消;普通模式 = 直接卖掉
         placed = self.trade_stash_hit(pos)
         if placed is not None:
+            if self.sell_mode:
+                sel = self.sell_selected()
+                if placed in sel:
+                    sel.remove(placed)
+                else:
+                    sel.append(placed)
+                self.sell_sel = sel
+                return
             price = trade_sell_price(placed.item)
             name = placed.item.name
             sd.stash.remove_placed(placed)
@@ -642,8 +866,12 @@ class Hideout:
         if self.view == "task":
             self._draw_task(screen)
             return
+        if self.view == "story":
+            self._draw_story_brief(screen)
+            return
         lay = self.lay
         sd = self.game.save
+        mx, my = pygame.mouse.get_pos()
         screen.fill(COL["bg"])
 
         t = get_font(34, bold=True).render("藏身处 — TARKOV 2D", True, COL["accent"])
@@ -651,19 +879,22 @@ class Hideout:
 
         # ---- 仓库(格子变多了:只画看得见的一段,滚轮上下翻) ----
         uikit.draw_panel(screen, lay["stash_panel"],
-                         "仓库 (点击物品放入出战配置 · 右键背包可卷起)")
+                         "仓库 (左键放装备 · 右键背包卷起)")
         draw_grid(screen, self.stash_grid[0], self.stash_grid[1], sd.stash, 40,
                   scroll=self.stash_scroll, view_h=self.stash_view_h)
+        draw_button(screen, lay["organize"], "一键整理",
+                    lay["organize"].collidepoint(mx, my), small=True)
         if self.stash_max_scroll() > 0:
             t = get_font(13).render(
-                f"滚轮上下翻(仓库共 {sd.stash.h} 行,面板显示 {STASH_VIEW_ROWS} 行)",
+                f"滚轮上下翻(仓库共 {sd.stash.h} 行)",
                 True, COL["text_dim"])
             screen.blit(t, (self.stash_grid[0],
-                            self.stash_grid[1] + self.stash_view_h + 8))
+                            self.stash_grid[1] + self.stash_view_h + 10))
 
         # ---- 出战配置 ----
         uikit.draw_panel(screen, lay["loadout_panel"], "出战配置")
-        mx, my = pygame.mouse.get_pos()
+        draw_button(screen, lay["stash_all"], "一键放回仓库并整理",
+                    lay["stash_all"].collidepoint(mx, my), small=True)
         draw_slot(screen, lay["weapon"], sd.weapon, "武器",
                   hover=lay["weapon"].collidepoint(mx, my))
         draw_slot(screen, lay["armor"], sd.armor, "护甲",
@@ -765,6 +996,8 @@ class Hideout:
         draw_button(screen, lay["tasks"],
                     "任务中心" + (f"({ready_n})" if ready_n else ""),
                     lay["tasks"].collidepoint(mx, my), small=True)
+        draw_button(screen, lay["story"], "剧情简报",
+                    lay["story"].collidepoint(mx, my), small=True)
         if not sd.any_weapon():
             draw_button(screen, lay["supply"], "领取基础补给",
                         lay["supply"].collidepoint(mx, my), small=True)
@@ -799,6 +1032,60 @@ class Hideout:
             hover_item = sd.pack
         if hover_item is not None:
             draw_tooltip(screen, mx, my, hover_item)
+
+    # ---------- 剧情简报 ----------
+    def _story_panel(self):
+        return pygame.Rect(120, 92, W - 240, 460)
+
+    def _story_click(self, pos):
+        """剧情简报页:点「返回」退回仓库;点面板外的空白处也退(别卡在这一页)。"""
+        if (self.task_close.collidepoint(pos)
+                or not self._story_panel().collidepoint(pos)):
+            audio.play("click")
+            self.view = "stash"
+            save_mod.save_data(self.game.save)
+
+    # ---------- 剧情简报渲染 ----------
+    def _draw_story_brief(self, screen):
+        """《灰区二日》简报:当前时段任务、状态、已解锁结局。"""
+        import story as story_mod
+        sd = self.game.save
+        mx, my = pygame.mouse.get_pos()
+        screen.fill(COL["bg"])
+        t = get_font(34, bold=True).render("剧情 ·《灰区二日》", True, COL["accent"])
+        screen.blit(t, t.get_rect(center=(W // 2, 44)))
+        bal = get_font(20, bold=True).render("北境工业城 卡斯卡德-7", True,
+                                             COL["text_dim"])
+        screen.blit(bal, (W - bal.get_width() - 30, 40))
+
+        panel = self._story_panel()
+        uikit.draw_panel(screen, panel, "当前情况")
+        lines = story_mod.brief_lines(sd)
+        f = get_font(17)
+        y = panel.y + 46
+        for i, ln in enumerate(lines):
+            col = COL["accent"] if i == 0 else (
+                COL["good"] if ":" in ln or "结局" in ln else COL["text"])
+            t = f.render(ln, True, col)
+            screen.blit(t, (panel.x + 26, y))
+            y += 26
+            if y > panel.bottom - 40:
+                break
+        t = get_font(15).render(
+            "每个时段出击一次:做完目标就从开放的撤离点撤出;"
+            "阵亡/超时不丢进度,但会丢装备", True, COL["text_dim"])
+        screen.blit(t, (panel.x + 26, panel.bottom - 32))
+        if sd.mode != "story":
+            t = get_font(18, bold=True).render(
+                "提示:把「游戏模式」切到「剧情」后开始战局,才会推进剧情",
+                True, COL["bad"])
+            screen.blit(t, t.get_rect(center=(W // 2, panel.bottom + 40)))
+        else:
+            t = get_font(17, bold=True).render(
+                f"开始战局将进入:{story_mod.mission_title(sd)}", True, COL["good"])
+            screen.blit(t, t.get_rect(center=(W // 2, panel.bottom + 40)))
+        draw_button(screen, self.task_close, "返回",
+                    self.task_close.collidepoint(mx, my), small=True)
 
     # ---------- 任务中心渲染 ----------
     def _draw_task(self, screen):
@@ -892,16 +1179,51 @@ class Hideout:
         bal = get_font(24, bold=True).render(f"余额 {fmt_rub(sd.rubles)}", True, COL["accent"])
         screen.blit(bal, (W - bal.get_width() - 30, 36))
 
-        # ---- 左:仓库(点击出售;格子多了用滚轮翻) ----
-        uikit.draw_panel(screen, lay["trade_stash"], "你的仓库 — 点击物品出售")
+        # ---- 左:仓库(点击出售 / 批量出售;格子多了用滚轮翻) ----
+        sel = self.sell_selected()
+        uikit.draw_panel(screen, lay["trade_stash"],
+                         "你的仓库 — 点物品选中(批量出售)" if self.sell_mode
+                         else "你的仓库 — 点击物品出售")
         gx0, gy0 = self.trade_stash_grid
         draw_grid(screen, gx0, gy0, sd.stash, 40,
                   scroll=self.stash_scroll, view_h=self.trade_stash_view_h)
+        # 批量模式:被选中的物品描边高亮
+        if self.sell_mode:
+            for p in sel:
+                w, h = p.item.size()
+                r = pygame.Rect(gx0 + p.x * 40,
+                                gy0 + p.y * 40 - int(self.stash_scroll),
+                                w * 40, h * 40)
+                if r.bottom < gy0 or r.top > gy0 + self.trade_stash_view_h:
+                    continue
+                hl = pygame.Surface(r.size, pygame.SRCALPHA)
+                hl.fill((120, 220, 120, 80))
+                screen.blit(hl, r)
+                pygame.draw.rect(screen, COL["good"], r, 3)
         t = get_font(14).render(
-            "出售价 = 原价 60%,卖错了只能高价买回"
-            + ("(滚轮翻仓库)" if self.trade_stash_max_scroll() > 0 else ""),
+            ("批量出售:左键点物品 选中/取消  ·  回收价 60%"
+             if self.sell_mode else "出售价 = 原价 60%,卖错了只能高价买回")
+            + ("  (滚轮翻仓库)" if self.trade_stash_max_scroll() > 0 else ""),
             True, COL["text_dim"])
-        screen.blit(t, (gx0, gy0 + self.trade_stash_view_h + 12))
+        screen.blit(t, (gx0, gy0 + self.trade_stash_view_h + 10))
+        draw_button(screen, self.sell_toggle,
+                    "批量出售:开" if self.sell_mode else "批量出售:关",
+                    self.sell_toggle.collidepoint(mx, my), small=True)
+        if self.sell_mode:
+            draw_button(screen, self.sell_junk, "全选杂物",
+                        self.sell_junk.collidepoint(mx, my), small=True)
+            draw_button(screen, self.sell_ammo, "全选子弹",
+                        self.sell_ammo.collidepoint(mx, my), small=True)
+            n = len(sel)
+            total = self.sell_total()
+            draw_button(screen, self.sell_go,
+                        f"出售选中 {n} 件 · {fmt_rub(total)}" if n
+                        else "出售选中(先点物品)",
+                        self.sell_go.collidepoint(mx, my) and n > 0,
+                        small=True)
+            if n:
+                draw_button(screen, self.sell_clear, f"清空选择({n})",
+                            self.sell_clear.collidepoint(mx, my), small=True)
 
         # ---- 右:商品(分区 + 滚轮翻看) ----
         uikit.draw_panel(screen, lay["trade_goods"], "商品 — 点击购买")
@@ -974,9 +1296,7 @@ class Hideout:
         # ---- 悬浮提示 ----
         hover_item = None
         if lay["trade_stash"].collidepoint(mx, my):
-            gx = int((mx - gx0) // 40)
-            gy = int((my - gy0) // 40)
-            placed = sd.stash.at(gx, gy)
+            placed = self.trade_stash_hit((mx, my))     # 要算上滚轮偏移
             if placed:
                 hover_item = placed.item
         if hover_item is not None:
@@ -995,3 +1315,5 @@ class Hideout:
                         preview = Item(iid, count=count)
                     draw_tooltip(screen, mx, my, preview)
                     break
+        if self.sell_ask is not None:
+            self._draw_sell_ask(screen)

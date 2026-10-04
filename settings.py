@@ -1,9 +1,9 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Tarkov2D 全局配置:常量、物品定义、地图、拾荒者定义。"""
 import pygame
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "1.5.0"
+GAME_VERSION = "2.2.0"
 # 更新清单地址(可换成自建服务器 / GitHub raw;留空则只认 EXE 同目录的 version.json)
 UPDATE_MANIFEST_URL = "http://127.0.0.1:8765/version.json"
 UPDATE_TIMEOUT = 3   # 检查 / 下载超时(秒)
@@ -55,6 +55,42 @@ COL = {
 # ---------- 字体 ----------
 _font_cache = {}
 
+
+class _CachedFont(pygame.font.Font):
+    """带 render 缓存的字体。
+
+    HUD 每帧要画十几串文字,其中多数(标签、单位、快捷键、坐标)每帧都一样。
+    pygame 的 font.render 每次都要重新光栅化字形,在手机上尤其贵,所以这里按
+    (文字, 抗锯齿, 颜色, 底色) 记住已经渲染好的 Surface。
+
+    只缓存「只读」表面是安全的:全工程没有对 render() 结果做原地修改的代码
+    (没有 set_alpha / fill / PixelArray / subsurface 之类用法)。
+    """
+
+    _CACHE_MAX = 320      # 条数上限:超了整批清空(缓存本来就该整批失效)
+    _CACHE_MAX_H = 96     # 过大的文字不缓存,免得白占内存
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._rcache = {}
+
+    def render(self, text, antialias=True, color=(255, 255, 255), background=None):
+        cache = self._rcache
+        try:
+            key = (text, antialias, color, background)
+            hit = cache.get(key)
+        except TypeError:          # color 传了 list 之类不可哈希的东西
+            return super().render(text, antialias, color, background)
+        if hit is not None:
+            return hit
+        surf = super().render(text, antialias, color, background)
+        if surf.get_height() <= self._CACHE_MAX_H:
+            if len(cache) >= self._CACHE_MAX:
+                cache.clear()
+            cache[key] = surf
+        return surf
+
+
 def _font_files():
     """可用字体:优先项目自带 fonts/ 目录(网页版必须),再找系统中文 TTF。"""
     import os
@@ -78,7 +114,7 @@ def get_font(size, bold=False):
         f = None
         for path in _font_files():
             try:
-                f = pygame.font.Font(path, size)
+                f = _CachedFont(path, size)
                 break
             except Exception:
                 f = None
@@ -89,7 +125,7 @@ def get_font(size, bold=False):
             except Exception:
                 f = None
         if f is None:
-            f = pygame.font.Font(None, size)
+            f = _CachedFont(None, size)
         if bold:
             f.set_bold(True)
         _font_cache[key] = f
@@ -527,8 +563,9 @@ MODES = {
     "raid": dict(name="搜打撤", desc="自由搜刮 · 找撤离点撤离"),
     "hostage": dict(name="人质解救", desc="室内近战 · 20 名匪徒分守八间房 · 救出 4 名人质"),
     "assault": dict(name="突袭", desc="强攻敌巢 · 50 守军 · 友军空袭支援"),
+    "story": dict(name="剧情", desc="灰区二日 · 两天两夜 · 有分支与结局"),
 }
-MODE_ORDER = ["raid", "hostage", "assault"]
+MODE_ORDER = ["raid", "hostage", "assault", "story"]
 HOSTAGE_COUNT = 4          # 人质数量
 HOSTAGE_ENEMIES = 20       # 人质模式的敌人数量下限(地图上的刷新点按房间均匀布置)
 ALLY_COUNT = 3             # 队友数量
@@ -621,6 +658,16 @@ SUPPORT = {
 # ---------- 固定强度的模式(不给难度档) ----------
 # 人质解救 = 强化封锁强度;突袭 = 独立的固定强度(ASSAULT_DIFF)
 MODE_DIFF = {"hostage": "hardened"}
+
+# ---------- 剧情模式《灰区二日》 ----------
+# 独立模式:固定强度,两天 × 四时段,每个时段出击一次
+STORY_DIFF = dict(name="剧情", hp=0.95, dmg=0.85, spread=1.15, rof=1.15,
+                  view=0.95, speed=0.95, scavs=22, rolls=2, loot=1.05,
+                  desc="封锁区守军(固定强度)", loot_desc="城区物资")
+STORY_TIMES = [12 * 60, 12 * 60, 10 * 60, 8 * 60]   # 各时段出击时限(按 period 取)
+STORY_FINAL_TIME = 10 * 60      # 最终撤离:最后十分钟
+STORY_WANTED_BONUS = 6          # 每级通缉给敌人数量加多少
+STORY_INTERACT = 64             # 剧情交互距离(和搜刮一致)
 
 # ---------- 背包卷起(省仓库格子) ----------
 # 展开占格不超过 4×4 的包,卷起来只占 1×2;5×5 及以上的占 2×2

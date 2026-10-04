@@ -7,6 +7,7 @@ import os
 import random
 import sys
 import tempfile
+import time
 import traceback
 
 
@@ -30,13 +31,15 @@ def run():
     results = []
 
     def check(name, fn):
+        t0 = time.perf_counter()
+        print(f"[....] {name}", flush=True)
         try:
             fn()
             results.append((name, True, ""))
-            print(f"[PASS] {name}")
+            print(f"[PASS] {name}  ({time.perf_counter() - t0:.1f}s)", flush=True)
         except Exception as e:
             results.append((name, False, f"{type(e).__name__}: {e}"))
-            print(f"[FAIL] {name}: {e}")
+            print(f"[FAIL] {name}: {e}", flush=True)
             traceback.print_exc()
 
     # ---------- 容器 ----------
@@ -450,6 +453,7 @@ def run():
 
     def t_trade():
         from game import Game
+        from inventory import Placed
         from settings import (TRADE_GOODS, TRADE_TABS, ITEMS, SPECIAL_WEAPONS,
                               trade_cat_match, trade_buy_price, trade_sell_price,
                               W as SW, H as SH)
@@ -523,10 +527,77 @@ def run():
         sd.rubles = 12345
         save_mod.save_data(sd)
         assert save_mod.load_data().rubles == 12345
-        # 渲染:分区 + 滚动条 + 交易站/藏身处
+        # 批量出售:开模式 -> 点选/快捷选 -> 确认框 -> 出售/取消
         screen = pygame.display.set_mode((SW, SH))
+        sd.stash.clear()
+        sd.stash.items.append(Placed(Item("gold"), 0, 0))
+        sd.stash.items.append(Placed(Item("coffee"), 1, 0))
+        sd.stash.items.append(Placed(Item("a9", count=60), 2, 0))
+        sd.stash.items.append(Placed(Item.weapon("ak74", mag=30), 3, 0))
+        h.stash_scroll = 0.0
+        h.sell_mode = False
+        h.sell_sel = []
+        h.sell_ask = None
+        ox, oy = h.trade_stash_grid
+
+        def _cell(gx, gy):
+            return (ox + gx * 40 + 20, oy + gy * 40 + 20)
+
+        h._trade_click(h.sell_toggle.center)
+        assert h.sell_mode
+        h._trade_click(_cell(0, 0))                  # 选中 gold
+        h._trade_click(_cell(1, 0))                  # 选中 coffee
+        assert len(h.sell_selected()) == 2
+        exp = trade_sell_price(Item("gold")) + trade_sell_price(Item("coffee"))
+        assert h.sell_total() == exp, (h.sell_total(), exp)
+        h._trade_click(_cell(1, 0))                  # 再点 = 取消
+        assert len(h.sell_selected()) == 1
+        h._trade_click(_cell(1, 0))
+        # 快捷选择:全选子弹(再点一次取消)
+        h._trade_click(h.sell_ammo.center)
+        cats = sorted(p.item.cat for p in h.sell_selected())
+        assert cats.count("ammo") == 1 and "valuable" in cats and "misc" in cats, cats
+        h._trade_click(h.sell_ammo.center)
+        assert not any(p.item.cat == "ammo" for p in h.sell_selected())
+        # 空选择点出售 -> 不弹框不卖
+        h._trade_click(h.sell_clear.center)
+        n0, rub0 = len(sd.stash.items), sd.rubles
+        h._trade_click(h.sell_go.center)
+        assert h.sell_ask is None and len(sd.stash.items) == n0
+        # 选中一批 -> 出售 -> 先取消
+        h._trade_click(_cell(0, 0))
+        h._trade_click(_cell(2, 0))                  # gold + a9
+        h._trade_click(h.sell_go.center)
+        assert h.sell_ask is not None
+        h.draw(screen)
+        h._trade_click(h.sell_ask_no.center)
+        assert h.sell_ask is None
+        assert len(sd.stash.items) == n0 and sd.rubles == rub0
+        # 再确认出售
+        tot = h.sell_total()
+        n_sel = len(h.sell_selected())
+        h._trade_click(h.sell_go.center)
+        h._trade_click(h.sell_ask_yes.center)
+        assert h.sell_ask is None and h.sell_selected() == []
+        assert len(sd.stash.items) == n0 - n_sel, (len(sd.stash.items), n0, n_sel)
+        assert sd.rubles == rub0 + tot, (sd.rubles, rub0 + tot)
+        assert save_mod.load_data().rubles == sd.rubles, "批量出售要落盘"
+        # 关掉批量模式会清空选择
+        h._trade_click(_cell(3, 0))
+        assert h.sell_selected()
+        h._trade_click(h.sell_toggle.center)
+        assert not h.sell_mode and h.sell_selected() == []
+        # 渲染:分区 + 滚动条 + 批量面板 + 确认框 + 交易站/藏身处
         h.trade_scroll = 40.0
         h.draw(screen)
+        h.sell_mode = True
+        h._trade_click(_cell(3, 0))
+        h.draw(screen)
+        h.sell_ask = dict(items=list(h.sell_selected()), total=h.sell_total())
+        h.draw(screen)
+        h.sell_ask = None
+        h.sell_mode = False
+        h.sell_sel = []
         h.trade_cat = "ammo"
         h.trade_scroll = 0.0
         h.draw(screen)
@@ -1865,10 +1936,20 @@ def run():
         g10.start_raid()
         r10 = g10.raid
         r10.player.hp = 100000
-        r10.scavs = [s for s in r10.scavs if s.tag in ("boss", "guard")]
-        n0, a0, ew0 = len(r10.scavs), len(r10.allies), r10.enemy_waves
-        for _ in range(int((ENEMY_REINF_INTERVAL + ALLY_REINF_INTERVAL + 2) * 60)):
-            r10.update(1 / 60, [])
+        # 先用配置里的真实秒数做断言,再临时调小,省下纯等待的模拟时间
+        import raid as raid_mod
+        assert raid_mod.ENEMY_REINF_INTERVAL == 22.0, raid_mod.ENEMY_REINF_INTERVAL
+        assert raid_mod.ALLY_REINF_INTERVAL == 26.0, raid_mod.ALLY_REINF_INTERVAL
+        e_int0, a_int0 = raid_mod.ENEMY_REINF_INTERVAL, raid_mod.ALLY_REINF_INTERVAL
+        raid_mod.ENEMY_REINF_INTERVAL = raid_mod.ALLY_REINF_INTERVAL = 2.5
+        try:
+            r10.scavs = [s for s in r10.scavs if s.tag in ("boss", "guard")]
+            r10.enemy_reinf_t = r10.ally_reinf_t = 0.1   # 让第一波马上就来
+            n0, a0, ew0 = len(r10.scavs), len(r10.allies), r10.enemy_waves
+            for _ in range(int(8 * 60)):
+                r10.update(1 / 60, [])
+        finally:
+            raid_mod.ENEMY_REINF_INTERVAL, raid_mod.ALLY_REINF_INTERVAL = e_int0, a_int0
         assert r10.enemy_waves > ew0, "通讯站还在,敌方就该来援兵"
         assert len(r10.scavs) >= n0 + ENEMY_REINF_SQUAD
         assert r10.ally_waves >= 1 and len(r10.allies) > a0, "我方也该有援兵"
@@ -1902,6 +1983,10 @@ def run():
         # 5d) 总指挥部反应:守军全灭(= 前沿失联)30 秒后察觉,派检修队查/修通讯站
         import raid as raid_mod
         from settings import HQ_REACTION_DELAY, HQ_REACTION_SQUAD
+        assert HQ_REACTION_DELAY == 30.0, HQ_REACTION_DELAY
+        assert raid_mod.HQ_REACTION_SQUAD == 3, raid_mod.HQ_REACTION_SQUAD
+        d0 = raid_mod.HQ_REACTION_DELAY
+        raid_mod.HQ_REACTION_DELAY = 2.0     # 用例里把 30 秒缩短,省模拟时间
         g11 = Game()
         g11.save = save_mod.reset_data()
         g11.save.seen_intro = True
@@ -1913,11 +1998,12 @@ def run():
         comms11.damage(comms11.max_hp)
         assert comms11.destroyed
         r11.scavs = []                      # 守军全灭
-        for _ in range(int((HQ_REACTION_DELAY - 3) * 60)):
+        for _ in range(int(1 * 60)):
             r11.update(1 / 60, [])
         assert r11.hq_t is not None and not r11.scavs, (r11.hq_t, len(r11.scavs))
-        for _ in range(int(4 * 60)):
+        for _ in range(int(3 * 60)):
             r11.update(1 / 60, [])
+        raid_mod.HQ_REACTION_DELAY = d0
         assert r11.hq_teams == 1, r11.hq_teams
         assert len(r11.scavs) == HQ_REACTION_SQUAD, len(r11.scavs)
         assert all(s.tag == "repair" for s in r11.scavs)
@@ -1962,8 +2048,12 @@ def run():
         comms12 = next(s for s in r12.objectives if s.role == "comms")
         r12.scavs = []
         r12.enemy_reinf_t = 9999.0          # 冻结常规援兵波次,单独看这次反应
-        for _ in range(int((HQ_REACTION_DELAY + 4) * 60)):
+        raid_mod.HQ_REACTION_DELAY = 2.0
+        for _ in range(int(6 * 60)):
             r12.update(1 / 60, [])
+            if r12.hq_teams == 1:
+                break          # 就在他们刚到场那一刻断言(检修队到场后会归队)
+        raid_mod.HQ_REACTION_DELAY = d0
         assert r12.hq_teams == 1 and len(r12.scavs) == HQ_REACTION_SQUAD
         assert all(s.repair_target is comms12 for s in r12.scavs)
         assert not comms12.destroyed and comms12.hp == comms12.max_hp
@@ -1976,8 +2066,10 @@ def run():
         g13.start_raid()
         r13 = g13.raid
         r13.player.hp = 100000
-        for _ in range(int((HQ_REACTION_DELAY + 5) * 60)):
+        raid_mod.HQ_REACTION_DELAY = 2.0
+        for _ in range(int(5 * 60)):
             r13.update(1 / 60, [])
+        raid_mod.HQ_REACTION_DELAY = d0
         assert r13.hq_teams == 0 and r13.hq_t is None, (r13.hq_teams, r13.hq_t)
         g14 = Game()
         g14.save = save_mod.reset_data()
@@ -2359,8 +2451,177 @@ def run():
         g5.draw(screen)                       # 交易所(仓库滚动)
         g5.hideout.view = "stash"
         pygame.display.flip()
+        # 7) 一键整理 / 一键放回仓库并整理
+        from inventory import organize
+        g6 = Game()
+        g6.save = save_mod.reset_data()
+        g6.save.seen_intro = True
+        sd6 = g6.save
+        h6 = g6.hideout
+        h6.show_intro = False
+        sd6.stash.clear()
+        sd6.stash.items.append(Placed(Item("a545", count=37), 9, 19))
+        sd6.stash.items.append(Placed(Item("pack_xl"), 4, 12))     # 没卷起来的大包
+        sd6.stash.items.append(Placed(Item("a545", count=80), 0, 17))
+        sd6.stash.items.append(Placed(Item.weapon("ak74", mag=30), 2, 0))
+        sd6.stash.items.append(Placed(Item("bandage"), 8, 8))
+        sd6.stash.items.append(Placed(Item("b45"), 1, 5))
+        sd6.stash.items.append(Placed(Item("a545", count=3), 6, 14))
+        sd6.stash.items.append(Placed(Item("m700"), 0, 9))
+        sd6.stash.items.append(Placed(Item("gold"), 9, 0))
+        n_before = len(sd6.stash.items)
+        ok, msg = h6.organize_stash()
+        assert ok, msg
+        ammo = [p for p in sd6.stash.items if p.item.iid == "a545"]
+        assert len(ammo) == 1 and ammo[0].item.count == 120, [p.item.count for p in ammo]
+        packs = [p for p in sd6.stash.items if p.item.cat == "pack"]
+        assert packs and all(p.item.is_rolled() for p in packs)
+        assert len(sd6.stash.items) == n_before - 2
+
+        def _bbox_ratio(c):
+            cells = {}
+            for p in c.items:
+                w, hh = p.item.size()
+                for dy in range(hh):
+                    for dx in range(w):
+                        cells.setdefault(p.item.cat, set()).add((p.x + dx, p.y + dy))
+            out = {}
+            for cat, cs in cells.items():
+                xs = [x for x, _y in cs]
+                ys = [y for _x, y in cs]
+                out[cat] = ((max(xs) - min(xs) + 1) * (max(ys) - min(ys) + 1)
+                            / max(1, len(cs)))
+            return out
+
+        ratio = _bbox_ratio(sd6.stash)
+        assert ratio.get("weapon", 1) <= 3.0 and ratio.get("armor", 1) <= 3.0, ratio
+        assert all(v <= 3.0 for v in ratio.values()), ratio
+        used_rows = max((p.y + p.item.size()[1] for p in sd6.stash.items), default=0)
+        assert used_rows <= 8, used_rows
+        pos1 = sorted((p.x, p.y, p.item.iid, p.item.count) for p in sd6.stash.items)
+        assert h6.organize_stash()[0]
+        pos2 = sorted((p.x, p.y, p.item.iid, p.item.count) for p in sd6.stash.items)
+        assert pos1 == pos2, "重复整理应该稳定"
+        # 一键放回仓库并整理
+        sd6.bag.clear()
+        sd6.weapon = Item.weapon("akm", mag=30)
+        sd6.armor = Item("b23")
+        sd6.pack = Item("pack_large")
+        sd6.apply_pack()
+        sd6.bag.add_item(Item("a545", count=60))
+        sd6.bag.add_item(Item("medkit"))
+        ok, msg = h6.stash_all_and_organize()
+        assert ok, msg
+        assert not sd6.bag.items, "背包应该空了"
+        assert sd6.weapon is None and sd6.armor is None and sd6.pack is None
+        assert (sd6.bag.w, sd6.bag.h) == (4, 2), (sd6.bag.w, sd6.bag.h)
+        ids = [p.item.iid for p in sd6.stash.items]
+        for want in ("akm", "b23", "pack_large", "a545", "medkit"):
+            assert want in ids, (want, ids)
+        assert next(p for p in sd6.stash.items
+                    if p.item.iid == "pack_large").item.is_rolled()
+        ratio2 = _bbox_ratio(sd6.stash)
+        assert all(v <= 3.5 for v in ratio2.values()), ratio2
+        # 放不下时整体拒绝,且不动仓库
+        for gy in range(sd6.stash.h):
+            for gx in range(sd6.stash.w):
+                if not sd6.stash.occupied()[gy][gx]:
+                    sd6.stash.items.append(Placed(Item("bandage"), gx, gy))
+        sd6.stash.items.append(Placed(Item("pack_xl"), 0, 0))   # 故意重叠
+        snap = [(p.x, p.y, p.item.iid) for p in sd6.stash.items]
+        ok, overflow = organize(sd6.stash)
+        assert not ok and overflow, "放不下必须整体拒绝"
+        assert [(p.x, p.y, p.item.iid) for p in sd6.stash.items] == snap, \
+            "整理失败不该改动仓库"
+        # 两个按钮都能点
+        scr6 = pygame.display.set_mode((SW, SH))
+        g6.draw(scr6)
+        h6._click(h6.lay["organize"].center)
+        h6._click(h6.lay["stash_all"].center)
+        g6.draw(scr6)
+        pygame.display.flip()
+        # 8) 整理后装备"卷起的背包":以前会就地展开撑破格子(越界)-> 之后点啥都闪退
+        g7 = Game()
+        g7.save = save_mod.reset_data()
+        g7.save.seen_intro = True
+        sd7 = g7.save
+        h7 = g7.hideout
+        h7.show_intro = False
+        sd7.stash.clear()
+        sd7.stash.add_item(Item("pack_xl"))
+        sd7.stash.add_item(Item("gold"))
+        assert h7.organize_stash()[0]
+        pk7 = next(p for p in sd7.stash.items if p.item.iid == "pack_xl")
+        assert pk7.item.is_rolled() and pk7.item.size() == (2, 2)
+        idx7 = next(i for i, p in enumerate(sd7.stash.items) if p.item is pk7.item)
+        ok, msg = h7._try_equip_pack(idx7)
+        assert ok, msg
+        assert sd7.pack is not None and sd7.pack.iid == "pack_xl"
+        assert not sd7.pack.is_rolled(), "装备时应展开"
+        assert (sd7.bag.w, sd7.bag.h) == (10, 6), (sd7.bag.w, sd7.bag.h)
+        assert not sd7.stash.out_of_bounds() and not sd7.bag.out_of_bounds()
+        assert not any(p.item.iid == "pack_xl" for p in sd7.stash.items)
+        # 失败路径:换小包 -> 背包收窄溢出 + 仓库塞不下 -> 什么都不变、不留越界物品
+        g8 = Game()
+        g8.save = save_mod.reset_data()
+        g8.save.seen_intro = True
+        sd8 = g8.save
+        h8 = g8.hideout
+        h8.show_intro = False
+        sd8.stash.clear()
+        sd8.bag.clear()
+        sd8.weapon = Item.weapon("pm", mag=8)
+        sd8.pack = Item("pack_xl")
+        sd8.apply_pack()
+        for _ in range(20):
+            sd8.bag.add_item(Item("screws"))
+        sd8.stash.add_item(Item("pack_small"))
+        for gy in range(sd8.stash.h):
+            for gx in range(sd8.stash.w):
+                if not sd8.stash.occupied()[gy][gx]:
+                    sd8.stash.items.append(Placed(Item("bandage"), gx, gy))
+        assert h8.organize_stash()[0]
+        small = next(p for p in sd8.stash.items if p.item.iid == "pack_small")
+        before8 = sorted((p.item.iid, p.x, p.y) for p in sd8.stash.items)
+        idx8 = next(i for i, p in enumerate(sd8.stash.items) if p.item is small.item)
+        ok, msg = h8._try_equip_pack(idx8)
+        assert not ok, msg
+        assert not sd8.stash.out_of_bounds(), "失败后不能留下越界物品(会连锁闪退)"
+        assert sorted((p.item.iid, p.x, p.y) for p in sd8.stash.items) == before8
+        assert sd8.pack is not None and sd8.pack.iid == "pack_xl"
+        # 容器对越界物品要容错,读档修复要尽量保住东西
+        c8 = Container(3, 2)
+        c8.items.append(Placed(Item("gold"), 0, 0))
+        c8.items.append(Placed(Item("ak74"), 2, 0))       # 5 宽 -> 越界
+        assert len(c8.out_of_bounds()) == 1
+        assert all(len(r) == 3 for r in c8.occupied())    # 以前这里 IndexError
+        assert c8.at(2, 0) is not None and c8.at(99, 99) is None
+        bad8 = [dict(iid="gold", count=1, rot=False, state={}, x=0, y=0),
+                dict(iid="ak74", count=1, rot=False, state={}, x=2, y=0)]
+        assert len(Container.deserialize(3, 2, bad8).items) == 1, "严格模式仍丢弃"
+        rep8 = Container.deserialize(3, 2, bad8, repair=True)
+        assert len(rep8.items) == 1 and not rep8.out_of_bounds()
+        big8 = Container.deserialize(10, 20, bad8, repair=True)
+        assert len(big8.items) == 2 and not big8.out_of_bounds(), "放得下就该留着"
+        c9 = Container(10, 4)
+        c9.items.append(Placed(Item("gold"), 0, 0))
+        c9.items.append(Placed(Item("m700"), 6, 0))
+        assert len(c9.out_of_bounds()) == 1
+        c9.repair_layout()
+        assert not c9.out_of_bounds() and len(c9.items) == 2
+        # 带卷起背包的存档读回来仍然合法
+        save_mod.save_data(sd7)
+        sd7b = save_mod.load_data()
+        assert not sd7b.stash.out_of_bounds() and not sd7b.bag.out_of_bounds()
 
     check("基建-仓库滚动/背包卷起/弹药库/任务系统", t_base)
+
+    def t_story():
+        """剧情模式《灰区二日》:见 storytest.py(单独成文件,免得本文件过长)。"""
+        import storytest
+        storytest.run()
+
+    check("剧情模式-城区大图/八时段/分支与结局", t_story)
 
     ok = all(r[1] for r in results)
     report = ["Tarkov2D selftest " + ("PASS" if ok else "FAIL"), ""]

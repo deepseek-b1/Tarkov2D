@@ -88,34 +88,22 @@ jobs:
       - name: Show artifacts
         run: ls -lh bin/ || true
 
-      # Self-check: this build exists because surface.so used to reference
-      # undefined aarch64 symbols. Verify them here instead of on the phone.
-      - name: Verify surface.so symbols and arch
+      # Every library in the APK must be loadable on the phone.
+      #
+      # Android's linker resolves all relocations at dlopen() time, so ONE
+      # undefined symbol makes a whole module unloadable and the app dies at
+      # launch with no error dialog.  1.0.8 shipped exactly that: pygame's
+      # surface.so referenced pg_avx2_at_runtime_but_uncompiled, which nothing
+      # defined.  The previous check here hard-coded two symbol names and only
+      # looked at surface.so, so it walked straight past it - this one is
+      # generic and looks at every .so, including the ones packed inside
+      # libpybundle.so, and it also verifies the architecture.
+      - name: Verify every library in the APK is loadable
         run: |
-          SO=$(find "$PWD/.buildozer" -path "*dists*" -name "surface.so" 2>/dev/null | head -1)
-          [ -z "$SO" ] && SO=$(find "$PWD/.buildozer" -name "surface*.so" 2>/dev/null | head -1)
-          echo "surface.so: $SO"
-          if [ -z "$SO" ]; then echo "!! surface.so not found, skipping"; exit 0; fi
-          echo "--- arch (must be ARM aarch64, not x86_64) ---"
-          file "$SO" || true
-          echo "--- alphablit_alpha_sse2_argb_surf_alpha (must be T) ---"
-          nm -D "$SO" 2>/dev/null | grep alphablit || true
-          if nm -D "$SO" 2>/dev/null | grep -q "alphablit_alpha_sse2_argb_surf_alpha"; then
-            if nm -D "$SO" 2>/dev/null | grep "alphablit_alpha_sse2_argb_surf_alpha" | grep -q " T "; then
-              echo ">>> OK: symbol is DEFINED (T)"
-            else
-              echo ">>> BAD: symbol present but still undefined (U)"
-            fi
-          else
-            echo ">>> WARN: symbol absent from dynamic table"
-          fi
-          echo "--- pg_has_avx2 (must be ABSENT on arm64) ---"
-          if nm -D "$SO" 2>/dev/null | grep -q "pg_has_avx2"; then
-            echo ">>> BAD: pg_has_avx2 still referenced, dlopen will fail on phone"
-            nm -D "$SO" 2>/dev/null | grep "pg_has_avx2"
-          else
-            echo ">>> OK: pg_has_avx2 not referenced"
-          fi
+          APK=$(ls bin/*.apk 2>/dev/null | head -1)
+          test -n "$APK" || { echo "!! no APK produced"; exit 1; }
+          echo "checking $APK"
+          python tools/check_android_symbols.py "$APK"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4

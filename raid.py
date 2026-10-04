@@ -6,6 +6,7 @@ import random
 import pygame
 
 import audio
+import story as story_mod
 from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       INTERACT_DIST, ITEMS, LOOT, SCAV_DROPS, DIFFICULTIES,
                       CLASSIFIED, DOC_HARDENED_COUNT, armor_allows,
@@ -16,6 +17,8 @@ from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       HOSTAGE_RESCUE_TIME, REVIVE_TIME, INTERACT_RANGE, ALLY_DMG,
                       ASSAULT_ENEMIES, ASSAULT_ALLIES, ASSAULT_PLANT_TIME,
                       ASSAULT_START_POINTS, ASSAULT_KILL_POINTS, ASSAULT_DIFF,
+                      STORY_DIFF, STORY_TIMES, STORY_FINAL_TIME,
+                      STORY_WANTED_BONUS, STORY_INTERACT,
                       SUPPORT, SUPPORT_ORDER,
                       C4_FUSE, C4_BLAST_RADIUS, C4_UNIT_DMG, C4_STRUCT_DMG,
                       C4_PLANT_RANGE, STRUCT_INFO, ALLY_STRUCT_HP, MODE_DIFF,
@@ -111,6 +114,32 @@ class SupplyPoint:
         self.cd = 0.0
 
 
+class StoryPoint:
+    """剧情模式的关键点:一个目标(搜索/下载/取得/对话)或一段 NPC 对白。"""
+
+    def __init__(self, x, y, obj=None, dia=None):
+        self.x, self.y = x, y
+        self.r = 20
+        self.obj = obj        # story.py 的目标 dict(id/name/kind/need/effects)
+        self.dia = dia        # 或一段对白 dict(speaker/lines/choices)
+
+    @property
+    def name(self):
+        if self.obj is not None:
+            return self.obj["name"]
+        if self.dia is not None:
+            return self.dia["speaker"]
+        return ""
+
+    @property
+    def kind(self):
+        if self.obj is not None:
+            return self.obj["kind"]
+        if self.dia is not None:
+            return "talk"
+        return ""
+
+
 class Player:
     def __init__(self, sd):
         self.x, self.y = 0.0, 0.0
@@ -201,6 +230,10 @@ class Raid:
             # 突袭是独立模式:固定强度,不参与 简单/封锁/强化封锁 三档
             self.diff_key = "assault"
             self.diff = ASSAULT_DIFF
+        elif self.mode == "story":
+            # 剧情模式:固定强度(有分支与结局,不吃难度档)
+            self.diff_key = "story"
+            self.diff = STORY_DIFF
         else:
             # 人质解救固定成强化封锁强度(不给难度档)
             forced = MODE_DIFF.get(self.mode)
@@ -218,6 +251,8 @@ class Raid:
         self.aim_locked = None
         self.map = GameMap(self.map_key)
         self.map_surf = self.map.prerender()
+        # 剧情模式的装备由 game.start_raid 里的系统配发负责(这里只留提示清单)
+        self.story_issued = list(getattr(game, "story_issued", []) or [])
         self.player = Player(game.save)
         self.player.x, self.player.y = self.map.spawn
         self.cam = [0, 0]
@@ -234,6 +269,13 @@ class Raid:
             random.shuffle(self.scavs)
             self.scavs = self.scavs[:ASSAULT_ENEMIES]
             self._spawn_boss_and_guards()
+        elif self.mode == "story":
+            # 剧情模式:城区守军,通缉越高人越多;头目/精英由剧情决定
+            wanted = story_mod.st(game.save)["wanted"]
+            want_n = int(STORY_DIFF["scavs"]) + wanted * STORY_WANTED_BONUS
+            random.shuffle(self.scavs)
+            self.scavs = self.scavs[:want_n]
+            self._spawn_story_bosses()
         else:
             self._spawn_boss_and_guards()
             self._spawn_author()
@@ -273,6 +315,22 @@ class Raid:
         self.strikes = []         # 待生效的支援:{kind,x,y,t,cfg}
         self.recon_t = 0.0        # 无人机侦察剩余时间(秒)
         self.support_calls = 0
+        # 剧情模式《灰区二日》:当前时段目标 + 关键点 + 对白
+        self.story_sd = game.save if self.mode == "story" else None
+        self.story_mission = story_mod.mission(game.save) if self.mode == "story" else None
+        self.story_targets = []
+        if self.mode == "story":
+            for (sx, sy) in self.map.story_points:
+                o = story_mod.objective_by_point(game.save, sx, sy)
+                dia = story_mod.dialogues_at(game.save, sx, sy) if o is None else None
+                if o is not None or dia is not None:
+                    self.story_targets.append(StoryPoint(sx, sy, o, dia))
+        self.dialogue = None      # 对白面板:speaker/lines/idx/choices/reply/at
+        self.cutscene = None      # 剧情演出:{kind,x,y,t,dur}(救人/处决/给药/抢夺)
+        self.floaters = []        # 飘字:[{text,x,y,t,dur,col}]
+        self.subtitle = None      # 录音字幕:{text,t,dur}
+        self.captive_state = None  # 俘虏:None 待决定 / "freed" 放走 / "dead" 被处决
+        self.story_log = []       # 本次出击的剧情提示(结算页用)
         self.containers = list(self.map.loot)
         # 强化封锁:机密文件固定刷在保险箱(先放入,保证有位置)
         if self.diff_key == "hardened" and DOC_HARDENED_COUNT > 0:
@@ -312,7 +370,23 @@ class Raid:
         if any(getattr(s, "tag", None) == "author" for s in self.scavs):
             self.add_toast("警报:隐藏头目「作者」携 RPG 在场!(没穿 6 级甲别硬碰)",
                            COL["bad"], 5.0)
-        self.time_left = float(RAID_TIME)
+        if self.mode == "story":
+            # 开场无线电 + 当前时段目标
+            st_now = story_mod.st(game.save)
+            self.add_toast(f"第 {st_now['day']} 天 · "
+                           f"{story_mod.PERIODS[min(3, st_now['period'])]} · "
+                           f"{story_mod.mission_title(game.save)}", COL["accent"], 5.5)
+            if self.story_mission is not None:
+                for speaker, line in self.story_mission["brief"]:
+                    self.add_toast(f"{speaker}:{line}", COL["good"], 6.0)
+            if self.story_issued:
+                self.add_toast("系统补给:" + "、".join(self.story_issued)
+                               + "(剧情模式保证你手里有家伙)", COL["good"], 5.0)
+            self.time_left = float(STORY_FINAL_TIME
+                                   if (self.story_mission or {}).get("id") == "d2_4"
+                                   else STORY_TIMES[min(3, st_now["period"])])
+        else:
+            self.time_left = float(RAID_TIME)
         self.kills = 0
         self.loot_log = []       # 撤离结算用:{"name","count","value"}
         self.inv_open = False
@@ -504,13 +578,35 @@ class Raid:
             d = math.hypot(sp.x - p.x, sp.y - p.y)
             if d < min(bd, SUPPLY_RANGE):
                 best, bd, kind = sp, d, "supply"
+        # 剧情关键点 / 剧情 NPC
+        if self.mode == "story":
+            sd = self.game.save
+            for t in self.story_targets:
+                if t.obj is not None and story_mod.is_done(sd, t.obj["id"]):
+                    continue
+                if t.kind == "extract":
+                    continue
+                d = math.hypot(t.x - p.x, t.y - p.y)
+                if d < min(bd, STORY_INTERACT):
+                    best, bd, kind = t, d, "story"
         return (kind, best) if best is not None else (None, None)
 
     def channel_need(self, kind=None):
         """引导类交互所需的秒数。"""
         k = kind or (self.channel["kind"] if self.channel else None)
+        if k == "story":
+            o = self.channel["ent"].obj
+            return float(o.get("need", 2.0)) if o else 2.0
         return {"rescue": HOSTAGE_RESCUE_TIME, "revive": REVIVE_TIME,
                 "destroy": ASSAULT_PLANT_TIME}.get(k, 1.0)
+
+    def channel_label(self, kind=None):
+        k = kind or (self.channel["kind"] if self.channel else None)
+        if k == "story":
+            o = self.channel["ent"].obj
+            return f"{o['name']}中" if o else "进行中"
+        return {"rescue": "解救人质中", "revive": "拉起队友中",
+                "destroy": "安放炸药中"}.get(k, "进行中")
 
     def objectives_done(self):
         return len(self.objectives) > 0 and all(o.destroyed for o in self.objectives)
@@ -520,13 +616,31 @@ class Raid:
         return self.mode != "assault" or self.objectives_done()
 
     def interact(self):
-        """E / 搜刮按钮:优先救人质、拉队友、炸设施,其次搜刮容器。"""
+        """E / 搜刮按钮:优先剧情交互、救人质、拉队友、炸设施,其次搜刮容器。"""
+        if self.dialogue is not None:
+            self.dialogue_next()
+            return
         if self.channel is not None:
             self.channel = None
             return
         kind, ent = self.nearest_interactable()
         if kind == "supply":
             self.use_supply(ent)
+            return
+        if kind == "story":
+            if ent.dia is not None:
+                self.open_dialogue(ent.dia, (ent.x, ent.y))
+                return
+            o = ent.obj
+            if o["kind"] == "talk":
+                self.open_dialogue(story_mod.DIA.get(o.get("dialogue", "")),
+                                   (ent.x, ent.y))
+                return
+            if o["kind"] == "kill":
+                self.add_toast("先把守在这里的家伙解决掉", COL["bad"], 2.6)
+                return
+            self.channel = dict(kind="story", ent=ent, t=0.0)
+            audio.play("click")
             return
         if kind is not None:
             self.channel = dict(kind=kind, ent=ent, t=0.0)
@@ -567,8 +681,12 @@ class Raid:
             self.channel["t"] = 0.0
         if self.channel["t"] >= need:
             kind = self.channel["kind"]
+            ent = self.channel["ent"]
             self.channel = None
-            if kind == "rescue":
+            if kind == "story":
+                if ent.obj is not None:
+                    self._story_objective_done(ent.obj)
+            elif kind == "rescue":
                 ent.rescued = True
                 done = sum(1 for h in self.hostages if h.rescued)
                 audio.play("pickup")
@@ -591,6 +709,24 @@ class Raid:
             self.support_points += ASSAULT_KILL_POINTS.get(scav.kind, 1)
         audio.play("kill")
         tag = getattr(scav, "tag", None)
+        if self.mode == "story" and tag in ("echo", "viktor", "wolf", "courier"):
+            sd = self.game.save
+            title = {"echo": "回声体", "viktor": "黑曜石指挥官维克托",
+                     "wolf": "灰狼", "courier": "信使"}.get(tag, "剧情人物")
+            if tag == "viktor":
+                story_mod.set_flag(sd, "viktor_dead")
+                self.add_toast(f"击毙 {title} —— 直升机坪现在可以撤离了",
+                               COL["accent"], 4.5)
+            elif tag == "wolf":
+                story_mod.set_flag(sd, "wolf_dead")
+                self.add_toast(f"你杀死了 {title}。灰区再也不会有人叫你英雄了。",
+                               COL["bad"], 4.5)
+            elif tag == "courier":
+                story_mod.set_flag(sd, "killed_courier")
+                self.add_toast(f"击毙 {title}", COL["accent"], 3.4)
+            else:
+                self.add_toast(f"击毙 {title}", COL["accent"], 3.4)
+            self.story_log.append(f"击毙 {title}")
         cx, cy = self._corpse_pos(int(scav.x), int(scav.y))
         if tag == "author":
             corpse = LootContainer("boss_corpse", cx, cy)
@@ -1131,6 +1267,147 @@ class Raid:
             if sp.cd > 0:
                 sp.cd = max(0.0, sp.cd - dt)
 
+    def _spawn_story_bosses(self):
+        """剧情模式:按时段与选择生成 Boss(回声体/维克托/灰狼/信使)。"""
+        for b in story_mod.bosses(self.game.save):
+            try:
+                bx, by = story_mod.at_pos(b["at"])
+            except KeyError:
+                continue
+            self.scavs.append(Scav("ar", bx, by, self.diff,
+                                   custom=dict(b["stats"], name=b["name"]),
+                                   tag=b["tag"]))
+
+    def open_dialogue(self, dia, at=None):
+        """打开对白面板(台词读完才给选项)。at = 说话人所在坐标(演出用)。"""
+        if dia is None:
+            return
+        self.dialogue = dict(speaker=dia.get("speaker", "?"),
+                             lines=list(dia.get("lines", [])),
+                             idx=0, choices=dia.get("choices"), reply=None,
+                             at=at)
+        audio.play("click")
+
+    def dialogue_next(self):
+        """推进对白:下一句 -> 选项 -> 选后回复 -> 关闭。"""
+        d = self.dialogue
+        if d is None:
+            return
+        if d["reply"] is not None:
+            self.dialogue = None
+            return
+        if d["idx"] < len(d["lines"]) - 1:
+            d["idx"] += 1
+            return
+        if d["choices"]:
+            return                     # 等玩家点选项
+        self.dialogue = None
+
+    def dialogue_choose(self, i):
+        """选择分支:套用效果 + 放个剧情演出,再显示回复。"""
+        d = self.dialogue
+        if d is None or not d["choices"] or not (0 <= i < len(d["choices"])):
+            return False
+        c = d["choices"][i]
+        eff = c.get("effects", {})
+        story_mod.apply_effects(self.game.save, eff)
+        self.story_log.append(f"{d['speaker']} → {c['text']}")
+        audio.play("click")
+        d["reply"] = c.get("reply", "……")
+        d["choices"] = None
+        # 演出:按这次选择写下的标记挑一种动画
+        x, y = d.get("at", (self.player.x, self.player.y))
+        for f in eff.get("flags", []):
+            fx = story_mod.CHOICE_FX.get(f)
+            if fx:
+                self._start_cutscene(fx[0], x, y, fx[1])
+                break
+        # 信任变化飘个数字(和上面的结果提示错开,别叠在一起)
+        if eff.get("wolf"):
+            n = int(eff["wolf"])
+            self._floater(f"灰狼信任 {'+' if n > 0 else ''}{n}", x, y - 62,
+                          COL["good"] if n > 0 else COL["bad"])
+        if eff.get("erin"):
+            n = int(eff["erin"])
+            self._floater(f"艾琳信任 {'+' if n > 0 else ''}{n}", x, y - 90,
+                          COL["good"] if n > 0 else COL["bad"])
+        return True
+
+    def _floater(self, text, x, y, col=None):
+        self.floaters.append(dict(text=text, x=x, y=y, t=0.0, dur=2.6,
+                                  col=col or COL["accent"]))
+
+    def _start_cutscene(self, kind, x, y, text=""):
+        """放一段简单演出(救援/处决/给药/拒绝/抢夺/跟踪),并让俘虏状态生效。"""
+        self.cutscene = dict(kind=kind, x=x, y=y, t=0.0, dur=2.6)
+        if kind == "rescue":
+            self.captive_state = "freed"
+            self.add_particles(x, y, 18, (120, 220, 130), speed=110)
+        elif kind == "shoot":
+            self.captive_state = "dead"
+            self.add_particles(x, y, 22, (200, 60, 60), speed=140)
+            self.add_particles(x, y, 8, (255, 230, 150), speed=90)
+            audio.play("sg")
+        elif kind == "aid":
+            self.add_particles(x, y, 16, (120, 220, 130), speed=80)
+        elif kind == "rob":
+            self.add_particles(x, y, 16, (220, 120, 60), speed=120)
+        else:
+            self.add_particles(x, y, 12, (150, 200, 230), speed=90)
+        if text:
+            self._floater(text, x, y - 26, COL["accent"])
+
+    def _story_objective_done(self, o):
+        """完成一个剧情目标:写进度、套效果、可能接一段对白。"""
+        sd = self.game.save
+        story_mod.mark_done(sd, o["id"])
+        eff = o.get("effects", {})
+        story_mod.apply_effects(sd, eff)
+        audio.play("pickup")
+        self.add_toast(f"{o['name']} ✓", COL["good"], 3.2)
+        self.story_log.append(o["name"])
+        # 录音:屏幕下方出一串字幕(像无线电里放出来的原话)
+        if o.get("at") == "tapes" and "tape_index" in o:
+            self.subtitle = dict(text=story_mod.tape_line(o["tape_index"]),
+                                 t=8.0, dur=8.0)
+            self.add_toast(f"录到第 {story_mod.st(sd)['tapes']}/12 份录音",
+                           COL["accent"], 3.0)
+        if eff.get("dialogue"):
+            self.open_dialogue(story_mod.DIA.get(eff["dialogue"]))
+        left = [x for x in story_mod.objectives(sd)
+                if x["kind"] not in ("extract",) and x["at"] != "tapes"
+                and not story_mod.is_done(sd, x["id"])]
+        if not left and self.story_mission is not None:
+            self.add_toast("本时段的目标都做完了 —— 找撤离点撤出去",
+                           COL["accent"], 4.5)
+
+    def _update_story_fx(self, dt):
+        """剧情演出/飘字/字幕的计时。"""
+        if self.cutscene is not None:
+            self.cutscene["t"] += dt
+            if self.cutscene["t"] >= self.cutscene["dur"]:
+                self.cutscene = None
+        for f in self.floaters:
+            f["t"] += dt
+        self.floaters = [f for f in self.floaters if f["t"] < f["dur"]]
+        if self.subtitle is not None:
+            self.subtitle["t"] -= dt
+            if self.subtitle["t"] <= 0:
+                self.subtitle = None
+
+    def _update_story(self, dt):
+        """剧情:击杀目标(Boss)判定。"""
+        if self.mode != "story" or self.over:
+            return
+        sd = self.game.save
+        for o in story_mod.objectives(sd):
+            if o["kind"] != "kill" or story_mod.is_done(sd, o["id"]):
+                continue
+            tag = o.get("boss")
+            alive = any(getattr(s, "tag", None) == tag for s in self.scavs)
+            if not alive:
+                self._story_objective_done(o)
+
     def plant_c4(self, ent):
         """在设施上安放 C4(25 秒后起爆,爆区半径固定)。"""
         ent.c4 = dict(t=C4_FUSE)
@@ -1477,6 +1754,12 @@ class Raid:
                            commander_killed=(self.mode == "assault"
                                              and self.commander() is None),
                            mission=mission)
+        if self.mode == "story" and not self.result.get("story_note"):
+            # 时段结算:写剧情进度并推进到下一个时段(可能直接进入结局)
+            self.result["story_note"] = story_mod.settle_period(self.game.save,
+                                                               self.result)
+            self.result["story_log"] = list(self.story_log[-6:])
+            self.result["brief"] = story_mod.brief_lines(self.game.save)
         self.game.raid_finished(self.result)
 
     # ---------- 每帧 ----------
@@ -1494,6 +1777,27 @@ class Raid:
         # 事件
         pending_edge = False
         for ev in events:
+            # 对白面板优先吃掉输入(读完台词 -> 选项 -> 关闭)
+            if self.dialogue is not None:
+                if ev.type == pygame.KEYDOWN:
+                    if ev.key == pygame.K_ESCAPE:
+                        self.dialogue = None
+                    elif ev.key in (pygame.K_e, pygame.K_SPACE, pygame.K_RETURN):
+                        self.dialogue_next()
+                    elif ev.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4):
+                        self.dialogue_choose({pygame.K_1: 0, pygame.K_2: 1,
+                                              pygame.K_3: 2, pygame.K_4: 3}[ev.key])
+                elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                    import raid_ui as _rui
+                    hit = False
+                    for i, r in enumerate(_rui.dialogue_layout(self)):
+                        if r.collidepoint(ev.pos):
+                            self.dialogue_choose(i)
+                            hit = True
+                            break
+                    if not hit:
+                        self.dialogue_next()
+                continue
             # 手机模式且没有弹窗时,触摸先交给虚拟摇杆/按钮
             if self.touch_mode and not (self.inv_open or self.loot_target is not None
                                         or self.ask_merge or self.paused):
@@ -1626,7 +1930,8 @@ class Raid:
         else:
             held = pygame.mouse.get_pressed()[0]
             self.braced = bool(pygame.mouse.get_pressed()[2])   # 右键=架枪
-        world_active = not (self.inv_open or self.loot_target is not None)
+        world_active = not (self.inv_open or self.loot_target is not None
+                            or self.dialogue is not None)
         if world_active:
             self.try_fire(held)
         self.fire_edge = False
@@ -1659,6 +1964,15 @@ class Raid:
                 self.add_toast("先炸掉全部指挥设施才能撤离!", COL["bad"], 3.6)
             zone = None
             self.extract_t = max(0.0, self.extract_t - dt * 3)
+        if zone is not None and self.mode == "story":
+            # 剧情:每个撤离点都有自己的条件(信任/通行证/样本/隐藏点)
+            ok, why = story_mod.can_use_extract(self.game.save, zone)
+            if not ok:
+                if zone not in self.warned:
+                    self.warned.add(zone)
+                    self.add_toast(f"「{zone}」现在还走不了:{why}", COL["bad"], 3.6)
+                zone = None
+                self.extract_t = max(0.0, self.extract_t - dt * 3)
         if zone is not None and not moving and not p.reloading:
             if self.extract_t == 0:
                 self.add_toast(f"开始撤离:{zone}", COL["accent"])
@@ -1686,6 +2000,8 @@ class Raid:
         self._update_hq(dt)
         self._update_rebuild(dt)
         self._update_supplies(dt)
+        self._update_story(dt)
+        self._update_story_fx(dt)
         self._update_bullets(dt)
         for pt in self.particles:
             pt["ttl"] -= dt

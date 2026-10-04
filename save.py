@@ -40,6 +40,7 @@ class SaveData:
         self.stats = {"raids": 0, "extracts": 0, "deaths": 0, "kills": 0, "value": 0}
         self.tasks = {}        # 教官任务进度:{task_id: 已累计数量}
         self.tasks_done = []   # 已领取的一次性任务 id(可重复任务不记这里)
+        self.story = None      # 剧情模式《灰区二日》进度(story.py 维护)
 
     def apply_pack(self):
         """按当前背包调整出战背包容量(先尽量扩容,收窄时放不下的退回仓库)。"""
@@ -106,19 +107,22 @@ class SaveData:
             "stats": dict(self.stats),
             "tasks": dict(self.tasks),
             "tasks_done": list(self.tasks_done),
+            "story": self.story,
         }
 
     @staticmethod
     def deserialize(data):
         sd = SaveData()
-        sd.stash = Container.deserialize(STASH_W, STASH_H, data.get("stash"))
+        # repair=True:玩家自己的仓库/背包读档时,越界/重叠的物品挪到空位而不是丢掉
+        sd.stash = Container.deserialize(STASH_W, STASH_H, data.get("stash"),
+                                         repair=True)
         # 存了容器尺寸(新档)就按存的来,否则旧档按 6×4 兼容
         try:
             bw = int(data.get("bag_w", 6) or 6)
             bh = int(data.get("bag_h", 4) or 4)
         except (TypeError, ValueError):
             bw, bh = 6, 4
-        sd.bag = Container.deserialize(bw, bh, data.get("bag"))
+        sd.bag = Container.deserialize(bw, bh, data.get("bag"), repair=True)
         if data.get("weapon"):
             sd.weapon = Item.from_dict(data["weapon"])
         if data.get("armor"):
@@ -149,6 +153,8 @@ class SaveData:
                     if isinstance(v, (int, float))}
         done = data.get("tasks_done") or []
         sd.tasks_done = [str(t) for t in done]
+        story = data.get("story")
+        sd.story = story if isinstance(story, dict) else None
         return sd
 
 

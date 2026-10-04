@@ -61,7 +61,7 @@ pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo6 cmake libffi-de
 
 ---
 
-## 3. 已经踩过并修好的 8 个坑（按出现顺序）
+## 3. 已经踩过并修好的 9 个坑（按出现顺序）
 
 | # | 报错 | 根因 | 修法 |
 | --- | --- | --- | --- |
@@ -73,6 +73,7 @@ pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo6 cmake libffi-de
 | 6 | `Modules/grpmodule.c:281: error: ...` + `make: *** [Modules/grpmodule.o] Error 1` | p4a 默认 Python 3.14 配 buildozer 自动拉的 **NDK r28c**，CPython 配方尚未适配（3.12/3.13 同样中招；armv7a/arm64 都会） | **`android.ndk = 25c`** + Python 退到 **3.11.9** |
 | 7 | `You need cython. https://cython.org/` | pygame 的 `setup.py` 由 **p4a 自带的 hostpython3** 执行；Cython 装在 runner 系统 Python 里没用。p4a 的检查是 `python3 -m cython --help` | 把 Cython 装进**那个** hostpython3（见第 4 节） |
 | 8 | `line 12: : command not found` / `exit 127` | 预热与补装写在同一个 step，预热被 20 分钟上限掐断，hostpython3 未生成 → `$HP` 为空 | **拆成两个 step**（见第 4 节） |
+| 9 | 装机后**点开就闪退**，无任何提示（1.0.8） | Android 链接器在 `dlopen` 时会解析**全部**重定位，`surface.so` 里有一个符号在 APK 内没有任何库定义 → 整个模块加载失败 → `import pygame` 抛 `ImportError` → 进程立刻退出 | 见第 8 节：weak 桩 + CI 全量符号校验 |
 
 补充：armv7a（32 位）在 #6 上同样失败且上游无补丁，故只出 `arm64-v8a`（2020 年后的手机基本都是 arm64）。
 
@@ -174,3 +175,119 @@ pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo6 cmake libffi-de
 ```
 
 改完代码后：`git add -A; git commit -m "..."; git push`，再执行上面的命令即可。
+
+---
+
+## 8. 1.0.8「点开就闪退」的根因与修复
+
+### 现象
+装上后点图标立刻退回桌面：没有报错框，presplash 之后没有任何画面。
+
+### 根因
+`libpybundle.so`（真实身份是 **gzip 过的 tar**，p4a 把整个 Python 运行时塞在里面）里的
+`_python_bundle/site-packages/pygame/surface.so` 引用了符号 `pg_avx2_at_runtime_but_uncompiled`，
+而 APK 里**没有任何库定义它**。
+
+Android 链接器和桌面 Linux 不同：它不接受「用到才解析」。`dlopen` 阶段就会把所有重定位解完，
+缺一个就整库加载失败：
+
+```
+ImportError: dlopen failed: cannot locate symbol
+"pg_avx2_at_runtime_but_uncompiled" referenced by ".../pygame/surface.so"
+```
+
+`pygame/__init__.py` 启动时就会 `import pygame.surface`，于是进程在开窗之前就退出——
+表现出来就是「闪退」。旧的 CI 校验只写死两个符号名、而且只看 `surface.so`，正好漏掉它。
+
+同一族的三个符号（每个都是修好前一个才暴露下一个）：
+
+| 符号 | 谁定义 | 状态 |
+| --- | --- | --- |
+| `alphablit_alpha_sse2_argb_surf_alpha` | `src_c/simd_blitters_sse2.c`（模板漏编） | 已修：加进 surface 模块 |
+| `pg_has_avx2` | `src_c/simd_blitters_avx2.c`（arm64 从不编译） | 已修：weak 桩 |
+| **`pg_avx2_at_runtime_but_uncompiled`** | 同上 | **1.0.8 就是死在这个符号上** |
+
+补充证据：该符号在 `surface.so` 里只有**一个**调用者 `pg_warn_simd_at_runtime_but_uncompiled()`，
+作用是判断「CPU 支持 AVX2 但本次构建没编进去」要不要打提示。arm64 上正确答案就是 `0`，
+所以桩函数 `return 0` 对渲染没有任何影响。
+
+### 修复内容（已写进仓库）
+1. `p4a-recipes/pygame/__init__.py`
+   - 把 `src_c/simd_blitters_sse2.c` 加进 `surface` 模块的编译列表；
+   - 生成 `src_c/tarkov2d_avx2_stubs.c` 一起编译，用 **weak** 定义兜住整个 AVX2 族
+     （`pg_has_avx2`、`pg_avx2_at_runtime_but_uncompiled`、10 个 `blit_blend_*_avx2`）。
+     weak 符号遇到真定义自动让位，因此永远不会破坏正常构建；
+   - **不再**用正则去改 `src_c/simd_blitters.h`（上一版就是正则没匹配到才漏符号）。
+     Setup 模板里找不到 `surface src_c/surface.c ...` 那一行时直接抛错，不再默默出包。
+2. `tools/check_android_symbols.py`（新增，纯标准库）
+   - 遍历 APK 里**每一个** `.so`（包括 `libpybundle.so` 内部的 99 个），把未定义符号与
+     APK 内其它库的定义求差集；
+   - 凡是 `pg_ / blit_ / alphablit / _PGSLOTS / SDL_ / Py` 这类**本该由 APK 内库提供**的符号
+     仍未解决，就 `exit 1`；同时校验所有库都是 aarch64（防交叉编译又编出 x86_64）；
+   - 自测：对 1.0.8 旧包 → `RESULT: FAIL`（准确点名该符号）；对修好的包 → `RESULT: PASS`。
+3. `.github/workflows/android.yml`
+   - 原来的 `nm` 硬编码校验换成上面这个脚本，**符号没解决就不许上传产物**。
+
+### 已交付的应急包
+`...\default-workspace\apkfix\fixed\tarkov2d-1.0.8-arm64-v8a-debug-fixed.apk`
+—— 二进制原地修好 `surface.so` 后重新签名（v1+v2，debuggable，targetSdk 31）。除
+`libpybundle.so` 与签名文件外，其余 31 个条目与原包逐字节相同，versionCode 不变（102110008）。
+
+> 签名 key 与 CI 的 debug key 不同，**装之前必须先卸载旧版**。
+> 建议以后固定签名 keystore（CI 每次跑的 `~/.android/debug.keystore` 都是新生成的，
+> 导致每次构建都得先卸载才能装）：把 keystore 放进 secret，构建后再用 `apksigner` 定点签名。
+
+---
+
+## 9. 帧率优化（2026-10，1.0.9）
+
+### 实测（同一台 i5-4210U，固定随机种子，场景交叉重复取最小值）
+
+| 场景 | 优化前 | 优化后 |
+| --- | --- | --- |
+| 藏身处 | 11.9 ms (84 fps) | **3.6 ms (277 fps)** |
+| 战局 | 19.7 ms (51 fps) | **11.2 ms (89 fps)** |
+| 战局 + 背包 | 32.9 ms (30 fps) | **7.7 ms (130 fps)** |
+| 战局 + 搜刮窗 | 24.4 ms (41 fps) | **7.1 ms (141 fps)** |
+| 战局 + 交火 | 24.0 ms (42 fps) | **8.3 ms (121 fps)** |
+
+### 三处根因
+
+1. **`get_font()` 每帧重复光栅化文字**（占藏身处 ~85%）。HUD 每帧画十几串文字，
+   大部分每帧完全一样。→ `settings._CachedFont` 按 (文字, 抗锯齿, 颜色, 底色) 缓存
+   `render()` 结果。全工程没有对 `render()` 结果做原地修改的代码，所以复用同一个
+   Surface 是安全的。
+
+2. **战争迷雾每帧算 140 条射线、每条每 12px 采一次样**（占战局 draw 的 ~45%）。
+   → `world.visibility_polygon` 改成逐格 DDA：步数是「实际跨越的格数」而不是固定的
+   `radius/12`，每步只有一次比较+一次加法；方向向量按角度缓存。
+   顺带修正了「迷雾渗进墙里最多 12px」的问题（现在取进入墙格的精确距离）。
+   `los_clear` 同样改 DDA（原来每 10px 采样，既慢又会漏掉细墙）。
+
+3. **迷雾合成**：原来是「全屏 SRCALPHA fill + 透明多边形打洞 + 整屏 alpha 混合」，
+   1280×720 实测 16.3ms。→ 改成「不透明表面乘性压暗 + `BLEND_RGB_MULT`」，2.2ms。
+   亮部完全一致（255 → 75），暗部最多差 8/255。
+
+### 两个必须记住的 SDL2 坑
+
+| 写法 | 1280×720 实测 |
+| --- | --- |
+| `surf.fill(color)`（不带 flags） | 0.5 ms |
+| `surf.fill(color, None, special_flags=BLEND_RGB_ADD)` | **70 ms** ← 千万别用 |
+| `screen.blit(opaque, (0,0), special_flags=BLEND_RGB_MULT)` | 0.8 ms |
+| `screen.blit(srcalpha, (0,0))`（逐像素 alpha 混合） | 2.4–8.6 ms |
+
+即：**要混合就 blit，不要 fill**；`draw.polygon` 画在 SRCALPHA 表面上会走混合慢路径
+（6.4ms），画在不透明表面上只要 1.0ms。
+
+### 怎么复测
+
+需要一台能跑 pygame 的机器（代码电脑/安卓同一套）：
+
+```powershell
+# 固定种子 + 场景交叉重复取最小值，避免热降频和后台进程干扰
+python tools/bench_frames.py            # 若已加入仓库
+```
+
+对比时**必须**用「同一进程、场景交叉、多遍取最小值」，直接逐帧计时会被后台负载和
+CPU 降频带偏（同一段代码前后能差一倍）。
