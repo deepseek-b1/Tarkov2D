@@ -92,6 +92,30 @@ jobs:
       - name: 显示产物
         run: ls -lh bin/ || true
 
+      # Self-check: the whole reason this build exists is that surface.so used to
+      # reference an undefined arm64 symbol. Verify it here instead of finding
+      # out on the phone.
+      - name: 校验 surface.so 的符号与架构
+        run: |
+          SO=$(find "$PWD/.buildozer" -path "*dists*" -name "surface.so" 2>/dev/null | head -1)
+          if [ -z "$SO" ]; then
+            SO=$(find "$PWD/.buildozer" -name "surface*.so" 2>/dev/null | head -1)
+          fi
+          echo "surface.so: $SO"
+          if [ -z "$SO" ]; then echo "!! 没找到 surface.so,跳过校验"; exit 0; fi
+          echo "--- 架构 ---"
+          file "$SO" || true
+          echo "--- 符号 alphablit_alpha_sse2_argb_surf_alpha ---"
+          nm -D "$SO" 2>/dev/null | grep -i alphablit || echo "(nm -D 无输出,试符号表)"
+          nm "$SO" 2>/dev/null | grep -i "alphablit_alpha_sse2_argb_surf_alpha" || true
+          if nm -D "$SO" 2>/dev/null | grep -q "alphablit_alpha_sse2_argb_surf_alpha"; then
+            echo ">>> 符号已定义 ✅ (T = defined text symbol)"
+          elif nm -D "$SO" 2>/dev/null | grep -q "alphablit_alpha_sse2_argb_surf_alpha"; then
+            echo ">>> 符号仍是 U(未定义) ❌"
+          else
+            echo ">>> 该符号既未定义也不在动态表(可能已被静态解析) ⚠️"
+          fi
+
       - name: 上传 APK
         uses: actions/upload-artifact@v4
         with:

@@ -26,7 +26,7 @@ version = 1.0.8
 # So: Python 3.11 + pygame 2.5.2 + NDK 25c - a widely used working combo.
 # hostpython3 must match python3 exactly or p4a aborts with
 #   "python3 should have same version as hostpython3".
-requirements = hostpython3==3.11.9,python3==3.11.9,pygame==2.1.0
+requirements = hostpython3==3.11.9,python3==3.11.9,pygame==2.5.2
 
 orientation = landscape
 fullscreen = 1
@@ -43,6 +43,8 @@ android.allow_backup = True
 # Pin the NDK: buildozer default (r28c) is not handled by p4a's CPython recipe
 # yet (fails in Modules/grpmodule.c). 25c is what p4a CI uses.
 android.ndk = 25c
+
+p4a.local_recipes = ./p4a-recipes
 
 # Project-local pygame recipe: disables the x86 SIMD blitter path, which
 # otherwise makes surface.so unloadable on arm64.

@@ -37,6 +37,23 @@ class Pygame2Recipe(CompiledComponentsPythonRecipe):
         super().prebuild_arch(arch)
         with current_directory(self.get_build_dir(arch.arch)):
             setup_template = open(join("buildconfig", "Setup.Android.SDL2.in")).read()
+            # ==== FIX: the stock template forgets src_c/simd_blitters_sse2.c ====
+            # pygame 2.5.2's Setup.Android.SDL2.in lists only
+            #     surface src_c/surface.c src_c/alphablit.c src_c/surface_fill.c
+            # but src_c/simd_blitters.h declares
+            #     alphablit_alpha_sse2_argb_surf_alpha()
+            # on aarch64 (PG_ENABLE_ARM_NEON is force-enabled there), and
+            # alphablit.c calls it. The definition lives in
+            # src_c/simd_blitters_sse2.c, which is never compiled -> the symbol
+            # stays undefined -> surface.so cannot be dlopen'ed on the phone:
+            #     ImportError: dlopen failed: cannot locate symbol
+            #     "alphablit_alpha_sse2_argb_surf_alpha"
+            # Adding the file to the surface module makes the symbol real.
+            setup_template = setup_template.replace(
+                "surface src_c/surface.c src_c/alphablit.c src_c/surface_fill.c",
+                "surface src_c/surface.c src_c/alphablit.c src_c/surface_fill.c "
+                "src_c/simd_blitters_sse2.c",
+            )
             env = self.get_recipe_env(arch)
             env['ANDROID_ROOT'] = join(self.ctx.ndk.sysroot, 'usr')
 
