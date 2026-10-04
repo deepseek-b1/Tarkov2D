@@ -32,12 +32,14 @@ class SaveData:
         self.armor = None    # Item 或 None(出战护甲槽)
         self.pack = None     # Item 或 None(出战背包,决定 bag 格子容量)
         self.difficulty = "lockdown"   # easy / lockdown / hardened
-        self.map_key = "border"        # 出战地图(border / tv / port / indoor)
-        self.mode = "raid"             # raid 搜打撤 / hostage 人质解救
+        self.map_key = "border"        # 出战地图(border / tv / port / indoor / base)
+        self.mode = "raid"             # raid 搜打撤 / hostage 人质解救 / assault 突袭
         self.touch = False             # 手机(触屏)模式:虚拟摇杆 + 按钮 + 自动锁敌
         self.seen_intro = False        # 是否看过玩法简介
         self.rubles = 20000  # 货币
         self.stats = {"raids": 0, "extracts": 0, "deaths": 0, "kills": 0, "value": 0}
+        self.tasks = {}        # 教官任务进度:{task_id: 已累计数量}
+        self.tasks_done = []   # 已领取的一次性任务 id(可重复任务不记这里)
 
     def apply_pack(self):
         """按当前背包调整出战背包容量(先尽量扩容,收窄时放不下的退回仓库)。"""
@@ -102,6 +104,8 @@ class SaveData:
             "seen_intro": bool(self.seen_intro),
             "rubles": int(self.rubles),
             "stats": dict(self.stats),
+            "tasks": dict(self.tasks),
+            "tasks_done": list(self.tasks_done),
         }
 
     @staticmethod
@@ -140,6 +144,11 @@ class SaveData:
         except (TypeError, ValueError):
             sd.rubles = 20000
         sd.stats.update(data.get("stats") or {})
+        tasks = data.get("tasks") or {}
+        sd.tasks = {k: int(v) for k, v in tasks.items()
+                    if isinstance(v, (int, float))}
+        done = data.get("tasks_done") or []
+        sd.tasks_done = [str(t) for t in done]
         return sd
 
 

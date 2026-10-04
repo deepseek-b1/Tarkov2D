@@ -18,12 +18,15 @@ from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       ASSAULT_START_POINTS, ASSAULT_KILL_POINTS, ASSAULT_DIFF,
                       SUPPORT, SUPPORT_ORDER,
                       C4_FUSE, C4_BLAST_RADIUS, C4_UNIT_DMG, C4_STRUCT_DMG,
-                      C4_PLANT_RANGE, STRUCT_INFO, ALLY_STRUCT_HP,
+                      C4_PLANT_RANGE, STRUCT_INFO, ALLY_STRUCT_HP, MODE_DIFF,
+                      SUPPLY_RESERVE_CAP, SUPPLY_GIVE, SUPPLY_COOLDOWN, SUPPLY_RANGE,
                       STRUCT_BULLET_DMG, STRUCT_BULLET_MUL, REPAIR_RATE,
                       REPAIR_RANGE, REPAIR_MAX_WORKERS, REPAIR_SEARCH,
                       ENEMY_REINF_INTERVAL, ENEMY_REINF_SQUAD, ENEMY_REINF_CAP,
                       ENEMY_REINF_MIN_DIST, ALLY_REINF_INTERVAL,
                       ALLY_REINF_SQUAD, ALLY_REINF_CAP,
+                      HQ_REACTION_DELAY, HQ_REACTION_SQUAD,
+                      HQ_REACTION_COOLDOWN, REBUILD_RATE,
                       weapon_params, weapon_capacity, weapon_ammo_ids,
                       weapon_slots, weapon_attach, weapon_blast_mul, ATTACH_SLOTS,
                       fmt_rub, get_font)
@@ -62,8 +65,8 @@ class Structure:
         return STRUCT_INFO.get(self.role, {}).get("label", "设施")
 
     def damage(self, n):
-        if self.destroyed:
-            return
+        if self.destroyed and self.hp <= 0:
+            return                     # 已经炸成废墟、没人在抢修的,子弹也打不动了
         self.hp = max(0.0, self.hp - n)
         if self.hp <= 0:
             self.hp = 0.0
@@ -75,12 +78,37 @@ class Structure:
             return
         self.hp = min(self.max_hp, self.hp + n)
 
+    @property
+    def rebuilding(self):
+        """被总指挥部的检修队抢修中(炸毁了,但血量正在往回涨)。"""
+        return self.destroyed and self.hp > 0
+
+    def rebuild(self, n):
+        """检修队重建:血量从 0 一点点加回来,加满才算修好。返回是否修好。"""
+        self.hp = min(self.max_hp, self.hp + n)
+        if self.hp >= self.max_hp:
+            self.hp = self.max_hp
+            self.destroyed = False
+            self.c4 = None
+            return True
+        return False
+
 
 class Objective(Structure):
     """突袭模式:要塞里的敌方指挥设施(安放 C4 炸掉)。"""
 
     def __init__(self, name, x, y, role):
         super().__init__(name, x, y, role, "enemy", STRUCT_INFO[role]["hp"])
+
+
+class SupplyPoint:
+    """我方前沿弹药库:靠近按 E 给当前武器补子弹(有上限和冷却)。"""
+
+    def __init__(self, name, x, y):
+        self.name = name
+        self.x, self.y = x, y
+        self.r = 20
+        self.cd = 0.0
 
 
 class Player:
@@ -174,8 +202,11 @@ class Raid:
             self.diff_key = "assault"
             self.diff = ASSAULT_DIFF
         else:
-            self.diff_key = difficulty if difficulty in DIFFICULTIES else \
-                (getattr(game.save, "difficulty", None) or "lockdown")
+            # 人质解救固定成强化封锁强度(不给难度档)
+            forced = MODE_DIFF.get(self.mode)
+            self.diff_key = forced if forced else (
+                difficulty if difficulty in DIFFICULTIES
+                else (getattr(game.save, "difficulty", None) or "lockdown"))
             if self.diff_key not in DIFFICULTIES:
                 self.diff_key = "lockdown"
             self.diff = DIFFICULTIES[self.diff_key]
@@ -221,12 +252,21 @@ class Raid:
                                 for n, (x, y), role in self.map.friend_structures]
         self.objectives = [s for s in self.structures if s.side == "enemy"]
         self.friend_structs = [s for s in self.structures if s.side == "ally"]
+        # 我方弹药库(突袭模式:局内补弹,免得把子弹打光)
+        self.supplies = [SupplyPoint(n, x, y)
+                         for n, (x, y) in self.map.supplies] \
+            if self.mode == "assault" else []
         self.channel = None       # 救人质 / 拉起队友 / 安放 C4 的引导状态
         # 援兵:敌方靠「通讯站 + 指挥官」,我方靠「前沿指挥所 + 前沿通讯室」
         self.enemy_reinf_t = ENEMY_REINF_INTERVAL if self.mode == "assault" else 0.0
         self.ally_reinf_t = ALLY_REINF_INTERVAL if self.mode == "assault" else 0.0
         self.enemy_waves = 0
         self.ally_waves = 0
+        # 敌方总指挥部的反应:前沿守军全灭(= 失联)后 30 秒察觉,派检修队来查/修
+        self.hq_t = None            # 察觉倒计时(非 None = 正在倒计时)
+        self.hq_cd = 0.0            # 两次反应之间的间隔
+        self.hq_teams = 0           # 已经派了几支检修队
+        self.hq_team = []           # 当前这支检修队
         # 友军支援(仅突袭模式):积分靠击杀赚,呼叫要花积分
         self.support_points = ASSAULT_START_POINTS if self.mode == "assault" else 0
         self.support_cd = {k: 0.0 for k in SUPPORT_ORDER}
@@ -460,6 +500,10 @@ class Raid:
             d = math.hypot(o.x - p.x, o.y - p.y)
             if d < bd:
                 best, bd, kind = o, d, "destroy"
+        for sp in self.supplies:
+            d = math.hypot(sp.x - p.x, sp.y - p.y)
+            if d < min(bd, SUPPLY_RANGE):
+                best, bd, kind = sp, d, "supply"
         return (kind, best) if best is not None else (None, None)
 
     def channel_need(self, kind=None):
@@ -481,6 +525,9 @@ class Raid:
             self.channel = None
             return
         kind, ent = self.nearest_interactable()
+        if kind == "supply":
+            self.use_supply(ent)
+            return
         if kind is not None:
             self.channel = dict(kind=kind, ent=ent, t=0.0)
             audio.play("click")
@@ -1052,6 +1099,38 @@ class Raid:
             return False, "通讯站已炸毁,联系不上总部"
         return True, "通讯站在,总部持续调遣"
 
+    def use_supply(self, sp):
+        """我方弹药库:给当前武器补一盒弹药(有上限,免得变成无限弹药)。"""
+        p = self.player
+        if sp.cd > 0:
+            self.add_toast(f"{sp.name}补给中,{sp.cd:.0f} 秒后再来", COL["text_dim"], 2.2)
+            return False
+        if p.weapon is None:
+            self.add_toast("手上没武器,不知道该给你补什么弹", COL["bad"])
+            return False
+        ids = weapon_ammo_ids(p.weapon)
+        iid = p.weapon.state.get("loaded")
+        if iid not in ids:
+            iid = ids[0]
+        have = sum(pl.item.count for pl in p.bag.items if pl.item.iid == iid)
+        add = min(int(SUPPLY_GIVE), int(SUPPLY_RESERVE_CAP) - have)
+        if add <= 0:
+            self.add_toast(f"备弹已满({have}/{SUPPLY_RESERVE_CAP}),先打掉一些", COL["text_dim"], 2.4)
+            return False
+        if not p.bag.add_item(Item(iid, count=add)):
+            self.add_toast("背包塞不下弹药,先清点空间", COL["bad"])
+            return False
+        sp.cd = SUPPLY_COOLDOWN
+        audio.play("pickup")
+        self.add_toast(f"{sp.name}:补给 {ITEMS[iid]['name']} ×{add}"
+                       f"(备弹 {have + add}/{SUPPLY_RESERVE_CAP})", COL["good"], 3.0)
+        return True
+
+    def _update_supplies(self, dt):
+        for sp in self.supplies:
+            if sp.cd > 0:
+                sp.cd = max(0.0, sp.cd - dt)
+
     def plant_c4(self, ent):
         """在设施上安放 C4(25 秒后起爆,爆区半径固定)。"""
         ent.c4 = dict(t=C4_FUSE)
@@ -1115,13 +1194,17 @@ class Raid:
             self._assign_repair(st, self.allies, dt)
         for st in self.objectives:
             self._assign_repair(st, self.scavs, dt)
-        # 修好了/目标没了就放人
+        # 修好了/目标没了就放人(但总指挥部检修队的目标是"炸毁的设施",不能放)
         for st in self.structures:
             if st.destroyed or not st.damaged:
+                keep = []
                 for w in st.repair_workers:
+                    if getattr(w, "tag", None) == "repair":
+                        keep.append(w)
+                        continue
                     if getattr(w, "repair_target", None) is st:
                         w.repair_target = None
-                st.repair_workers = []
+                st.repair_workers = keep
 
     def _spawn_enemy_wave(self):
         """敌方援兵:从要塞纵深赶来的守军。"""
@@ -1186,6 +1269,78 @@ class Raid:
             if self.ally_reinf_t <= 0:
                 self.ally_reinf_t = ALLY_REINF_INTERVAL
                 self._spawn_ally_wave()
+
+    # ---------- 敌方总指挥部的反应(前沿失联 -> 派检修队) ----------
+    def _update_hq(self, dt):
+        """守军全灭 = 前沿失联:30 秒后总指挥部察觉异常,派检修队来查。
+
+        检修队到了通讯站:如果通讯站被炸毁,他们就地抢修(修好 = 敌方援兵恢复);
+        如果通讯站完好,他们查完就原地驻防(不会额外增援)。
+        """
+        if self.mode != "assault" or self.over:
+            return
+        if self.hq_cd > 0:
+            self.hq_cd = max(0.0, self.hq_cd - dt)
+        if self.hq_t is None:
+            # 场上一个守军都没有 -> 前沿失联,开始倒计时
+            if not self.scavs and self.hq_cd <= 0:
+                self.hq_t = HQ_REACTION_DELAY
+                self.add_toast(f"敌方总指挥部察觉到前沿失去联络:{int(HQ_REACTION_DELAY)} "
+                               "秒后会派人来看", COL["bad"], 4.5)
+            return
+        self.hq_t -= dt
+        if self.hq_t > 0:
+            return
+        self.hq_t = None
+        self.hq_cd = HQ_REACTION_COOLDOWN
+        self._send_hq_team()
+
+    def _send_hq_team(self):
+        """从要塞后方派一支检修队(带枪的工兵),让他们去通讯站。"""
+        comms = next((s for s in self.objectives if s.role == "comms"), None)
+        p = self.player
+        spots = [pos for _k, pos in self.map.scav_spawns
+                 if math.hypot(pos[0] - p.x, pos[1] - p.y) >= ENEMY_REINF_MIN_DIST]
+        if not spots:
+            spots = [pos for _k, pos in self.map.scav_spawns]
+        random.shuffle(spots)
+        self.hq_team = []
+        for i in range(int(HQ_REACTION_SQUAD)):
+            x, y = spots[i % len(spots)]
+            s = Scav("ar", x + random.randint(-12, 12), y + random.randint(-12, 12),
+                     self.diff)
+            s.tag = "repair"
+            if comms is not None:
+                s.repair_target = comms      # 直奔通讯站
+            self.scavs.append(s)
+            self.hq_team.append(s)
+        self.hq_teams += 1
+        audio.play("kill")
+        if comms is not None and comms.destroyed:
+            self.add_toast(f"总指挥部派来第 {self.hq_teams} 支检修队:"
+                           "通讯站是坏的,他们会把它修好!", COL["bad"], 5.0)
+        else:
+            self.add_toast(f"总指挥部派来第 {self.hq_teams} 支巡检队:"
+                           "通讯站完好,他们查完就留下驻防", COL["accent"], 5.0)
+
+    def _update_rebuild(self, dt):
+        """检修队就地抢修被炸毁的设施(修好 = 该设施恢复功能)。"""
+        for u in list(self.scavs):
+            st = getattr(u, "repair_target", None)
+            if st is None or not st.destroyed:
+                continue
+            if math.hypot(u.x - st.x, u.y - st.y) > REPAIR_RANGE:
+                continue
+            if st.rebuild(REBUILD_RATE * dt):
+                u.repair_target = None
+                if st.role == "comms":
+                    self.add_toast(f"{st.name} 已被敌方检修队修复 —— 敌方援兵恢复!",
+                                   COL["bad"], 5.0)
+                else:
+                    self.add_toast(f"{st.name} 被敌方检修队修复了!", COL["bad"], 4.0)
+                self.emit_noise(st.x, st.y, 700)
+        # 检修队全灭/目标没了就清掉记录
+        self.hq_team = [u for u in self.hq_team if u in self.scavs]
 
     def damage_structures_at(self, x, y, radius, dmg, owner="player"):
         """爆炸波及设施:自己人的爆炸不会炸自己人的设施。"""
@@ -1318,6 +1473,7 @@ class Raid:
                            support_points=self.support_points,
                            enemy_waves=self.enemy_waves,
                            ally_waves=self.ally_waves,
+                           hq_teams=self.hq_teams,
                            commander_killed=(self.mode == "assault"
                                              and self.commander() is None),
                            mission=mission)
@@ -1527,6 +1683,9 @@ class Raid:
         self._update_c4(dt)
         self._update_repair(dt)
         self._update_reinforce(dt)
+        self._update_hq(dt)
+        self._update_rebuild(dt)
+        self._update_supplies(dt)
         self._update_bullets(dt)
         for pt in self.particles:
             pt["ttl"] -= dt

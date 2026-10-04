@@ -4,6 +4,7 @@ import pygame
 
 import assault
 import audio
+import quests
 import save as save_mod
 import raid_ui
 from hideout import Hideout
@@ -71,6 +72,16 @@ class Game:
         if assault_run:
             assault.restore(sd, self.assault_snap)
             self.assault_snap = None
+        # 任务进度(教官任务按类型累计;突袭只算击杀/撤离,不进"物资价值")
+        quests.add_progress(sd, "kills", result["kills"])
+        if result["kind"] == "extract":
+            quests.add_progress(sd, "extracts", 1)
+            if result.get("mode") == "raid":
+                quests.add_progress(sd, "value", result["gained"])
+            if result.get("mode") == "hostage" and result.get("mission"):
+                quests.add_progress(sd, "hostage_win", 1)
+            if result.get("mode") == "assault" and result.get("mission"):
+                quests.add_progress(sd, "assault_win", 1)
         save_mod.save_data(sd)
 
     def to_hideout(self):

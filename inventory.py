@@ -28,12 +28,25 @@ class Item:
     def cat(self):
         return self.def_["cat"]
 
-    def size(self):
+    def is_rolled(self):
+        """背包是否已卷起(卷起来占格变小,方便塞进仓库)。"""
+        return bool(self.state.get("rolled"))
+
+    def roll_size(self):
+        """卷起后的占格:展开不超过 4×4 -> 1×2;5×5 及以上 -> 2×2。"""
+        from settings import PACK_ROLL_SMALL, PACK_ROLL_BIG, PACK_ROLL_MAX_DIM
         d = self.def_
-        w, h = d["w"], d["h"]
+        if max(d["w"], d["h"]) <= PACK_ROLL_MAX_DIM:
+            return PACK_ROLL_SMALL
+        return PACK_ROLL_BIG
+
+    def size(self):
+        w, h = self.base_size()
         return (h, w) if self.rot else (w, h)
 
     def base_size(self):
+        if self.cat == "pack" and self.is_rolled():
+            return self.roll_size()
         d = self.def_
         return d["w"], d["h"]
 

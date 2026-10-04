@@ -19,30 +19,47 @@ def draw_panel(surface, rect, title=None):
     return rect
 
 
-def draw_grid(surface, x, y, container, cell=CELL, title=None):
-    """绘制格子容器,返回 (Rect, cell)。"""
+def draw_grid(surface, x, y, container, cell=CELL, title=None,
+              scroll=0.0, view_h=None):
+    """绘制格子容器,返回 (Rect, cell)。
+
+    scroll / view_h:仓库变大后只画看得见的一段(配合滚轮),不会画出面板外。
+    """
     w = container.w * cell
-    h = container.h * cell
-    rect = pygame.Rect(x, y, w, h)
-    pygame.draw.rect(surface, COL["grid_bg"], rect, border_radius=4)
+    total_h = container.h * cell
+    shown_h = view_h if view_h else total_h
+    rect = pygame.Rect(x, y, w, total_h)
+    pygame.draw.rect(surface, COL["grid_bg"], (x, y, w, shown_h), border_radius=4)
+    off = int(scroll)
+    clip = pygame.Rect(x, y, w, view_h) if view_h else None
+    if clip:
+        surface.set_clip(clip)
     for gx in range(container.w):
         for gy in range(container.h):
-            r = pygame.Rect(x + gx * cell, y + gy * cell, cell, cell)
+            r = pygame.Rect(x + gx * cell, y + gy * cell - off, cell, cell)
+            if view_h and (r.bottom < y or r.top > y + view_h):
+                continue
             pygame.draw.rect(surface, COL["grid"], r, 1)
     for p in container.items:
-        draw_item_icon(surface, p.item, x + p.x * cell, y + p.y * cell, cell)
+        iw, ih = p.item.size()
+        iy = y + p.y * cell - off
+        if view_h and (iy + ih * cell < y or iy > y + view_h):
+            continue
+        draw_item_icon(surface, p.item, x + p.x * cell, iy, cell)
+    if clip:
+        surface.set_clip(None)
     if title:
         t = get_font(16, bold=True).render(title, True, COL["text_dim"])
         surface.blit(t, (x, y - 24))
     return rect, cell
 
 
-def grid_hit(container, rect, cell, mx, my):
-    """像素坐标 -> 命中的 Placed(或 None)。"""
+def grid_hit(container, rect, cell, mx, my, scroll=0.0):
+    """像素坐标 -> 命中的 Placed(或 None)。scroll 必须和绘制时一致。"""
     if not rect.collidepoint(mx, my):
         return None
     gx = (mx - rect.x) // cell
-    gy = (my - rect.y) // cell
+    gy = (my - rect.y + int(scroll)) // cell
     return container.at(int(gx), int(gy))
 
 
@@ -196,6 +213,13 @@ def item_info_lines(item):
     elif item.cat == "pack":
         gw, gh = d.get("grid", (0, 0))
         sub.append(f"携行容量 {gw}×{gh} 格")
+        if item.is_rolled():
+            rw, rh = item.roll_size()
+            sub.append(f"★ 已卷起:占 {rw}×{rh} 格(右键展开,展开占 "
+                       f"{d['w']}×{d['h']} 格)")
+        else:
+            rw, rh = item.roll_size()
+            sub.append(f"右键卷起:占格 {d['w']}×{d['h']} → {rw}×{rh}")
     elif item.cat == "misc":
         sub.append(f"杂物 · 价值 {fmt_rub(d['price'])}")
         if item.iid == "doc":

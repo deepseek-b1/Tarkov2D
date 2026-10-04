@@ -120,10 +120,18 @@ class Scav:
         # 被派去修设施:先跑过去站住(回血由 Raid._assign_repair 结算)
         st = self.repair_target
         if st is not None:
-            if st.destroyed or not st.damaged:
+            d_st = math.hypot(st.x - self.x, st.y - self.y)
+            if self.tag == "repair":
+                # 总指挥部检修队:不管设施好坏都要过去看一眼;到场后
+                #   * 坏了/被炸了 -> 留下抢修
+                #   * 一切正常     -> 归队防守
+                keep_going = (d_st > REPAIR_RANGE) or st.damaged or st.destroyed
+            else:
+                keep_going = st.damaged        # 普通工兵只修"被打坏"的
+            if not keep_going:
                 self.repair_target = None
             else:
-                if math.hypot(st.x - self.x, st.y - self.y) > REPAIR_RANGE:
+                if d_st > REPAIR_RANGE:
                     self._repath(raid, (st.x, st.y))
                     self._follow_path(raid, dt, self.d["speed"])
                 else:

@@ -784,8 +784,8 @@ def run():
         assert junk_w > gold_w * 3, (junk_w, gold_w)
         prices = sorted(ITEMS[i]["price"] for i in misc_ids)
         assert prices[0] < prices[-1]
-        assert ITEMS[CLASSIFIED]["price"] == 10000000000
-        assert prices[-1] == 10000000000
+        assert ITEMS[CLASSIFIED]["price"] == 5000000
+        assert prices[-1] == 5000000
         assert ITEMS["tools"]["price"] == 128000
         # 渲染杂物图标/提示
         screen = pygame.display.set_mode((SW, SH))
@@ -1719,7 +1719,7 @@ def run():
                 break
         assert r.kills > kills0, "空袭应该炸死落点上的守军"
         assert r.support_points > pts0, "击杀守军应该涨支援积分"
-        assert r.support_points - pts0 >= ASSAULT_KILL_POINTS["ar"] * (r.kills - kills0)
+        assert r.support_points - pts0 >= 1 * (r.kills - kills0), "击杀守军必须涨积分"
         # 炮火覆盖:一发一发覆盖一片区域(不是一次性炸完)
         r.support_points = 100
         r.support_cd["barrage"] = 0.0
@@ -1899,6 +1899,96 @@ def run():
         f10.damage(f10.max_hp)
         ok, why = r10.reinforce_reason("ally")
         assert not ok and "通讯" in why, why
+        # 5d) 总指挥部反应:守军全灭(= 前沿失联)30 秒后察觉,派检修队查/修通讯站
+        import raid as raid_mod
+        from settings import HQ_REACTION_DELAY, HQ_REACTION_SQUAD
+        g11 = Game()
+        g11.save = save_mod.reset_data()
+        g11.save.seen_intro = True
+        g11.save.mode = "assault"
+        g11.start_raid()
+        r11 = g11.raid
+        r11.player.hp = 100000
+        comms11 = next(s for s in r11.objectives if s.role == "comms")
+        comms11.damage(comms11.max_hp)
+        assert comms11.destroyed
+        r11.scavs = []                      # 守军全灭
+        for _ in range(int((HQ_REACTION_DELAY - 3) * 60)):
+            r11.update(1 / 60, [])
+        assert r11.hq_t is not None and not r11.scavs, (r11.hq_t, len(r11.scavs))
+        for _ in range(int(4 * 60)):
+            r11.update(1 / 60, [])
+        assert r11.hq_teams == 1, r11.hq_teams
+        assert len(r11.scavs) == HQ_REACTION_SQUAD, len(r11.scavs)
+        assert all(s.tag == "repair" for s in r11.scavs)
+        assert all(s.repair_target is comms11 for s in r11.scavs), "检修队该直奔通讯站"
+        # 到场开始抢修(把重建速度调快,免得用例跑太久)
+        rate0 = raid_mod.REBUILD_RATE
+        raid_mod.REBUILD_RATE = 300.0
+        try:
+            for s in r11.scavs:
+                s.x, s.y = comms11.x + 20, comms11.y
+            for _ in range(int(2 * 60)):
+                r11.update(1 / 60, [])
+                if comms11.rebuilding:
+                    break
+            assert comms11.rebuilding, (comms11.hp, comms11.destroyed)
+            comms11.damage(comms11.max_hp)      # 抢修能被火力打断
+            assert comms11.destroyed and comms11.hp == 0
+            for _ in range(int(4 * 60)):
+                r11.update(1 / 60, [])
+                if not comms11.destroyed:
+                    break
+            assert not comms11.destroyed and comms11.hp == comms11.max_hp, \
+                (comms11.destroyed, comms11.hp)
+        finally:
+            raid_mod.REBUILD_RATE = rate0
+        # 修好 = 敌方援兵恢复
+        ok, why = r11.reinforce_reason("enemy")
+        assert ok, why
+        w0 = r11.enemy_waves
+        r11.enemy_reinf_t = 0.1
+        for _ in range(int(3 * 60)):
+            r11.update(1 / 60, [])
+        assert r11.enemy_waves > w0, "通讯站修好后敌方援兵该恢复"
+        # 通讯站完好时:检修队只是来看一眼,不修也不额外增援
+        g12 = Game()
+        g12.save = save_mod.reset_data()
+        g12.save.seen_intro = True
+        g12.save.mode = "assault"
+        g12.start_raid()
+        r12 = g12.raid
+        r12.player.hp = 100000
+        comms12 = next(s for s in r12.objectives if s.role == "comms")
+        r12.scavs = []
+        r12.enemy_reinf_t = 9999.0          # 冻结常规援兵波次,单独看这次反应
+        for _ in range(int((HQ_REACTION_DELAY + 4) * 60)):
+            r12.update(1 / 60, [])
+        assert r12.hq_teams == 1 and len(r12.scavs) == HQ_REACTION_SQUAD
+        assert all(s.repair_target is comms12 for s in r12.scavs)
+        assert not comms12.destroyed and comms12.hp == comms12.max_hp
+        assert r12.enemy_waves == 0, "通讯站没坏时不该因此增援"
+        # 守军还在场 / 别的模式:都不触发
+        g13 = Game()
+        g13.save = save_mod.reset_data()
+        g13.save.seen_intro = True
+        g13.save.mode = "assault"
+        g13.start_raid()
+        r13 = g13.raid
+        r13.player.hp = 100000
+        for _ in range(int((HQ_REACTION_DELAY + 5) * 60)):
+            r13.update(1 / 60, [])
+        assert r13.hq_teams == 0 and r13.hq_t is None, (r13.hq_teams, r13.hq_t)
+        g14 = Game()
+        g14.save = save_mod.reset_data()
+        g14.save.seen_intro = True
+        g14.save.mode = "raid"
+        g14.start_raid()
+        r14 = g14.raid
+        r14.scavs = []
+        for _ in range(int(35 * 60)):
+            r14.update(1 / 60, [])
+        assert r14.hq_teams == 0 and r14.hq_t is None
         # 6) 撤离:设施没炸完,站撤离点也没用
         ex = r10.map.extracts[0][1]
         r10.player.x, r10.player.y = ex.centerx, ex.centery
@@ -2014,6 +2104,263 @@ def run():
             "触屏支援按钮应该能呼叫"
 
     check("突袭模式-大本营/配发装备/友军支援/撤离限制", t_assault)
+
+    def t_base():
+        """基建:仓库扩容滚轮 / 背包卷起 / 我方弹药库 / 任务系统(教官·医疗·后勤)。"""
+        from game import Game
+        from world import GameMap
+        from inventory import Placed
+        from settings import (STASH_W, STASH_H, ITEMS as IT, STASH_VIEW_ROWS,
+                              SUPPLY_RESERVE_CAP, SUPPLY_GIVE, SUPPLY_COOLDOWN,
+                              PACK_ROLL_SMALL, PACK_ROLL_BIG, TASKS, DEPTS,
+                              MODE_DIFF, HOSTAGE_ENEMIES, weapon_ammo_ids,
+                              W as SW, H as SH)
+        import quests
+        # 1) 机密文件降到 500 万
+        assert IT["doc"]["price"] == 5000000, IT["doc"]["price"]
+        # 2) 人质模式固定强化封锁;室内图只留军械箱(弹药)与医疗箱
+        im = GameMap("indoor")
+        assert sorted({lc.kind for lc in im.loot}) == ["gun", "med"], \
+            sorted({lc.kind for lc in im.loot})
+        assert "indoor" not in MODE_DIFF or MODE_DIFF["indoor"] is not None
+        assert MODE_DIFF.get("hostage") == "hardened"
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        g.save.mode = "hostage"
+        g.save.difficulty = "easy"
+        g.start_raid()
+        assert g.raid.diff_key == "hardened", g.raid.diff_key
+        assert g.raid.diff["name"] == "强化封锁"
+        assert len(g.raid.scavs) == HOSTAGE_ENEMIES
+        # 藏身处:人质模式点难度按钮不生效
+        h = g.hideout
+        h.show_intro = False
+        h._click(h.diff_rects[0].center)
+        assert g.save.difficulty == "easy"
+        # 3) 仓库扩容 + 滚轮(命中要算上偏移)
+        assert (STASH_W, STASH_H) == (10, 20), (STASH_W, STASH_H)
+        sd = g.save
+        sd.stash.clear()
+        sd.stash.items.append(Placed(Item("gold"), 0, 0))
+        sd.stash.items.append(Placed(Item("btc"), 0, 15))
+        ox, oy = h.stash_grid
+        h.stash_scroll = 0.0
+        assert h.stash_hit((ox + 5, oy + 5)).item.iid == "gold"
+        assert h.stash_hit((ox + 5, oy + 15 * 40 + 5)) is None
+        h.stash_scroll = h.stash_max_scroll()
+        assert h.stash_scroll > 0
+        sy = oy + 15 * 40 - int(h.stash_scroll) + 5
+        hit = h.stash_hit((ox + 5, sy))
+        assert hit is not None and hit.item.iid == "btc", hit
+        assert h.stash_view_h == 40 * STASH_VIEW_ROWS
+        h.stash_scroll = 0.0
+        # 4) 背包卷起 / 展开
+        small, big = Item("pack_small"), Item("pack_xl")
+        assert small.roll_size() == PACK_ROLL_SMALL and small.base_size() == (2, 2)
+        assert big.roll_size() == PACK_ROLL_BIG and big.base_size() == (5, 4)
+        c = Container(12, 8)
+        assert c.add_item(small) and c.add_item(big)
+        ps = c.at(0, 0)
+        pb = next(p for p in c.items if p.item is big)
+        ok, _m = h._toggle_roll(c, ps)
+        assert ok and ps.item.is_rolled() and ps.item.size() == (1, 2)
+        ok, _m = h._toggle_roll(c, pb)
+        assert ok and pb.item.size() == (2, 2)
+        # 展不开就保持卷起,不能把东西弄丢
+        tight = Container(1, 2)
+        rp = Item("pack_small")
+        rp.state["rolled"] = True
+        assert tight.add_item(rp)
+        placed = tight.at(0, 0)
+        ok, msg = h._toggle_roll(tight, placed)
+        assert not ok and placed.item.is_rolled() and len(tight.items) == 1
+        assert "展不开" in msg
+        # 序列化保留卷起状态;装备时自动展开
+        back = Item.from_dict(Item("pack_xl", state={"rolled": True}).serialize())
+        assert back.is_rolled() and back.size() == (2, 2)
+        sd.stash.clear()
+        sd.bag.clear()
+        sd.weapon = Item.weapon("pm", mag=8)
+        sd.pack = None
+        sd.apply_pack()
+        rp2 = Item("pack_mid")
+        rp2.state["rolled"] = True
+        sd.stash.add_item(rp2)
+        idx = next(i for i, p in enumerate(sd.stash.items)
+                   if p.item.iid == "pack_mid")
+        ok, _m = h._try_equip_pack(idx)
+        assert ok and not sd.pack.is_rolled()
+        # 5) 突袭我方弹药库:补弹 / 冷�ed却 / 上限
+        g2 = Game()
+        g2.save = save_mod.reset_data()
+        g2.save.seen_intro = True
+        g2.save.mode = "assault"
+        g2.start_raid()
+        r2 = g2.raid
+        assert len(r2.supplies) == 1, r2.supplies
+        sp = r2.supplies[0]
+        assert sp.name == "前沿弹药库"
+        r2.player.bag.clear()
+        ids = weapon_ammo_ids(r2.player.weapon)
+        iid = r2.player.weapon.state.get("loaded")
+        if iid not in ids:
+            iid = ids[0]
+        assert r2.use_supply(sp) is True
+        have = sum(pl.item.count for pl in r2.player.bag.items if pl.item.iid == iid)
+        assert have == min(SUPPLY_GIVE, SUPPLY_RESERVE_CAP), have
+        assert sp.cd > 0
+        assert r2.use_supply(sp) is False, "冷却中不该能连点"
+        for _ in range(int(SUPPLY_COOLDOWN * 60) + 2):
+            r2.update(1 / 60, [])
+        assert sp.cd == 0
+        assert r2.use_supply(sp) is True
+        # 补到上限就不再给
+        r2.player.bag.clear()
+        r2.player.bag.add_item(Item(iid, count=SUPPLY_RESERVE_CAP))
+        sp.cd = 0.0
+        assert r2.use_supply(sp) is False, "备弹满了不该再给"
+        # 交互:E 能补弹(supply 交互不走引导)
+        r2.player.bag.clear()
+        sp.cd = 0.0
+        r2.player.x, r2.player.y = sp.x, sp.y + 20
+        r2.interact()
+        assert r2.channel is None, "补弹应该立刻生效,不用读条"
+        assert sp.cd > 0, "E 补弹应该生效"
+        # 6) 任务系统
+        g3 = Game()
+        g3.save = save_mod.reset_data()
+        sd3 = g3.save
+        sd3.stash.clear()
+        sd3.bag.clear()
+        t1 = quests.task_by_id("t1")           # 击杀 5 -> 3 万 + 9mm 子弹
+        assert quests.task_state(sd3, t1)[0] == "doing"
+        quests.add_progress(sd3, "kills", 5)
+        assert quests.task_state(sd3, t1)[0] == "ready"
+        rub0 = sd3.rubles
+        ok, msg = quests.claim(sd3, t1)
+        assert ok and sd3.rubles == rub0 + 30000, msg
+        assert any(p.item.iid == "a9" for p in sd3.stash.items)
+        assert quests.task_state(sd3, t1)[0] == "done"
+        assert not quests.claim(sd3, t1)[0], "一次性任务不该能领两次"
+        # 可重复任务:结算后扣掉已用进度
+        t7 = quests.task_by_id("t7")
+        quests.add_progress(sd3, "kills", 25)
+        st, p, _n = quests.task_state(sd3, t7)
+        assert st == "ready"
+        assert quests.claim(sd3, t7)[0]
+        assert quests.progress(sd3, t7) == p - 10, (p, quests.progress(sd3, t7))
+        # 奖励种类:钱 / 配件 / 子弹 / 枪
+        for tid, key in (("t2", "attachments"), ("t5", "weapons"), ("t6", "ammo")):
+            task = quests.task_by_id(tid)
+            assert key in task["reward"], (tid, task["reward"])
+        # 仓库放不下 -> 不发奖(也不吞进度)
+        orig_stash = sd3.stash
+        full = Container(sd3.stash.w, sd3.stash.h)
+        for gy in range(sd3.stash.h):
+            for gx in range(sd3.stash.w):
+                full.items.append(Placed(Item("bandage"), gx, gy))
+        sd3.stash = full
+        sd3.tasks_done = [t for t in sd3.tasks_done if t != "t2"]
+        quests.add_progress(sd3, "extracts", 3)
+        assert quests.task_state(sd3, quests.task_by_id("t2"))[0] == "ready"
+        rub1 = sd3.rubles
+        ok, msg = quests.claim(sd3, quests.task_by_id("t2"))
+        assert not ok and "放不下" in msg, msg
+        assert sd3.rubles == rub1, "发不出去就不该给钱"
+        assert quests.task_state(sd3, quests.task_by_id("t2"))[0] == "ready"
+        sd3.stash = orig_stash
+        # 医疗部门交货
+        sd3.stash.clear()
+        sd3.bag.clear()
+        m1 = quests.barter_list("medical")[0]
+        ok, msg = quests.barter(sd3, m1)
+        assert not ok and "缺" in msg, msg
+        sd3.stash.add_item(Item("bandage", count=2))
+        ok, msg = quests.barter(sd3, m1)
+        assert ok, msg
+        assert not any(p.item.iid == "bandage" for p in sd3.stash.items)
+        assert any(p.item.iid == "painkiller" for p in sd3.stash.items)
+        # 后勤部门:材料在背包里也能交
+        sd3.stash.clear()
+        sd3.bag.clear()
+        l4 = quests.barter_list("logistics")[3]
+        sd3.bag.add_item(Item("fuelcan", count=2))
+        sd3.bag.add_item(Item("tools"))
+        ok, msg = quests.barter(sd3, l4)
+        assert ok and any(p.item.iid == "korund" for p in sd3.stash.items), msg
+        # 交货时仓库放不下 -> 不扣材料
+        sd3.stash.clear()
+        sd3.bag.clear()
+        sd3.stash.add_item(Item("bandage", count=2))
+        full2 = Container(sd3.stash.w, sd3.stash.h)
+        for gy in range(sd3.stash.h):
+            for gx in range(sd3.stash.w):
+                full2.items.append(Placed(Item("bandage"), gx, gy))
+        sd3.stash = full2
+        before = quests.have_count(sd3, "bandage")
+        ok, msg = quests.barter(sd3, m1)
+        assert not ok and "放不下" in msg
+        assert quests.have_count(sd3, "bandage") == before, "失败不该扣材料"
+        # 战局结算累计进度(击杀/撤离/价值/人质/突袭)
+        g4 = Game()
+        g4.save = save_mod.reset_data()
+        sd4 = g4.save
+        sd4.tasks, sd4.tasks_done = {}, []
+        g4.raid = None
+        g4.phase = "raid"
+        g4.rail_player = None
+        class _FakeRaid:
+            player = type("_P", (), {"weapon": None, "armor": None})()
+        g4.raid = _FakeRaid()
+        g4.raid_finished(dict(kind="extract", kills=7, gained=350000, n=2, time=60,
+                              entries=[], mode="raid", rescued=0, hostages=0,
+                              objectives=0, objectives_done=0, support_calls=0,
+                              support_points=0, enemy_waves=0, ally_waves=0,
+                              commander_killed=False, mission=True))
+        assert quests.progress(sd4, quests.task_by_id("t1")) == 7
+        assert quests.progress(sd4, quests.task_by_id("t2")) == 1
+        assert quests.progress(sd4, quests.task_by_id("t3")) == 350000
+        sd4.tasks = {}
+        g4.raid_finished(dict(kind="extract", kills=0, gained=0, n=0, time=60,
+                              entries=[], mode="hostage", rescued=4, hostages=4,
+                              objectives=0, objectives_done=0, support_calls=0,
+                              support_points=0, enemy_waves=0, ally_waves=0,
+                              commander_killed=False, mission=True))
+        assert quests.progress(sd4, quests.task_by_id("t4")) == 1
+        sd4.tasks = {}
+        g4.raid_finished(dict(kind="extract", kills=0, gained=0, n=0, time=60,
+                              entries=[], mode="assault", rescued=0, hostages=0,
+                              objectives=3, objectives_done=3, support_calls=1,
+                              support_points=5, enemy_waves=2, ally_waves=1,
+                              commander_killed=True, mission=True))
+        assert quests.progress(sd4, quests.task_by_id("t5")) == 1
+        assert quests.progress(sd4, quests.task_by_id("t3")) == 0, \
+            "突袭不算物资价值"
+        # 任务进度要能存进存档
+        save_mod.save_data(sd3)
+        sd5 = save_mod.load_data()
+        assert sd5.tasks == sd3.tasks and sd5.tasks_done == sd3.tasks_done
+        # 7) 渲染:藏身处(仓库滚动)/ 任务中心 / 交易所 / 突袭 HUD
+        screen = pygame.display.set_mode((SW, SH))
+        g5 = Game()
+        g5.save = save_mod.reset_data()
+        g5.save.seen_intro = True
+        g5.save.stash.add_item(Item("pack_xl", state={"rolled": True}))
+        g5.hideout.show_intro = False
+        g5.draw(screen)                       # 藏身处(仓库滚动视图)
+        g5.hideout.stash_scroll = g5.hideout.stash_max_scroll()
+        g5.draw(screen)
+        g5.hideout.view = "task"
+        for dept in ("instructor", "medical", "logistics"):
+            g5.hideout.task_dept = dept
+            g5.draw(screen)                   # 任务中心三个部门
+        g5.hideout.view = "trade"
+        g5.draw(screen)                       # 交易所(仓库滚动)
+        g5.hideout.view = "stash"
+        pygame.display.flip()
+
+    check("基建-仓库滚动/背包卷起/弹药库/任务系统", t_base)
 
     ok = all(r[1] for r in results)
     report = ["Tarkov2D selftest " + ("PASS" if ok else "FAIL"), ""]

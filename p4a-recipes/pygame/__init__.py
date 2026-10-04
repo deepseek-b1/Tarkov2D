@@ -17,10 +17,20 @@ Fix: build with the SIMD blitter path disabled so pygame uses plain C code.
 This is the ONLY difference from the upstream recipe.
 """
 import os
+import re
 from os.path import exists, join
 
 from pythonforandroid.recipe import CompiledComponentsPythonRecipe
 from pythonforandroid.toolchain import current_directory
+
+# AVX2 blitters declared in simd_blitters.h but never defined on aarch64
+AVX2_SYMBOLS = [
+    "blit_blend_rgba_mul_avx2", "blit_blend_rgb_mul_avx2",
+    "blit_blend_rgba_add_avx2", "blit_blend_rgb_add_avx2",
+    "blit_blend_rgba_sub_avx2", "blit_blend_rgb_sub_avx2",
+    "blit_blend_rgba_max_avx2", "blit_blend_rgb_max_avx2",
+    "blit_blend_rgba_min_avx2", "blit_blend_rgb_min_avx2",
+]
 
 
 class Pygame2Recipe(CompiledComponentsPythonRecipe):
@@ -38,23 +48,54 @@ class Pygame2Recipe(CompiledComponentsPythonRecipe):
         super().prebuild_arch(arch)
         with current_directory(self.get_build_dir(arch.arch)):
             setup_template = open(join("buildconfig", "Setup.Android.SDL2.in")).read()
-            # ==== FIX: the stock template omits two SIMD blitter sources ====
-            # pygame's Setup.Android.SDL2.in lists only
+            # ==== FIX 1: the template omits src_c/simd_blitters_sse2.c ====
+            # Setup.Android.SDL2.in lists only
             #     surface src_c/surface.c src_c/alphablit.c src_c/surface_fill.c
-            # while alphablit.c calls helpers that live in separate files:
-            #   * alphablit_alpha_sse2_argb_surf_alpha -> src_c/simd_blitters_sse2.c
-            #   * pg_has_avx2                          -> src_c/simd_blitters_avx2.c
-            # Both carry their own guards (sse2neon on aarch64; "#else return 0"
-            # when AVX2 is not compiled), so they build fine on arm64.
-            # Without them surface.so keeps undefined symbols and cannot be
-            # dlopen'ed on the phone:
+            # but alphablit.c calls alphablit_alpha_sse2_argb_surf_alpha(),
+            # which is defined in src_c/simd_blitters_sse2.c (it uses
+            # include/sse2neon.h on aarch64, so it builds fine on arm64).
+            # Without it surface.so has an undefined symbol and the phone
+            # cannot dlopen it:
             #     cannot locate symbol "alphablit_alpha_sse2_argb_surf_alpha"
-            #     cannot locate symbol "pg_has_avx2"
             setup_template = setup_template.replace(
                 "surface src_c/surface.c src_c/alphablit.c src_c/surface_fill.c",
                 "surface src_c/surface.c src_c/alphablit.c src_c/surface_fill.c "
-                "src_c/simd_blitters_sse2.c src_c/simd_blitters_avx2.c",
+                "src_c/simd_blitters_sse2.c",
             )
+            # ==== FIX 2: neutralise the AVX2 entry points ====
+            # simd_blitters.h declares the AVX2 helpers *outside* any guard and
+            # alphablit.c calls pg_has_avx2() unconditionally, but aarch64 has
+            # no AVX2, so src_c/simd_blitters_avx2.c never ends up defining
+            # them for our build -> another undefined symbol:
+            #     cannot locate symbol "pg_has_avx2"
+            # Turning the declarations into inline stubs removes the references
+            # and makes the AVX2 code paths unreachable (which is correct on
+            # arm64: they can never be taken).
+            hdr_path = join("src_c", "simd_blitters.h")
+            text = open(hdr_path).read()
+            changed = False
+            for name in AVX2_SYMBOLS:
+                # strip the plain declaration (possibly split over two lines as
+                # "void\nblit_..._avx2(SDL_BlitInfo *info);")
+                pattern = re.compile(
+                    r"(?:void|int)\s*\n?\s*%s\s*\(SDL_BlitInfo \*info\)\s*;" % re.escape(name)
+                )
+                text, n = pattern.subn("", text)
+                changed = changed or bool(n)
+            text, n = re.subn(r"(?:void|int)\s*\n?\s*pg_has_avx2\s*\(\s*\)\s*;", "", text)
+            changed = changed or bool(n)
+
+            if "static inline int pg_has_avx2" not in text:
+                stubs = ["static inline int pg_has_avx2(void) { return 0; }"]
+                stubs += [
+                    "static inline void %s(SDL_BlitInfo *info) { (void)info; }" % n
+                    for n in AVX2_SYMBOLS
+                ]
+                text += "\n/* arm64 stubs added by the Tarkov2D recipe */\n" + "\n".join(stubs) + "\n"
+                changed = True
+            if changed:
+                open(hdr_path, "w").write(text)
+                print("[pygame-recipe] patched simd_blitters.h: AVX2 entries stubbed out for arm64")
             env = self.get_recipe_env(arch)
             env['ANDROID_ROOT'] = join(self.ctx.ndk.sysroot, 'usr')
 

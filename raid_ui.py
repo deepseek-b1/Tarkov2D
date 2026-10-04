@@ -131,16 +131,44 @@ def draw_raid(raid, screen):
         col = (255, 230, 120) if b["owner"] == "player" else (255, 150, 90)
         pygame.draw.line(screen, col, (nx, ny), (bx, by), 2)
 
+    # 我方弹药库(突袭模式:局内补弹,免得子弹打光)
+    for sp in getattr(raid, "supplies", []):
+        x, y = sp.x + ox, sp.y + oy
+        ready = sp.cd <= 0
+        col = (150, 220, 140) if ready else (120, 120, 110)
+        pygame.draw.rect(screen, (44, 66, 52), (x - 18, y - 18, 36, 36), border_radius=4)
+        pygame.draw.rect(screen, col, (x - 18, y - 18, 36, 36), 3, border_radius=4)
+        t = get_font(14, bold=True).render("弹", True, col)
+        screen.blit(t, t.get_rect(center=(int(x), int(y))))
+        lab = get_font(12, bold=True).render(sp.name, True, (160, 225, 170))
+        screen.blit(lab, lab.get_rect(center=(x, y - 30)))
+        if not ready:
+            cd = get_font(12, bold=True).render(f"{int(sp.cd) + 1}s", True, (200, 190, 150))
+            screen.blit(cd, cd.get_rect(center=(x, y + 30)))
+
     # 突袭目标:敌方指挥设施(未摧毁 = 高亮工事;被打坏 = 血条;已摧毁 = 废墟)
     for o in getattr(raid, "objectives", []):
         x, y = o.x + ox, o.y + oy
         if o.destroyed:
-            pygame.draw.rect(screen, (58, 56, 54), (x - 20, y - 20, 40, 40),
-                             border_radius=4)
-            pygame.draw.line(screen, (26, 26, 28), (x - 14, y - 14), (x + 14, y + 14), 5)
-            pygame.draw.line(screen, (26, 26, 28), (x - 14, y + 14), (x + 14, y - 14), 5)
-            t = get_font(12, bold=True).render(f"{o.name} 已摧毁", True, (150, 150, 156))
-            screen.blit(t, t.get_rect(center=(x, y - 32)))
+            if o.rebuilding:
+                # 总指挥部检修队正在抢修:显示进度条,提示玩家赶紧打断
+                pygame.draw.rect(screen, (92, 80, 50), (x - 20, y - 20, 40, 40),
+                                 border_radius=4)
+                pygame.draw.rect(screen, (235, 200, 110), (x - 20, y - 20, 40, 40),
+                                 2, border_radius=4)
+                _struct_hp_bar(screen, x, y + 28, o, (235, 200, 110))
+                t = get_font(13, bold=True).render("抢修中!", True, (255, 200, 110))
+                screen.blit(t, t.get_rect(center=(x, y - 34)))
+            else:
+                pygame.draw.rect(screen, (58, 56, 54), (x - 20, y - 20, 40, 40),
+                                 border_radius=4)
+                pygame.draw.line(screen, (26, 26, 28), (x - 14, y - 14),
+                                 (x + 14, y + 14), 5)
+                pygame.draw.line(screen, (26, 26, 28), (x - 14, y + 14),
+                                 (x + 14, y - 14), 5)
+                t = get_font(12, bold=True).render(f"{o.name} 已摧毁", True,
+                                                   (150, 150, 156))
+                screen.blit(t, t.get_rect(center=(x, y - 32)))
             continue
         pygame.draw.rect(screen, (120, 96, 58), (x - 20, y - 20, 40, 40),
                          border_radius=4)
@@ -513,6 +541,8 @@ def _draw_hud(raid, screen):
                 prompt = "E  拉起队友"
             elif kind == "destroy":
                 prompt = "E  安放炸药(摧毁设施)"
+            elif kind == "supply":
+                prompt = "E  补充弹药(弹药库)"
         if prompt is None:
             lc = raid.nearest_container()
             if lc is not None:
@@ -576,6 +606,18 @@ def _draw_reinf_line(raid, screen, x, y):
         soon = min(st.c4["t"] for st in c4s)
         rows.append((f"C4 ×{len(c4s)}  最近起爆 {soon:.1f}s  爆区 ±{C4_BLAST_RADIUS}",
                      (255, 120, 90)))
+    # 总指挥部反应:前沿失联后的察觉倒计时 / 检修队
+    if getattr(raid, "hq_t", None) is not None:
+        rows.append((f"总指挥部 {int(max(0, raid.hq_t))}s 后察觉异常(前沿失联)",
+                     (255, 150, 120)))
+    elif getattr(raid, "hq_team", None):
+        com = next((st for st in raid.objectives if st.role == "comms"), None)
+        if com is not None and com.rebuilding:
+            rows.append(("⚠ 敌方检修队正在抢修通讯站!(打退他们)",
+                         (255, 120, 90)))
+        else:
+            rows.append((f"敌方检修队在场({len(raid.hq_team)} 人)— 去查通讯站",
+                         (255, 170, 120)))
     w = max(f.size(txt)[0] for txt, _c in rows) + 20
     h = 22 * len(rows) + 8
     bg = pygame.Surface((w, h), pygame.SRCALPHA)

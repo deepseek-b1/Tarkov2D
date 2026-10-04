@@ -3,7 +3,7 @@
 import pygame
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "1.3.1"
+GAME_VERSION = "1.5.0"
 # 更新清单地址(可换成自建服务器 / GitHub raw;留空则只认 EXE 同目录的 version.json)
 UPDATE_MANIFEST_URL = "http://127.0.0.1:8765/version.json"
 UPDATE_TIMEOUT = 3   # 检查 / 下载超时(秒)
@@ -584,6 +584,11 @@ ENEMY_REINF_MIN_DIST = 620 # 援兵不会空降在玩家脸上
 ALLY_REINF_INTERVAL = 26.0
 ALLY_REINF_SQUAD = 1
 ALLY_REINF_CAP = 14
+# 敌方总指挥部的反应:前沿守军全灭(= 前沿失联)后多久察觉异常,然后派检修队来查/修
+HQ_REACTION_DELAY = 30.0     # 守军全灭后 30 秒,总指挥部察觉异常
+HQ_REACTION_SQUAD = 3        # 检修队人数(带枪的工兵)
+HQ_REACTION_COOLDOWN = 30.0  # 两次反应之间的最短间隔
+REBUILD_RATE = 40.0          # 检修队重建被炸毁设施的速度(每秒回多少血)
 
 # 需要摧毁的指挥设施:地图标记 -> 名称
 OBJECTIVES = {"O": "指挥所", "P": "弹药库", "Q": "通讯站"}
@@ -612,6 +617,73 @@ SUPPORT = {
     "recon": dict(name="无人机侦察", cost=4, cd=30.0, delay=1.2, dur=14.0,
                   desc="短时标记全部守军"),
 }
+
+# ---------- 固定强度的模式(不给难度档) ----------
+# 人质解救 = 强化封锁强度;突袭 = 独立的固定强度(ASSAULT_DIFF)
+MODE_DIFF = {"hostage": "hardened"}
+
+# ---------- 背包卷起(省仓库格子) ----------
+# 展开占格不超过 4×4 的包,卷起来只占 1×2;5×5 及以上的占 2×2
+PACK_ROLL_SMALL = (1, 2)
+PACK_ROLL_BIG = (2, 2)
+PACK_ROLL_MAX_DIM = 4        # 展开时最大边长 <= 这个值 -> 卷成 1×2
+
+# ---------- 我方弹药库(突袭模式前沿补给) ----------
+ALLY_SUPPLY = {"A": "前沿弹药库"}
+SUPPLY_RESERVE_CAP = 240     # 弹药库最多给你攒到多少发备弹
+SUPPLY_GIVE = 120            # 每次补给给多少发(受上限限制)
+SUPPLY_COOLDOWN = 5.0        # 补给冷却(秒)
+SUPPLY_RANGE = 76            # 站多近才能补给
+
+# ---------- 任务系统(教官 / 医疗部门 / 后勤部门) ----------
+DEPTS = [("instructor", "教官"), ("medical", "医疗部门"), ("logistics", "后勤部门")]
+# 教官的任务:kind 决定进度怎么涨(在 game.py 的战局结算里累计)
+# reward: rubles 给钱 / weapons 给枪 / attachments 给配件 / ammo 给子弹
+TASKS = [
+    dict(id="t1", name="清剿行动", desc="击杀 5 名拾荒者", kind="kills", need=5,
+         reward=dict(rubles=30000, ammo=[("a9", 60)])),
+    dict(id="t2", name="活着回来", desc="成功撤离 3 次", kind="extracts", need=3,
+         reward=dict(rubles=40000, attachments=["mag_ext"])),
+    dict(id="t3", name="深入敌后", desc="累计带回价值 30 万的物资", kind="value", need=300000,
+         reward=dict(rubles=50000, attachments=["grip_vert"])),
+    dict(id="t4", name="救出人质", desc="完成 1 次人质解救(救满 4 人并撤离)",
+         kind="hostage_win", need=1, reward=dict(rubles=80000, weapons=["m4a1"])),
+    dict(id="t5", name="要塞攻坚", desc="完成 1 次突袭(炸毁 3 座设施并撤离)",
+         kind="assault_win", need=1,
+         reward=dict(rubles=150000, weapons=["pkp"], attachments=["stock_heavy"])),
+    dict(id="t6", name="弹如雨下", desc="累计击杀 30 名拾荒者", kind="kills", need=30,
+         reward=dict(rubles=120000, ammo=[("a545", 120), ("a12db", 40)])),
+    dict(id="t7", name="长期合同", desc="每击杀 10 名拾荒者就能结一次账", kind="kills",
+         need=10, reward=dict(rubles=25000), repeat=True),
+]
+# 医疗部门:把局内捡到的材料交上去换药品
+MED_BARTERS = [
+    dict(id="m1", name="绷带 ×2 → 止痛药", need=[("bandage", 2)], out=[("painkiller", 1)]),
+    dict(id="m2", name="胶带 ×2 + 螺丝刀 → 军用医疗包",
+         need=[("tape", 2), ("screwdriver", 1)], out=[("medkit", 1)]),
+    dict(id="m3", name="止血带 + 绷带 ×3 → 肾上腺素",
+         need=[("tourniquet", 1), ("bandage", 3)], out=[("syringe", 1)]),
+    dict(id="m4", name="滤毒罐 + 继电器 → AI-2 医疗包",
+         need=[("filter", 1), ("relay", 1)], out=[("ai2", 1)]),
+    dict(id="m5", name="精密工具组 + 肾上腺素 → 外科手术包",
+         need=[("tools", 1), ("syringe", 1)], out=[("surgery", 1)]),
+]
+# 后勤部门:材料换装备 / 弹药 / 配件
+LOG_BARTERS = [
+    dict(id="l1", name="螺丝盒 ×2 + 扳手 → 加长弹夹",
+         need=[("screws", 2), ("wrench", 1)], out=[("mag_ext", 1)]),
+    dict(id="l2", name="电线卷 ×2 + 继电器 → 战术激光",
+         need=[("wire", 2), ("relay", 1)], out=[("laser_tac", 1)]),
+    dict(id="l3", name="电动机 + 汽车电池 → 弹鼓",
+         need=[("motor", 1), ("battery", 1)], out=[("mag_drum", 1)]),
+    dict(id="l4", name="燃油罐 ×2 + 精密工具组 → 5 级甲(钴蓝)",
+         need=[("fuelcan", 2), ("tools", 1)], out=[("korund", 1)]),
+    dict(id="l5", name="军用水壶 + 咖啡罐 ×2 → 5.45 穿甲弹 ×120",
+         need=[("canteen", 1), ("coffee", 2)], out=[("a545", 120)]),
+    dict(id="l6", name="示波器 + 显卡 → 空降兵重型背包",
+         need=[("oscilloscope", 1), ("gpu", 1)], out=[("pack_xl", 1)]),
+]
+DEPARTMENT_BARTERS = {"medical": MED_BARTERS, "logistics": LOG_BARTERS}
 
 # ---------- 手机(触屏)模式 ----------
 TOUCH = dict(
