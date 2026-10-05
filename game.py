@@ -114,6 +114,7 @@ class Game:
                     # 否则同一物品会被同时序列化到槽位与背包(复制),新装备丢失
                     sd.weapon = self.raid.player.weapon
                     sd.armor = self.raid.player.armor
+                    sd.helmet = getattr(self.raid.player, "helmet", None)
             if story_run:
                 kept, lost = story_mod.bank_loot(sd)
                 result["banked"] = kept

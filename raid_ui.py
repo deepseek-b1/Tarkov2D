@@ -8,7 +8,8 @@ import audio
 import bindings
 from settings import (W, H, COL, BAG_W, BAG_H, RAID_TIME, EXTRACT_TIME,
                       HOSTAGE_RESCUE_TIME, REVIVE_TIME, C4_BLAST_RADIUS,
-                      PLAYER, fmt_rub, get_font)
+                      NIGHT_DARK_RGB, NIGHT_BEAM_RGB, PLAYER, fmt_rub, get_font,
+                      weapon_beam, helmet_nvg)
 import uikit
 from uikit import CELL, draw_grid, draw_item_icon, draw_tooltip, draw_button, draw_slot
 
@@ -477,17 +478,32 @@ def draw_raid(raid, screen):
         pygame.draw.circle(screen, (255, 60, 50), (int(px), int(py)),
                            PLAYER["radius"] + 6, 2)
 
-    # 战争迷雾(乘性压暗,见文件头的 _darken_layer 说明)。
-    # 多边形与合成层都按 raid.fog_version 缓存(raid.refresh_fog 只在玩家
-    # 移动时才重算),平时每帧只剩一次 MULT blit。
-    fog = _darken_layer("fog", (W, H), COL["fog"])
+    # 战争迷雾 / 夜战光照(乘性压暗,见文件头的 _darken_layer 说明)。
+    # 合成层按 raid.fog_version 缓存(raid.refresh_fog 只在玩家移动/转头时
+    # 重算),平时每帧只剩一次 MULT blit。
+    dark_mode = getattr(raid, "dark", False)
+    if dark_mode:
+        layer = _darken_layer("night", (W, H), (*NIGHT_DARK_RGB, 255))
+    else:
+        layer = _darken_layer("fog", (W, H), COL["fog"])
     if raid._fog_drawn_ver != raid.fog_version:
         raid._fog_drawn_ver = raid.fog_version
-        pts = [(x - raid.cam[0], y - raid.cam[1])
-               for x, y in (raid.fog_polygon or ())]
-        if len(pts) >= 3:
-            pygame.draw.polygon(fog, (255, 255, 255), pts)
-    screen.blit(fog, (0, 0), special_flags=pygame.BLEND_RGB_MULT)
+        cx, cy = raid.cam[0], raid.cam[1]
+        if dark_mode:
+            for shape in getattr(raid, "light_shapes", ()):
+                if shape[0] == "circle":
+                    _, (sx, sy, r, tint) = shape
+                    pygame.draw.circle(layer, tint,
+                                       (int(sx - cx), int(sy - cy)), int(r))
+                else:
+                    pts = [(x - cx, y - cy) for x, y in shape[1]]
+                    if len(pts) >= 3:
+                        pygame.draw.polygon(layer, NIGHT_BEAM_RGB, pts)
+        else:
+            pts = [(x - cx, y - cy) for x, y in (raid.fog_polygon or ())]
+            if len(pts) >= 3:
+                pygame.draw.polygon(layer, (255, 255, 255), pts)
+    screen.blit(layer, (0, 0), special_flags=pygame.BLEND_RGB_MULT)
 
     # 受击红屏(保持原来的红色蒙版观感:
     # 试过改成加色闪光只快 1.3ms,不值得动画面)
@@ -741,6 +757,24 @@ def _draw_hud(raid, screen):
     t = get_font(20, bold=True).render(txt, True,
                                        COL["bad"] if tl < 60 else COL["text"])
     screen.blit(t, t.get_rect(center=(W // 2, 18)))
+
+    # 黑暗行动:当前光源状态(没带光源就红字提醒)
+    if getattr(raid, "dark", False) and not raid.over:
+        beam = weapon_beam(getattr(p, "weapon", None))
+        nvg = helmet_nvg(getattr(p, "helmet", None))
+        parts = []
+        if beam:
+            parts.append(f"枪灯 {int(beam[0])}")
+        if nvg:
+            parts.append(f"夜视 {int(nvg[0])}")
+        txt = "黑暗行动 · 光源:" + ("＋".join(parts) if parts else "无")
+        if not parts:
+            txt += "(只看得见脚边)"
+        t = get_font(17, bold=True).render(
+            txt, True, COL["good"] if parts else COL["bad"])
+        bg = _hud_bg(t.get_width() + 20, 32, (10, 12, 14, 175))
+        screen.blit(bg, (20, 16))
+        screen.blit(t, (30, 22))
 
     # 人质模式:任务进度面板
     if raid.mode == "hostage" and not raid.over:

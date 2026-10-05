@@ -30,6 +30,7 @@ class SaveData:
         self.bag = Container(BAG_W, BAG_H)   # 容量由装备的背包决定
         self.weapon = None   # Item 或 None(出战武器槽)
         self.armor = None    # Item 或 None(出战护甲槽)
+        self.helmet = None   # Item 或 None(出战头盔槽:夜视头盔)
         self.pack = None     # Item 或 None(出战背包,决定 bag 格子容量)
         self.difficulty = "lockdown"   # easy / lockdown / hardened
         self.map_key = "border"        # 出战地图(border / tv / port / indoor / base)
@@ -90,6 +91,7 @@ class SaveData:
         """阵亡:丢失带入战局的所有装备(含背包,退回口袋容量)。"""
         self.weapon = None
         self.armor = None
+        self.helmet = None
         self.pack = None
         self.bag = Container(BAG_W, BAG_H)
 
@@ -103,6 +105,7 @@ class SaveData:
             "bag_h": self.bag.h,
             "weapon": self.weapon.serialize() if self.weapon else None,
             "armor": self.armor.serialize() if self.armor else None,
+            "helmet": self.helmet.serialize() if self.helmet else None,
             "pack": self.pack.serialize() if self.pack else None,
             "difficulty": self.difficulty,
             "map": self.map_key,
@@ -138,6 +141,8 @@ class SaveData:
             sd.weapon = Item.from_dict(data["weapon"])
         if data.get("armor"):
             sd.armor = Item.from_dict(data["armor"])
+        if data.get("helmet"):
+            sd.helmet = Item.from_dict(data["helmet"])
         if "pack" in data:
             if data.get("pack"):
                 sd.pack = Item.from_dict(data["pack"])

@@ -1531,7 +1531,8 @@ def run():
         for iid in attach_items:
             d = ITEMS[iid]
             assert d.get("slot") in ATTACH_SLOTS, iid
-            assert ("mag_bonus" in d) or ("brace_mul" in d) or ("hip_mul" in d), iid
+            assert ("mag_bonus" in d) or ("brace_mul" in d) or ("hip_mul" in d) \
+                or ("beam" in d), iid
         assert any(key == "attach" for _l, key in TRADE_TABS), "缺少配件分区"
         goods = [g for g in TRADE_GOODS if trade_cat_match(g[0], "attach")]
         assert goods and all(ITEMS[i]["cat"] == "attach" for i, _c in goods)
@@ -2978,6 +2979,196 @@ def run():
         g.draw(scr)
 
     check("设置-手机翻页按钮(触屏模式)", t_scroll_buttons)
+
+    def t_night():
+        """黑暗行动:强制强化封锁 / 只有光源范围可见 / 手电锥形 + 夜视头盔 / 头盔装备槽。"""
+        from game import Game
+        from settings import (MODES, MODE_ORDER, MODE_DIFF, ITEMS, TRADE_GOODS,
+                              ATTACH_SLOTS, weapon_slots, weapon_beam, helmet_nvg)
+        # 1) 配置:模式存在、默认强化封锁、光源道具与槽位齐全、夜视够贵
+        assert "night" in MODES and "night" in MODE_ORDER
+        assert MODE_DIFF.get("night") == "hardened"
+        assert MODES["night"].get("short")
+        assert ITEMS["flashlight"]["slot"] == "light" and ITEMS["flashlight"]["beam"]
+        assert ITEMS["flashlight_pro"]["beam"][0] > ITEMS["flashlight"]["beam"][0]
+        assert ITEMS["flashlight_pro"]["price"] > ITEMS["flashlight"]["price"]
+        assert ITEMS["nvg_pnv"]["cat"] == "helmet" and ITEMS["nvg_pnv"]["nvg"]
+        assert ITEMS["nvg_gpnvg"]["nvg"][0] > ITEMS["nvg_pnv"]["nvg"][0]
+        assert ITEMS["nvg_gpnvg"]["price"] > ITEMS["nvg_pnv"]["price"] >= 180000, \
+            "夜视头盔要贵,不然夜战太简单"
+        assert "light" in ATTACH_SLOTS and "light" in weapon_slots("ak74")
+        assert "light" not in weapon_slots("m139"), "机枪不装配件"
+        goods = {g_[0] for g_ in TRADE_GOODS}
+        assert {"flashlight", "flashlight_pro", "nvg_pnv", "nvg_gpnvg"} <= goods
+
+        # 2) 开一局夜战:难度被强制成强化封锁,地图仍按玩家选的来
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        g.save.mode = "night"
+        g.save.difficulty = "easy"          # 故意选简单,应被忽略
+        g.save.map_key = "border"
+        g.save.stash.clear()
+        g.save.bag.clear()
+        g.save.weapon = Item.weapon("ak74", mag=30)
+        g.save.bag.add_item(Item("a545", count=60))
+        g.start_raid()
+        r = g.raid
+        p = r.player
+        assert r.mode == "night" and r.dark
+        assert r.diff_key == "hardened", r.diff_key
+        assert r.map_key == "border"
+        assert r.fog_polygon is None and r.light_shapes, \
+            "夜里没有 360° 视野多边形,只有光源形状"
+        p.hp = 1000000
+
+        def place_clear(s, dist, ang, dev=40):
+            """把敌人放到玩家 (dist, ang) 方向上,找一个不撞墙又有视线的角度。"""
+            for k in range(2 * dev + 1):
+                off = 0.0 if k == 0 else ((k + 1) // 2) * 0.06 * (1 if k % 2 else -1)
+                a = ang + off
+                x, y = p.x + math.cos(a) * dist, p.y + math.sin(a) * dist
+                if not r.map.collides(x, y, 12) and r.map.los_clear(p.x, p.y, x, y):
+                    s.x, s.y = x, y
+                    return a
+            raise AssertionError("找不到有视线的落点")
+
+        s = r.scavs[0]
+        for other in r.scavs[1:]:
+            other.x, other.y = p.x + 3000, p.y + 3000
+
+        # 3) 没有光源:200px 外的敌人看不见(只有脚边微光),但敌人自己看得见你
+        p.aim = 0.0
+        place_clear(s, 200, 0.3)
+        r.refresh_fog(force=True)
+        assert id(s) not in r.fog_vis, "没光源不该看见 200px 外的敌人"
+        assert id(s) in r.sight_vis, "敌人能看见你(光照不限制敌人)"
+        s.x, s.y = p.x + 50, p.y
+        r.refresh_fog(force=True)
+        assert id(s) in r.fog_vis, "脚边微光内应该能看见"
+
+        # 4) 战术手电:锥形内可见、背后不可见、射程外不可见,且跟着准星转
+        p.weapon.state.setdefault("attach", {})["light"] = "flashlight"
+        assert weapon_beam(p.weapon) == ITEMS["flashlight"]["beam"]
+        assert helmet_nvg(p.helmet) is None
+        far, behind = r.scavs[1], r.scavs[2]
+        ang = place_clear(far, 400, 0.3, dev=3)
+        p.aim = ang
+        r.refresh_fog(force=True)
+        assert id(far) in r.fog_vis, "手电锥形内该看见"
+        place_clear(behind, 300, ang + math.pi, dev=3)
+        r.refresh_fog(force=True)
+        assert id(behind) not in r.fog_vis, "背后不该看见"
+        p.aim = ang + math.pi          # 转身:原来的前方变背后
+        r.refresh_fog(force=True)
+        assert id(behind) in r.fog_vis and id(far) not in r.fog_vis, \
+            "光锥应该跟着准星转(原来的前方变背后)"
+        beam_rng = ITEMS["flashlight"]["beam"][0]
+        p.aim = ang
+        place_clear(far, beam_rng + 120, ang, dev=5)     # 对准但超出射程
+        r.refresh_fog(force=True)
+        assert id(far) not in r.fog_vis, "超出射程不该看见"
+
+        # 5) 夜视头盔:全向可见(不用瞄准),但仍有半径上限
+        p.weapon.state["attach"].pop("light", None)
+        p.helmet = Item("nvg_pnv")
+        assert helmet_nvg(p.helmet)[0] == ITEMS["nvg_pnv"]["nvg"][0]
+        p.aim = ang + math.pi          # 故意背对
+        place_clear(far, 250, ang, dev=6)
+        r.refresh_fog(force=True)
+        assert id(far) in r.fog_vis, "夜视应该全向可见"
+        place_clear(far, 420, ang, dev=6)
+        r.refresh_fog(force=True)
+        assert id(far) not in r.fog_vis, "夜视也有半径上限"
+
+        # 6) 手机自动锁敌只锁亮区里的敌人
+        g2 = Game()
+        g2.save = save_mod.reset_data()
+        g2.save.seen_intro = True
+        g2.save.mode = "night"
+        g2.save.touch = True
+        g2.save.stash.clear()
+        g2.save.bag.clear()
+        g2.save.weapon = Item.weapon("ak74", mag=30)
+        g2.save.bag.add_item(Item("a545", count=60))
+        g2.start_raid()
+        r2 = g2.raid
+        p2 = r2.player
+        for other in r2.scavs[1:]:
+            other.x, other.y = p2.x + 3000, p2.y + 3000
+        s2 = r2.scavs[0]
+        a2 = None
+        for k in range(25):
+            a = 0.2 + k * 0.05
+            x, y = p2.x + math.cos(a) * 300, p2.y + math.sin(a) * 300
+            if not r2.map.collides(x, y, 12) and r2.map.los_clear(p2.x, p2.y, x, y):
+                s2.x, s2.y = x, y
+                a2 = a
+                break
+        assert a2 is not None, "找不到有视线的落点"
+        r2.refresh_fog(force=True)
+        assert r2._aim_assist_target() is None, "看不见的敌人不该被自动锁定"
+        p2.weapon.state.setdefault("attach", {})["light"] = "flashlight"
+        p2.aim = a2
+        r2.refresh_fog(force=True)
+        assert r2._aim_assist_target() is s2, "亮区里应该自动锁定"
+
+        # 7) 头盔装备槽:从仓库点装备、读写存档、卸下、一键放回收走、阵亡丢失
+        g3 = Game()
+        g3.save = save_mod.reset_data()
+        g3.save.seen_intro = True
+        h3 = g3.hideout
+        h3.show_intro = False
+        sd3 = g3.save
+        sd3.stash.clear()
+        sd3.weapon = Item.weapon("ak74", mag=30)
+        sd3.stash.add_item(Item("nvg_gpnvg"))
+        placed = next(x for x in sd3.stash.items if x.item.iid == "nvg_gpnvg")
+        h3._click((66 + placed.x * 40 + 4, 176 + placed.y * 40 + 4))
+        assert sd3.helmet is not None and sd3.helmet.iid == "nvg_gpnvg", \
+            "点仓库里的头盔应该戴到头上"
+        save_mod.save_data(sd3)
+        sd4 = save_mod.load_data()
+        assert sd4.helmet is not None and sd4.helmet.iid == "nvg_gpnvg", "头盔要能存读"
+        h3._click(h3.lay["helmet"].center)
+        assert sd3.helmet is None, "点头盔槽应该卸下"
+        assert any(x.item.iid == "nvg_gpnvg" for x in sd3.stash.items)
+        sd3.helmet = Item("nvg_pnv")
+        ok, msg = h3.stash_all_and_organize()
+        assert ok and sd3.helmet is None, msg
+        sd5 = save_mod.reset_data()
+        sd5.helmet = Item("nvg_pnv")
+        sd5.wipe_loadout()
+        assert sd5.helmet is None, "阵亡要丢头盔"
+
+        # 8) 渲染:有光源 / 无光源都要能画(含 HUD 光源行)
+        scr = pygame.display.set_mode((1280, 720))
+        r.player.helmet = Item("nvg_pnv")
+        r.player.weapon.state.setdefault("attach", {})["light"] = "flashlight_pro"
+        r.refresh_fog(force=True)
+        g.draw(scr)
+        r.player.helmet = None
+        r.player.weapon.state["attach"].pop("light", None)
+        r.refresh_fog(force=True)
+        g.draw(scr)
+
+        # 9) 藏身处:5 个模式按钮不超出侧栏;夜战下点难度只给提示不改档
+        for rc in h3.mode_rects:
+            assert rc.right <= h3.lay["side_panel"].right, "模式按钮别超出侧栏"
+        h3._click(h3.mode_rects[MODE_ORDER.index("night")].center)
+        assert sd3.mode == "night"
+        before = sd3.difficulty
+        h3._click(h3.diff_rects[0].center)
+        assert sd3.difficulty == before, "夜战不给改难度"
+        g3.draw(scr)
+        h3._click(h3.lay["options"].center)
+        assert h3.view == "options"
+        # 设置页的点击要走真实事件派发(update 内部转给 _options_update)
+        h3.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                                              pos=h3.opt_close.center)])
+        assert h3.view == "stash"
+
+    check("黑暗行动-强制强化封锁/光源范围可见/手电与夜视/头盔槽", t_night)
 
     ok = all(r[1] for r in results)
     report = ["Tarkov2D selftest " + ("PASS" if ok else "FAIL"), ""]

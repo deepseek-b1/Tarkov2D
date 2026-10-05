@@ -3,7 +3,7 @@
 import pygame
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.3.0"
+GAME_VERSION = "2.4.0"
 # 更新清单地址(可换成自建服务器 / GitHub raw;留空则只认 EXE 同目录的 version.json)
 UPDATE_MANIFEST_URL = "http://127.0.0.1:8765/version.json"
 UPDATE_TIMEOUT = 3   # 检查 / 下载超时(秒)
@@ -438,17 +438,21 @@ TRADE_GOODS += [("pack_small", 1), ("b23", 1), ("zhuk", 1), ("korund", 1),
                 ("painkiller", 1), ("tourniquet", 1), ("syringe", 1),
                 ("ai2", 1), ("surgery", 1)]
 TRADE_GOODS += [(iid, 1) for iid in SPECIAL_WEAPONS]
+# 黑暗模式装备:枪上照明 + 夜视头盔(夜视很贵,不然夜战太简单)
+TRADE_GOODS += [("flashlight", 1), ("flashlight_pro", 1),
+                ("nvg_pnv", 1), ("nvg_gpnvg", 1)]
 
 # 交易站分区:(标签名, 分区键;None = 全部)
 TRADE_TABS = [("全部", None), ("枪械", "weapon"), ("特殊枪械", "special"), ("配件", "attach"),
-              ("护甲", "armor"), ("背包", "pack"), ("子弹", "ammo"),
+              ("护甲", "armor"), ("头盔", "helmet"), ("背包", "pack"), ("子弹", "ammo"),
               ("药品", "med")]
 TRADE_PAGE_H = 450      # 商品区可见高度(像素);超出时用滚轮翻看
 
 # ---------- 枪械配件 ----------
-# slot: mag 弹夹 / grip 前握把 / laser 激光 / stock 后握把
+# slot: mag 弹夹 / grip 前握把 / laser 激光 / stock 后握把 / light 照明(手电)
 # 效果:mag_bonus 加弹容;brace_mul 架枪散布倍率(越小越准);hip_mul 腰射散布倍率
-ATTACH_SLOTS = {"mag": "弹夹", "grip": "前握把", "laser": "激光", "stock": "后握把"}
+ATTACH_SLOTS = {"mag": "弹夹", "grip": "前握把", "laser": "激光", "stock": "后握把",
+                "light": "照明"}
 ITEMS.update({
     "mag_ext": dict(name="加长弹夹", cat="attach", slot="mag", w=1, h=1,
                     color=(150, 150, 160), price=6000, mag_bonus=10, desc="弹容 +10"),
@@ -470,7 +474,41 @@ ITEMS.update({
     "stock_heavy": dict(name="重型枪托", cat="attach", slot="stock", w=2, h=1,
                         color=(80, 78, 72), price=18000, brace_mul=0.85, hip_mul=0.92,
                         desc="架枪 -15% · 腰射 -8%"),
+    # 照明配件(黑暗模式的核心):装在枪上,朝准星方向打出一道亮锥
+    "flashlight": dict(name="战术手电", cat="attach", slot="light", w=1, h=1,
+                       color=(230, 226, 180), price=16000,
+                       beam=(430, 26), desc="夜战照明:锥形亮区 430 内可见"),
+    "flashlight_pro": dict(name="强光探照灯", cat="attach", slot="light", w=2, h=1,
+                           color=(238, 236, 200), price=45000,
+                           beam=(580, 32), desc="夜战照明:锥形亮区 580 内可见"),
 })
+
+# ---------- 夜视头盔(黑暗模式) ----------
+# cat="helmet":占用新增的「头盔」装备槽(和护甲不冲突);nvg=(半径, 亮度) 自带夜视仪
+ITEMS.update({
+    "nvg_pnv": dict(name="PNV-10T 夜视头盔", cat="helmet", w=2, h=2,
+                    color=(84, 104, 76), price=180000, level=3,
+                    nvg=(300, 150), desc="夜视:周围 300 全向可见(微光)"),
+    "nvg_gpnvg": dict(name="GPNVG-18 四眼夜视头盔", cat="helmet", w=3, h=2,
+                      color=(74, 96, 72), price=480000, level=4,
+                      nvg=(440, 205), desc="夜视:周围 440 全向可见(更亮更远)"),
+})
+
+
+def helmet_nvg(item):
+    """头盔的夜视参数 (半径, 亮度);没有夜视仪返回 None。"""
+    if item is None or item.def_.get("cat") != "helmet":
+        return None
+    return item.def_.get("nvg")
+
+
+def weapon_beam(item):
+    """枪上照明配件的光锥 (射程, 半角°);没装返回 None。"""
+    for iid in weapon_attach(item).values():
+        b = ITEMS.get(iid, {}).get("beam")
+        if b:
+            return b
+    return None
 
 # ---------- 枪械天赋(每把枪自带) ----------
 # dmg_mul 伤害倍率; spread_mul 全部散布; brace_mul 架枪散布; reload_mul 装填时间; loud_mul 枪声; blast_mul 爆炸半径
@@ -493,15 +531,15 @@ TALENTS = {
 
 # 武器可装的配件槽(M139 机枪按需求不装任何配件)
 WEAPON_SLOTS = {
-    "pm": [], "mp5": ["mag", "grip", "laser", "stock"],
-    "mp133": ["mag", "grip", "laser"],
-    "ak74": ["mag", "grip", "laser", "stock"],
-    "m4a1": ["mag", "grip", "laser", "stock"],
-    "akm": ["mag", "grip", "laser", "stock"],
-    "m700": ["mag", "laser", "stock"],
-    "m139": [], "asval": ["mag", "grip", "laser"],
-    "vector": ["mag", "grip", "laser", "stock"],
-    "pkp": ["laser"], "rpg": [], "rpg2": [],
+    "pm": ["light"], "mp5": ["mag", "grip", "laser", "stock", "light"],
+    "mp133": ["mag", "grip", "laser", "light"],
+    "ak74": ["mag", "grip", "laser", "stock", "light"],
+    "m4a1": ["mag", "grip", "laser", "stock", "light"],
+    "akm": ["mag", "grip", "laser", "stock", "light"],
+    "m700": ["mag", "laser", "stock", "light"],
+    "m139": [], "asval": ["mag", "grip", "laser", "light"],
+    "vector": ["mag", "grip", "laser", "stock", "light"],
+    "pkp": ["laser", "light"], "rpg": [], "rpg2": [],
 }
 
 
@@ -569,12 +607,24 @@ def weapon_blast_mul(item):
 
 # ---------- 游戏模式 ----------
 MODES = {
-    "raid": dict(name="搜打撤", desc="自由搜刮 · 找撤离点撤离"),
-    "hostage": dict(name="人质解救", desc="室内近战 · 20 名匪徒分守八间房 · 救出 4 名人质"),
-    "assault": dict(name="突袭", desc="强攻敌巢 · 50 守军 · 友军空袭支援"),
-    "story": dict(name="剧情", desc="灰区二日 · 两天两夜 · 有分支与结局"),
+    "raid": dict(name="搜打撤", short="搜打撤", desc="自由搜刮 · 找撤离点撤离"),
+    "hostage": dict(name="人质解救", short="人质", desc="室内近战 · 20 名匪徒分守八间房 · 救出 4 名人质"),
+    "assault": dict(name="突袭", short="突袭", desc="强攻敌巢 · 50 守军 · 友军空袭支援"),
+    "story": dict(name="剧情", short="剧情", desc="灰区二日 · 两天两夜 · 有分支与结局"),
+    "night": dict(name="黑暗行动", short="夜战",
+                  desc="漆黑一片 · 要自带光源 · 默认强化封锁"),
 }
-MODE_ORDER = ["raid", "hostage", "assault", "story"]
+MODE_ORDER = ["raid", "hostage", "assault", "story", "night"]
+
+# ---------- 黑暗模式(夜战) ----------
+# 全图压成漆黑:只有「光源范围」内能看见东西(敌人也只有亮区里才显示)。
+# 光源两种:枪上的照明配件(锥形,跟准星方向) / 夜视头盔(全向圆,贵)。
+NIGHT_AMBIENT = 92          # 无光源时脚边这一小圈还是能看见(像素)
+NIGHT_DARK_RGB = (20, 22, 28)   # 亮区外乘性压暗后的颜色(越小越黑)
+NIGHT_BEAM_RGB = (240, 236, 205)  # 手电光锥的颜色(暖白)
+NIGHT_TINT = (150, 235, 170)  # 夜视仪亮区的偏色(微绿)
+NIGHT_AMBIENT_TINT = (120, 126, 140)   # 脚边微光的颜色(偏冷灰)
+NIGHT_BEAM_STEPS = 26       # 光锥圆弧的采样点数
 HOSTAGE_COUNT = 4          # 人质数量
 HOSTAGE_ENEMIES = 20       # 人质模式的敌人数量下限(地图上的刷新点按房间均匀布置)
 ALLY_COUNT = 3             # 队友数量
@@ -647,7 +697,8 @@ STRUCT_ROLE = {"O": "command", "P": "depot", "Q": "comms",
 # 只挑配件槽位齐全的枪,保证"满配件";每种槽位都给最好的那件
 ISSUE_WEAPONS = ["m4a1", "akm", "ak74", "mp5", "vector", "asval", "m700"]
 ISSUE_ATTACH = {"mag": "mag_drum_big", "grip": "grip_ang",
-                "laser": "laser_ir", "stock": "stock_heavy"}
+                "laser": "laser_ir", "stock": "stock_heavy",
+                "light": "flashlight_pro"}
 ISSUE_ARMORS = ["bt201", "b45", "b23", "zhuk", "korund"]
 ISSUE_PACKS = ["pack_xl", "pack_large"]
 ISSUE_MEDS = ["surgery", "ai2", "syringe", "medkit"]
@@ -665,8 +716,8 @@ SUPPORT = {
 }
 
 # ---------- 固定强度的模式(不给难度档) ----------
-# 人质解救 = 强化封锁强度;突袭 = 独立的固定强度(ASSAULT_DIFF)
-MODE_DIFF = {"hostage": "hardened"}
+# 人质解救 = 强化封锁强度;夜战 = 强化封锁(用户要求:太亮/太简单就没意思)
+MODE_DIFF = {"hostage": "hardened", "night": "hardened"}
 
 # ---------- 剧情模式《灰区二日》 ----------
 # 独立模式:固定强度,两天 × 四时段,每个时段出击一次
@@ -789,13 +840,15 @@ LOOT = {
             ("mag_ext", 1, 4), ("grip_vert", 1, 4), ("laser_tac", 1, 3),
             ("stock_tac", 1, 3), ("mag_drum", 1, 2), ("grip_ang", 1, 2),
             ("fort", 1, 2), ("wrench", 1, 6), ("tape", 1, 6), ("screws", 1, 6),
-            ("relay", 1, 5), ("flashlight", 1, 5), ("hose", 1, 4)],
+            ("relay", 1, 5), ("flashlight", 1, 5), ("flashlight_pro", 1, 2),
+            ("hose", 1, 4)],
     # 保险箱:值钱货与高阶杂物(金色物品仍是最稀有的);5 级甲小概率开出
     "val": [("gold", 1, 5), ("cpu", 1, 4), ("btc", 1, 1), ("vase", 1, 2),
             ("b45", 1, 2), ("bt201", 1, 1), ("pack_large", 1, 2), ("pack_xl", 1, 1),
             ("b23", 1, 2), ("zhuk", 1, 2), ("korund", 1, 2),
             ("gpu", 1, 4), ("motor", 1, 4), ("oscilloscope", 1, 4), ("tools", 1, 2),
             ("solar", 1, 2), ("filter", 1, 3), ("fuelcan", 1, 3),
+            ("nvg_pnv", 1, 2), ("nvg_gpnvg", 1, 1),
             ("clock", 1, 4), ("calculator", 1, 3), ("battery", 1, 3)],
 }
 

@@ -27,9 +27,10 @@ def _layout():
         stash_panel=pygame.Rect(30, 100, 470, 430),
         loadout_panel=pygame.Rect(516, 100, 390, 430),
         side_panel=pygame.Rect(922, 100, 330, 438),
-        weapon=pygame.Rect(542, 146, 110, 84),
-        armor=pygame.Rect(662, 146, 110, 84),
-        pack=pygame.Rect(782, 146, 110, 84),
+        weapon=pygame.Rect(542, 146, 86, 84),
+        armor=pygame.Rect(634, 146, 86, 84),
+        helmet=pygame.Rect(726, 146, 86, 84),
+        pack=pygame.Rect(818, 146, 86, 84),
         bag_origin=(542, 262),      # 出战背包网格原点(cell 动态)
         intro_btn=pygame.Rect(542, 484, 170, 34),
         touch_btn=pygame.Rect(722, 484, 160, 34),
@@ -67,7 +68,7 @@ class Hideout:
             row, col = divmod(i, 3)
             self.map_rects.append(pygame.Rect(
                 sp.x + 18 + col * 100, sp.y + 62 + row * 34, 92, 30))
-        self.mode_rects = [pygame.Rect(sp.x + 18 + i * 71, sp.y + 172, 68, 30)
+        self.mode_rects = [pygame.Rect(sp.x + 18 + i * 58, sp.y + 172, 55, 30)
                            for i in range(len(MODE_ORDER))]
         self.diff_rects = [pygame.Rect(sp.x + 18 + i * 100, sp.y + 248, 92, 30)
                            for i in range(3)]
@@ -655,7 +656,7 @@ class Hideout:
         stash = Container.deserialize(sd.stash.w, sd.stash.h, sd.stash.serialize())
         carry = list(sd.bag.items)
         slots = []
-        for name in ("weapon", "armor", "pack"):
+        for name in ("weapon", "armor", "helmet", "pack"):
             it = getattr(sd, name)
             if it is None:
                 continue
@@ -988,6 +989,8 @@ class Hideout:
                          if sd.mode == "assault" else
                          "剧情模式为固定强度(《灰区二日》有分支与结局,不吃难度档)"
                          if sd.mode == "story" else
+                         "黑暗行动默认强化封锁(漆黑里再放水就没意思了),不适用难度档"
+                         if sd.mode == "night" else
                          "人质解救固定为强化封锁强度,不适用难度档")
             for r in self.diff_rects:
                 if r.collidepoint(pos):
@@ -1093,6 +1096,16 @@ class Hideout:
             ok, msg = self._try_unequip_pack()
             self.say(msg, COL["good"] if ok else COL["bad"], 3.0)
             return
+        if lay["helmet"].collidepoint(pos):
+            if sd.helmet is not None:
+                old = sd.helmet
+                if sd.stash.add_item(old):
+                    sd.helmet = None
+                    save_mod.save_data(sd)
+                    self.say(f"已卸下 {old.name}")
+                else:
+                    self.say("仓库空间不足", COL["bad"])
+            return
 
         # 仓库物品 -> 装备/出战背包
         if lay["stash_panel"].collidepoint(pos):
@@ -1123,6 +1136,18 @@ class Hideout:
                     sd.armor = item
                     save_mod.save_data(sd)
                     self.say(f"装备护甲 {item.name}")
+                elif item.cat == "helmet":
+                    old = sd.helmet
+                    sd.stash.remove_placed(placed)
+                    if old is not None and not sd.stash.add_item(old):
+                        sd.stash.items.append(placed)
+                        self.say("仓库空间不足", COL["bad"])
+                        return
+                    sd.helmet = item
+                    save_mod.save_data(sd)
+                    nvg = item.def_.get("nvg")
+                    self.say(f"装备头盔 {item.name}"
+                             + (f"(夜视半径 {int(nvg[0])})" if nvg else ""))
                 elif item.cat == "attach":
                     self._install_attachment(sd, placed)
                 elif item.cat == "pack":
@@ -1386,6 +1411,8 @@ class Hideout:
                   hover=lay["weapon"].collidepoint(mx, my))
         draw_slot(screen, lay["armor"], sd.armor, "护甲",
                   hover=lay["armor"].collidepoint(mx, my))
+        draw_slot(screen, lay["helmet"], sd.helmet, "头盔",
+                  hover=lay["helmet"].collidepoint(mx, my))
         draw_slot(screen, lay["pack"], sd.pack, "背包",
                   hover=lay["pack"].collidepoint(mx, my))
         bcell = self.bag_cell()
@@ -1423,7 +1450,8 @@ class Hideout:
         t = get_font(17, bold=True).render("游戏模式", True, COL["accent"])
         screen.blit(t, (sp.x + 18, sp.y + 148))
         draw_choice(self.mode_rects, MODE_ORDER,
-                    {k: MODES[k]["name"] for k in MODE_ORDER}, sd.mode)
+                    {k: MODES[k].get("short", MODES[k]["name"]) for k in MODE_ORDER},
+                    sd.mode)
         t = get_font(13).render(MODES[sd.mode]["desc"], True,
                                 COL["good"] if sd.mode != "raid" else COL["text_dim"])
         screen.blit(t, (sp.x + 18, sp.y + 206))
@@ -1436,8 +1464,12 @@ class Hideout:
             fixed_lines = ("突袭模式为固定强度(不适用难度档)",
                            "系统随机配发满配高级装备,战后回收")
         elif sd.mode in MODE_DIFF:
-            fixed_lines = ("人质解救固定为强化封锁强度,",
-                           "不适用简单/封锁难度档")
+            if sd.mode == "night":
+                fixed_lines = ("黑暗行动:全图漆黑,只有光源范围可见 ——",
+                               "默认强化封锁,光源要自己带(手电/夜视头盔)")
+            else:
+                fixed_lines = ("人质解救固定为强化封锁强度,",
+                               "不适用简单/封锁难度档")
         if fixed_lines:
             for i, ln in enumerate(fixed_lines):
                 t = get_font(13).render(ln, True, COL["text_dim"])
@@ -1526,6 +1558,8 @@ class Hideout:
             hover_item = sd.weapon
         if hover_item is None and lay["armor"].collidepoint(mx, my) and sd.armor:
             hover_item = sd.armor
+        if hover_item is None and lay["helmet"].collidepoint(mx, my) and sd.helmet:
+            hover_item = sd.helmet
         if hover_item is None and lay["pack"].collidepoint(mx, my) and sd.pack:
             hover_item = sd.pack
         if hover_item is not None:

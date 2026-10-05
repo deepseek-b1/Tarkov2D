@@ -18,6 +18,7 @@ def snapshot(sd):
     return dict(
         weapon=sd.weapon.serialize() if sd.weapon else None,
         armor=sd.armor.serialize() if sd.armor else None,
+        helmet=sd.helmet.serialize() if getattr(sd, "helmet", None) else None,
         pack=sd.pack.serialize() if sd.pack else None,
         bag=sd.bag.serialize(), bag_w=sd.bag.w, bag_h=sd.bag.h,
     )
@@ -29,6 +30,7 @@ def restore(sd, snap):
         return
     sd.weapon = Item.from_dict(snap["weapon"]) if snap.get("weapon") else None
     sd.armor = Item.from_dict(snap["armor"]) if snap.get("armor") else None
+    sd.helmet = Item.from_dict(snap["helmet"]) if snap.get("helmet") else None
     sd.pack = Item.from_dict(snap["pack"]) if snap.get("pack") else None
     sd.bag = Container.deserialize(int(snap.get("bag_w", 6)),
                                    int(snap.get("bag_h", 4)), snap.get("bag"))

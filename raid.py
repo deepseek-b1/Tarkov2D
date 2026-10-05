@@ -150,6 +150,7 @@ class Player:
         self.hp = self.max_hp
         self.weapon = sd.weapon   # 与存档共用引用,撤离后自然持久化
         self.armor = sd.armor
+        self.helmet = getattr(sd, "helmet", None)   # 夜视头盔(黑暗模式)
         self.bag = sd.bag
         self.aim = 0.0
         self.fire_cd = 0.0
@@ -238,7 +239,7 @@ class Raid:
             self.diff_key = "story"
             self.diff = STORY_DIFF
         else:
-            # 人质解救固定成强化封锁强度(不给难度档)
+            # 人质解救 / 黑暗行动固定成强化封锁强度(不给难度档)
             forced = MODE_DIFF.get(self.mode)
             self.diff_key = forced if forced else (
                 difficulty if difficulty in DIFFICULTIES
@@ -364,6 +365,24 @@ class Raid:
         if self.mode == "hostage":
             self.add_toast(f"任务:救出 {HOSTAGE_COUNT} 名人质后撤离 —— 拐角有死角,小心埋伏",
                            COL["accent"], 5.0)
+        if self.mode == "night":
+            from settings import weapon_beam as _beam, helmet_nvg as _nvg
+            light = _beam(getattr(self.player, "weapon", None))
+            helmet = _nvg(getattr(self.player, "helmet", None))
+            if light is None and helmet is None:
+                self.add_toast("黑暗行动:你身上没有任何光源 —— 只看得到脚边一小圈!",
+                               COL["bad"], 6.5)
+                self.add_toast("去交易所买「战术手电」(装到枪上)或「夜视头盔」再来",
+                               COL["accent"], 6.5)
+            else:
+                src = []
+                if helmet is not None:
+                    src.append(f"夜视头盔(半径 {int(helmet[0])})")
+                if light is not None:
+                    src.append(f"枪灯(射程 {int(light[0])} · ±{int(light[1])}°)")
+                self.add_toast("黑暗行动 · 光源:" + " + ".join(src), COL["good"], 5.5)
+            self.add_toast("只有亮区里的敌人才看得见(也才会被自动瞄准);敌人可不受你的灯光限制",
+                           COL["accent"], 6.0)
         if self.mode == "assault":
             self.add_toast(f"任务:给 {len(self.objectives)} 座指挥设施安 C4"
                            f"(按 E 安放,{int(C4_FUSE)} 秒后起爆,爆区 ±{C4_BLAST_RADIUS})",
@@ -415,16 +434,71 @@ class Raid:
         self.fog_t = 0.0
         self.fog_version = 0
         self._fog_drawn_ver = -1
+        # 黑暗模式(夜战):光源形状(世界坐标)+ 亮区内的敌人集合
+        self.dark = self.mode == "night"
+        self.light_shapes = []      # [("poly", pts) | ("circle", (x, y, r, tint))]
+        self.sight_vis = set()      # 敌人里「能看见玩家」的那些(离得近有视线)
+        self.fog_aim = 0.0
         self.refresh_fog(force=True)
 
-    def refresh_fog(self, dt=0.0, force=False):
-        """战争迷雾两级缓存(120fps 的关键)。
+    # ---------- 黑暗模式:光照形状 ----------
+    def night_light(self):
+        """返回 (亮区形状列表, 敌人可见判定函数用的参数)。
 
-        1) 视野多边形(140 条 DDA 射线)只在玩家移动超过 FOG_MOVE_STEP 时重算;
-        2) 可见敌人集合在(1)之外,最短每 FOG_VIS_REFRESH 秒也刷一次 ——
-           玩家站着不动时,敌人自己走进/走出视野也要能判定。
-        sees_player / threat_for / 绘制可见判定全部读 fog_vis,
-        把「每帧每个敌人一条 DDA 射线」彻底消灭掉。
+        光源优先级:枪上照明配件(锥形,跟准星) > 夜视头盔(全向圆) > 脚边微光。
+        玩家没带任何光源时只能看见脚下一小圈 —— 这就是「夜战必须带装备」。
+        """
+        from settings import (NIGHT_AMBIENT, NIGHT_AMBIENT_TINT, NIGHT_BEAM_STEPS,
+                              weapon_beam, helmet_nvg)
+        p = self.player
+        shapes = []
+        nvg = helmet_nvg(getattr(p, "helmet", None))
+        beam = weapon_beam(getattr(p, "weapon", None))
+        # 画到压暗层上时先画暗的、后画亮的(后画的覆盖先画的)
+        shapes.append(("circle", (p.x, p.y, NIGHT_AMBIENT, NIGHT_AMBIENT_TINT)))
+        if nvg is not None:
+            r, bright = nvg
+            shapes.append(("circle", (p.x, p.y, r, (bright // 3, bright, bright // 2))))
+        if beam is not None:
+            rng, half_deg = beam
+            half = math.radians(half_deg)
+            pts = [(p.x, p.y)]
+            steps = NIGHT_BEAM_STEPS
+            for i in range(steps + 1):
+                a = p.aim - half + (2 * half) * (i / float(steps))
+                pts.append((p.x + math.cos(a) * rng, p.y + math.sin(a) * rng))
+            shapes.append(("poly", pts))
+        return shapes
+
+    def in_light(self, x, y):
+        """某点在不在亮区里(敌人「可见」的几何判定,视线另外算)。"""
+        from settings import NIGHT_AMBIENT, helmet_nvg, weapon_beam
+        p = self.player
+        nvg = helmet_nvg(getattr(p, "helmet", None))
+        beam = weapon_beam(getattr(p, "weapon", None))
+        dx, dy = x - p.x, y - p.y
+        if nvg is not None and math.hypot(dx, dy) <= nvg[0]:
+            return True
+        if beam is not None:
+            d = math.hypot(dx, dy)
+            if d <= beam[0]:
+                diff = abs((math.atan2(dy, dx) - p.aim + math.pi) % math.tau - math.pi)
+                if diff <= math.radians(beam[1]):
+                    return True
+        return math.hypot(dx, dy) <= NIGHT_AMBIENT
+
+    def refresh_fog(self, dt=0.0, force=False):
+        """战争迷雾 / 夜战光照的两级缓存(120fps 的关键)。
+
+        白天:
+          1) 视野多边形(140 条 DDA 射线)只在玩家移动超过 FOG_MOVE_STEP 时重算;
+          2) 可见敌人集合在(1)之外,最短每 FOG_VIS_REFRESH 秒也刷一次 ——
+             玩家站着不动时,敌人自己走进/走出视野也要能判定。
+        夜里(黑暗模式):可见 = 在光源形状内(手电锥形 / 夜视圆 / 脚边微光)+ 有视线;
+          光锥跟着准星转,所以准星变化超过阈值也要重算。
+
+        fog_vis  = 玩家能看见的敌人(绘制与自动锁敌用)
+        sight_vis = 能看见玩家的敌人(敌人 AI 用,夜里不受玩家光源限制)
         """
         p = self.player
         if force:
@@ -432,17 +506,30 @@ class Raid:
         else:
             self.fog_t += dt
             moved = math.hypot(p.x - self.fog_px, p.y - self.fog_py) >= FOG_MOVE_STEP
-            do_poly = moved or self.fog_polygon is None
+            if self.dark:
+                turned = abs((p.aim - self.fog_aim + math.pi) % math.tau - math.pi) > 0.05
+            else:
+                turned = False
+            do_poly = moved or turned or self.fog_polygon is None
             if not do_poly and self.fog_t < FOG_VIS_REFRESH:
                 return
         if do_poly:
-            self.fog_polygon = self.map.visibility_polygon(p.x, p.y, 560)
+            if self.dark:
+                self.light_shapes = self.night_light()
+                self.fog_polygon = None      # 夜里不用 360° 视野多边形
+            else:
+                self.fog_polygon = self.map.visibility_polygon(p.x, p.y, 560)
+                self.light_shapes = []
             self.fog_px, self.fog_py = p.x, p.y
+            self.fog_aim = p.aim
             self.fog_version += 1
         vis = set()
+        sight = set()
         r = FOG_VIS_RADIUS
         px, py = p.x, p.y
         los = self.map.los_clear
+        in_light = self.in_light
+        dark = self.dark
         for s in self.scavs:
             dx = s.x - px
             if dx > r or dx < -r:
@@ -450,9 +537,13 @@ class Raid:
             dy = s.y - py
             if dy > r or dy < -r:
                 continue
-            if los(px, py, s.x, s.y):
-                vis.add(id(s))
+            clear = los(px, py, s.x, s.y)
+            if clear:
+                sight.add(id(s))
+                if (not dark) or in_light(s.x, s.y):
+                    vis.add(id(s))
         self.fog_vis = vis
+        self.sight_vis = sight
         self.fog_t = 0.0
 
     # ---------- 提示/粒子 ----------
@@ -891,7 +982,7 @@ class Raid:
         """
         p = self.player
         if math.hypot(p.x - scav.x, p.y - scav.y) <= scav.d["view"] \
-                and id(scav) in self.fog_vis:
+                and id(scav) in self.sight_vis:
             return p
         best, bd = None, scav.d["view"]
         for a in self.allies:
@@ -1085,10 +1176,17 @@ class Raid:
         self.add_toast(f"治疗 +{healed}", COL["good"])
 
     def _aim_assist_target(self):
-        """辅助瞄准(手机):视野内最近的可见敌人。"""
+        """辅助瞄准(手机):视野内最近的可见敌人。
+
+        黑暗模式下只锁「亮区里」的敌人 —— 看不见的目标不该被自动瞄准,
+        否则手电/夜视就没有意义了。
+        """
         p = self.player
+        vis = self.fog_vis
         best, bd = None, TOUCH["aim_assist_range"]
         for s in self.scavs:
+            if self.dark and id(s) not in vis:
+                continue
             d = math.hypot(s.x - p.x, s.y - p.y)
             if d < bd and self.map.los_clear(p.x, p.y, s.x, s.y):
                 best, bd = s, d
@@ -1139,6 +1237,19 @@ class Raid:
                 return
             p.armor = item
             audio.play("click")
+        elif item.cat == "helmet":
+            old = p.helmet
+            p.bag.remove_placed(placed)
+            if old is not None and not p.bag.add_item(old):
+                p.bag.items.append(placed)
+                self.add_toast("背包空间不足", COL["bad"])
+                return
+            p.helmet = item
+            audio.play("click")
+            nvg = item.def_.get("nvg")
+            if nvg:
+                self.add_toast(f"已戴上 {item.name}(夜视半径 {int(nvg[0])})",
+                               COL["good"], 3.0)
         elif item.cat == "attach":
             self.install_attachment(p, placed, p.bag)
 
@@ -1778,6 +1889,8 @@ class Raid:
             v += p.weapon.total_price()
         if p.armor is not None:
             v += p.armor.total_price()
+        if getattr(p, "helmet", None) is not None:
+            v += p.helmet.total_price()
         return v
 
     def finish(self, kind):
