@@ -508,9 +508,12 @@ class Raid:
             moved = math.hypot(p.x - self.fog_px, p.y - self.fog_py) >= FOG_MOVE_STEP
             if self.dark:
                 turned = abs((p.aim - self.fog_aim + math.pi) % math.tau - math.pi) > 0.05
+                # 夜里 fog_polygon 恒为 None(不用 360° 视野多边形),
+                # 所以"首次"要用 light_shapes 判断 —— 否则每帧都会重建光照层
+                do_poly = moved or turned or not self.light_shapes
             else:
                 turned = False
-            do_poly = moved or turned or self.fog_polygon is None
+                do_poly = moved or self.fog_polygon is None
             if not do_poly and self.fog_t < FOG_VIS_REFRESH:
                 return
         if do_poly:
