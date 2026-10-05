@@ -16,7 +16,8 @@ from settings import (W, H, COL, fmt_rub, get_font, DIFF_ORDER, DIFFICULTIES,
                       ITEMS, TRADE_GOODS, TRADE_TABS, TRADE_PAGE_H, FPS_CAP_CHOICES,
                       trade_buy_price, trade_sell_price, STASH_VIEW_ROWS,
                       MODE_DIFF, DEPTS, TASKS,
-                      armor_allows, MAPS, MAP_ORDER, MODES, MODE_ORDER, MODE_MAP)
+                      armor_allows, MAPS, MAP_ORDER, MODES, MODE_ORDER, MODE_MAP,
+                      weapon_class, WEAPON_CLASS_COL)
 from inventory import Item, Placed, organize, try_move
 import uikit
 from uikit import draw_grid, draw_button, draw_slot, draw_tooltip
@@ -95,6 +96,8 @@ class Hideout:
         self.trade_view_top = 178        # 商品区可见范围
         self.trade_view_bottom = 178 + TRADE_PAGE_H
         self.trade_close = pygame.Rect(1140, 76, 100, 36)
+        self.trade_drag = False          # 正在拖商品列表的滚动条
+        self.trade_slider = None         # 本帧的 (轨道, 手柄),画的时候填
         # 批量出售:开关 / 快捷选择 / 出售 / 清空 + 确认框
         self.sell_mode = False
         self.sell_sel = []                    # 选中的 Placed(按点击顺序)
@@ -589,15 +592,33 @@ class Hideout:
 
     def trade_row_rect(self, i, per, row_h):
         col, row = divmod(i, per)
-        return pygame.Rect(548 + col * 352,
+        # 右列窄一点,给右边的滚动条让位(否则点商品会误触滑块)
+        return pygame.Rect(548 + col * 346,
                            self.trade_view_top + row * (row_h + 4) - int(self.trade_scroll),
-                           344, row_h)
+                           338, row_h)
 
     def trade_max_scroll(self):
         goods, per, row_h = self.trade_rows()
         rows = (len(goods) + 1) // 2
         content_bottom = self.trade_view_top + rows * (row_h + 4)
         return max(0.0, float(content_bottom - self.trade_view_bottom))
+
+    # ---- 交易所滚动条(可拖动) ----
+    def trade_slider_track(self):
+        return pygame.Rect(self.lay["trade_goods"].right - 18,
+                           self.trade_view_top, 14, TRADE_PAGE_H)
+
+    def _trade_drag_to(self, y):
+        """把手柄拖到某个 y:换算成滚动位置。"""
+        if not self.trade_slider:
+            return
+        track, handle = self.trade_slider
+        ms = self.trade_max_scroll()
+        span = track.h - handle.h
+        if span <= 0 or ms <= 0:
+            return
+        ratio = (y - track.y - handle.h / 2.0) / span
+        self.trade_scroll = max(0.0, min(ms, ratio * ms))
 
     # ---- 仓库滚轮 ----
     def stash_max_scroll(self):
@@ -828,6 +849,13 @@ class Hideout:
             self._options_update(dt, events)
             return
         for ev in events:
+            # 商品列表滚动条拖动中:鼠标移动 = 改滚动位置
+            if ev.type == pygame.MOUSEMOTION and self.trade_drag:
+                self._trade_drag_to(ev.pos[1])
+                continue
+            if ev.type == pygame.MOUSEBUTTONUP and ev.button == 1 and self.trade_drag:
+                self.trade_drag = False
+                continue
             if ev.type == pygame.MOUSEWHEEL:
                 if self.view == "trade":
                     # 鼠标压在左边仓库上 -> 翻仓库;否则翻商品
@@ -1268,6 +1296,16 @@ class Hideout:
     def _trade_click(self, pos):
         sd = self.game.save
         audio.play("click")
+        # 商品列表右边的滚动条:点手柄/轨道就开始拖
+        if self.trade_slider is not None:
+            track, handle = self.trade_slider
+            if handle.collidepoint(pos):
+                self.trade_drag = True
+                return
+            if track.collidepoint(pos):
+                self.trade_drag = True
+                self._trade_drag_to(pos[1])
+                return
         # 批量出售的确认框最优先
         if self.sell_ask is not None:
             if self.sell_ask_yes.collidepoint(pos):
@@ -1798,20 +1836,41 @@ class Hideout:
             name = d["name"] + (f" ×{count}" if d["cat"] == "ammo" else "")
             t = f16.render(name, True, COL["text"] if afford else (110, 110, 116))
             screen.blit(t, (rect.x + 20, rect.y + 7))
+            # 枪械分类标签(暗区式:突击步枪/冲锋枪/狙击步枪/轻机枪/霰弹枪…)
+            cls = weapon_class(iid)
+            if cls:
+                tag = get_font(12, bold=True).render(
+                    cls, True, WEAPON_CLASS_COL.get(cls, COL["text_dim"]))
+                tx = rect.x + 26 + t.get_width()
+                if tx + tag.get_width() + 12 < rect.right - 90:
+                    pygame.draw.rect(screen, (46, 50, 58),
+                                     (tx, rect.y + 9, tag.get_width() + 10, 18),
+                                     border_radius=4)
+                    pygame.draw.rect(screen, WEAPON_CLASS_COL.get(cls, COL["border"]),
+                                     (tx, rect.y + 9, tag.get_width() + 10, 18),
+                                     1, border_radius=4)
+                    screen.blit(tag, (tx + 5, rect.y + 11))
             tp = get_font(15, bold=True).render(fmt_rub(price), True,
                                                 COL["accent"] if afford else COL["text_dim"])
             screen.blit(tp, (rect.right - tp.get_width() - 10, rect.y + 7))
-        # 滚动条
+        # 滚动条(可以用鼠标拖着走;手机用 ▲▼)
         ms = self.trade_max_scroll()
+        self.trade_slider = None
         if ms > 0:
-            bar_x = lay["trade_goods"].right - 14
-            track = pygame.Rect(bar_x, self.trade_view_top, 6, TRADE_PAGE_H)
-            pygame.draw.rect(screen, COL["grid_bg"], track, border_radius=3)
+            track = self.trade_slider_track()
+            pygame.draw.rect(screen, COL["grid_bg"], track, border_radius=5)
             ratio = TRADE_PAGE_H / (TRADE_PAGE_H + ms)
-            h = max(24, int(TRADE_PAGE_H * ratio))
-            pos = int((self.trade_scroll / ms) * (TRADE_PAGE_H - h))
-            pygame.draw.rect(screen, COL["accent"],
-                             (bar_x, self.trade_view_top + pos, 6, h), border_radius=3)
+            h = max(30, int(track.h * ratio))
+            pos = int((self.trade_scroll / ms) * (track.h - h))
+            handle = pygame.Rect(track.x, track.y + pos, track.w, h)
+            hover = handle.collidepoint(mx, my) or self.trade_drag
+            pygame.draw.rect(screen, COL["accent"] if hover else (120, 128, 142),
+                             handle, border_radius=5)
+            for i in range(3):     # 手柄上的三道纹,一眼能看出可以拖
+                yy = handle.centery - 6 + i * 6
+                pygame.draw.line(screen, (32, 36, 44),
+                                 (handle.x + 3, yy), (handle.right - 3, yy), 2)
+            self.trade_slider = (track, handle)
         t = get_font(14).render("买满弹药再进战局;搜刮到的贵重物拿回来卖钱",
                                 True, COL["text_dim"])
         screen.blit(t, (556, lay["trade_goods"].bottom - 34))

@@ -3242,7 +3242,8 @@ def run():
         c3 = scr.get_at(probe)
         assert sum(c3[:3]) < sum(c1[:3]), (sum(c3[:3]), sum(c1[:3]))
 
-        # 2) 搜刮读条:点一件搜一件,走完才进包;走远/关窗会中断
+        # 2) 搜刮:箱子里先是"未知"(只有形状),搜出来才知道是什么、东西还在箱子里;
+        #    取出已知物品才是进背包;走远/关窗会中断搜索
         g2 = Game()
         g2.save = save_mod.reset_data()
         g2.save.seen_intro = True
@@ -3255,32 +3256,58 @@ def run():
         p2.x, p2.y = lc.rect.centerx, lc.rect.centery + 10
         r2.loot_target = lc
         first = lc.container.items[0]
+        assert not r2.is_known(first), "没搜过的物品应该是未知"
         need = r2.loot_take_time(first.item)
         assert 0.8 - 1e-6 <= need <= LOOT_TAKE_MAX + 1e-6, need
         n0 = len(lc.container.items)
-        r2.start_take(lc, list(lc.container.items))
+        r2.start_take(lc, [first])
         assert r2.take is not None and r2.take["item"] is first
         r2.update(1 / 60, [])
-        assert first in lc.container.items, "读条没走完不该拿走东西"
-        for _ in range(int((LOOT_TAKE_MAX * n0 + 4) * 60)):
+        assert not r2.is_known(first), "读条没走完不该揭示"
+        for _ in range(int(6 * 60)):
             r2.update(1 / 60, [])
             if r2.take is None:
                 break
-        assert r2.take is None, "全部拿走应该在合理时间内搜完"
-        assert len(lc.container.items) < n0, "应该至少搜走一件"
-        rest = list(lc.container.items)
+        assert r2.take is None and r2.is_known(first), "搜完应该知道是什么了"
+        assert first in lc.container.items and len(lc.container.items) == n0, \
+            "搜出来只是揭示,东西还在箱子里"
+        # 取出已知物品 -> 进背包(空手时直接装备)
+        bag_n = len(p2.bag.items)
+        assert r2.take_known(lc, first)
+        assert first not in lc.container.items
+        assert (len(p2.bag.items) > bag_n or p2.weapon is not None
+                or p2.armor is not None or p2.helmet is not None)
+        # 中断:拿一件还没搜过的来试
+        rest = [pl for pl in lc.container.items if not r2.is_known(pl)]
         if rest:
             r2.start_take(lc, rest)
             assert r2.take is not None
             p2.x = lc.rect.centerx + INTERACT_DIST * 4        # 走远
             r2.update(1 / 60, [])
-            assert r2.take is None, "走远应该中断搜刮"
+            assert r2.take is None, "走远应该中断搜索"
             p2.x, p2.y = lc.rect.centerx, lc.rect.centery + 10
             r2.start_take(lc, rest)
             assert r2.take is not None
             r2.loot_target = None                              # 关窗
             r2.update(1 / 60, [])
-            assert r2.take is None, "关掉搜刮窗应该中断搜刮"
+            assert r2.take is None, "关掉搜刮窗应该中断搜索"
+            r2.loot_target = lc
+        # 「全部搜出」把剩下的未知全部搜一遍(逐件读条)
+        rest = [pl for pl in lc.container.items if not r2.is_known(pl)]
+        if rest:
+            r2.start_take(lc, rest)
+            for _ in range(int((LOOT_TAKE_MAX * len(rest) + 6) * 60)):
+                r2.update(1 / 60, [])
+                if r2.take is None:
+                    break
+            assert all(r2.is_known(pl) for pl in lc.container.items), "应该全部搜出来了"
+        # 全部已知:交给「全部拿走」的路径(这里直接调 take_known 逐件拿)
+        n_left = len(lc.container.items)
+        taken = 0
+        for pl in list(lc.container.items):
+            if r2.is_known(pl) and r2.take_known(lc, pl):
+                taken += 1
+        assert taken > 0 and len(lc.container.items) < n_left
 
         # 3) 打药读条:时长按治疗量,移动时进度减半
         p2.bag.clear()
@@ -3365,7 +3392,104 @@ def run():
         g2.draw(scr)
         r2.inv_open = False
 
-    check("手感-夜战亮区不闪/搜刮读条/打药读条/丢弃模式/换装落地", t_qol)
+        # 5) 移动速度:架枪(瞄准)剩 20%、换弹剩 40%、M139 换弹/架枪都不能动
+        from settings import MOVE_AIM_MUL, MOVE_RELOAD_MUL
+        g4 = Game()
+        g4.save = save_mod.reset_data()
+        g4.save.seen_intro = True
+        g4.save.weapon = Item.weapon("ak74", mag=30)
+        g4.save.bag.add_item(Item("a545", count=60))
+        g4.start_raid()
+        r4 = g4.raid
+        r4.scavs = []
+        p4 = r4.player
+        fake_press = [False, False, False]          # [左键, 中键, 右键]
+        orig_press = pygame.mouse.get_pressed
+        orig_keys = pygame.key.get_pressed
+        pygame.mouse.get_pressed = lambda *a: fake_press
+        pygame.key.get_pressed = lambda *a: {pygame.K_d: True}   # 一直往右推
+        try:
+            def walk_x(frames=10):
+                x0 = p4.x
+                for _ in range(frames):
+                    r4.update(1 / 60, [])
+                return p4.x - x0
+
+            base = walk_x()
+            assert base > 0.1, f"正常应该能走({base})"
+            fake_press[2] = True                    # 长按右键 = 架枪
+            aim = walk_x()
+            assert aim < base * (MOVE_AIM_MUL + 0.15), (base, aim)
+            fake_press[2] = False
+            p4.reloading = True                     # 换弹中
+            p4.reload_t = 99
+            rel = walk_x()
+            assert rel < base * (MOVE_RELOAD_MUL + 0.2), (base, rel)
+            p4.reloading = False
+            # M139:换弹或架枪都不能动
+            p4.weapon = Item.weapon("m139", mag=50)
+            p4.reloading = True
+            p4.reload_t = 99
+            assert walk_x() == 0, "M139 换弹时不能移动"
+            p4.reloading = False
+            fake_press[2] = True
+            r4.update(1 / 60, [])                   # 架枪状态在下一帧才生效
+            assert r4.braced, "应该处于架枪状态"
+            assert walk_x() == 0, "M139 架枪时不能移动"
+            fake_press[2] = False
+        finally:
+            pygame.mouse.get_pressed = orig_press
+            pygame.key.get_pressed = orig_keys
+
+        # 6) 交易所列表滚动条可以拖着走(以前列表超出格子看不见后面)
+        g5 = Game()
+        g5.save = save_mod.reset_data()
+        g5.save.seen_intro = True
+        h5 = g5.hideout
+        h5.show_intro = False
+        h5.view = "trade"
+        g5.draw(scr)
+        assert h5.trade_max_scroll() > 0, "商品列表应该长到需要滚动"
+        assert h5.trade_slider is not None, "应该画出滚动条"
+        track, handle = h5.trade_slider
+        assert track.w >= 10, "滚动条要够宽,能点得到"
+        assert h5.trade_scroll == 0
+        h5.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                                             pos=track.center)])
+        assert h5.trade_drag and h5.trade_scroll > 0, "点轨道中段应该跳到中间"
+        h5.update(1 / 60, [pygame.event.Event(pygame.MOUSEMOTION,
+                                             pos=(track.centerx, track.bottom),
+                                             rel=(0, 20), buttons=(1, 0, 0))])
+        assert abs(h5.trade_scroll - h5.trade_max_scroll()) < 1.0, h5.trade_scroll
+        g5.draw(scr)
+        h5.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONUP, button=1,
+                                             pos=(track.centerx, track.bottom))])
+        assert not h5.trade_drag
+        # 滚到底后,最后一行的商品落在可见范围内(点得到)
+        goods, per, row_h = h5.trade_rows()
+        r_last = h5.trade_row_rect(len(goods) - 1, per, row_h)
+        assert (h5.trade_view_top - row_h <= r_last.y
+                <= h5.trade_view_bottom), r_last
+
+        # 7) 枪械分类:每把枪都有分类,提示里也会标出来
+        from settings import ITEMS as _ITEMS, weapon_class as _wcls
+        import uikit as _uikit
+        weapons = [i for i, d in _ITEMS.items() if d["cat"] == "weapon"]
+        assert weapons
+        for iid in weapons:
+            assert _wcls(iid), f"{iid} 缺分类"
+        assert _wcls("ak74") == "突击步枪"
+        assert _wcls("mp5") == "冲锋枪"
+        assert _wcls("m700") == "狙击步枪"
+        assert _wcls("m139") == "轻机枪"
+        assert _wcls("mp133") == "霰弹枪"
+        assert _wcls("pm") == "手枪"
+        assert _wcls("rpg2") == "火箭筒"
+        assert _wcls("a9") is None, "子弹不是枪"
+        lines = _uikit.item_info_lines(Item.weapon("ak74", mag=30))
+        assert any("分类" in ln for ln in lines), lines
+
+    check("手感-搜索揭示/移动减速/滚动条/枪械分类", t_qol)
 
     ok = all(r[1] for r in results)
     report = ["Tarkov2D selftest " + ("PASS" if ok else "FAIL"), ""]

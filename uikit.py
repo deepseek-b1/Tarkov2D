@@ -4,7 +4,7 @@ import pygame
 
 from settings import (get_font, COL, fmt_rub, ITEMS, ATTACH_SLOTS,
                       weapon_params, weapon_capacity, weapon_ammo_ids,
-                      weapon_slots, weapon_attach, weapon_talent)
+                      weapon_slots, weapon_attach, weapon_talent, weapon_class)
 from inventory import Container, Placed
 
 CELL = 40  # 界面格子像素
@@ -167,6 +167,9 @@ def item_info_lines(item):
     w, h = item.base_size()
     sub = [f"{w}×{h} 格  {fmt_rub(d['price'])}"]
     if item.cat == "weapon":
+        cls = weapon_class(item.iid)
+        if cls:
+            sub.insert(0, f"分类: {cls}")
         dmg, pellets, hip, braced_s, rng, rl_t, _loud, burn = weapon_params(item)
         cap = weapon_capacity(item)
         sub.append(f"伤害 {dmg:.0f}×{pellets}  射速 {d['rof']}s  "

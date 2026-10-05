@@ -152,9 +152,13 @@ def loot_layout(cw, ch, bag_w=6, bag_h=4):
     panel = pygame.Rect(W // 2 - panel_w // 2, 140, panel_w, max(cont_h, bag_hp) + 150)
     src = (pygame.Rect(panel.x + 40, panel.y + 90, cont_w, cont_h), cell)
     dst = (pygame.Rect(src[0].right + 60, panel.y + 90, bag_wp, bag_hp), cell)
-    takeall = pygame.Rect(src[0].x, src[0].bottom + 14, cont_w, 36)
+    half = max(90, (cont_w - 8) // 2)
+    searchall = pygame.Rect(src[0].x, src[0].bottom + 14, half, 36)
+    takeall = pygame.Rect(src[0].x + half + 8, src[0].bottom + 14,
+                          max(90, cont_w - half - 8), 36)
     close = pygame.Rect(panel.right - 50, panel.y + 16, 34, 34)
-    return dict(panel=panel, src=src, dst=dst, takeall=takeall, close=close)
+    return dict(panel=panel, src=src, dst=dst, searchall=searchall,
+                takeall=takeall, close=close)
 
 
 def pause_layout():
@@ -1141,11 +1145,26 @@ def _draw_loot_window(raid, screen):
 
     src_rect, cell = lay["src"]
     draw_grid(screen, src_rect.x, src_rect.y, lc.container, cell)
+    # 没搜过的物品:盖一块灰板,只露出它占的形状(玩家搜出来才知道是什么)
+    unknown = [pl for pl in lc.container.items if not raid.is_known(pl)]
+    for pl in unknown:
+        iw, ih = pl.item.size()
+        r = pygame.Rect(src_rect.x + pl.x * cell, src_rect.y + pl.y * cell,
+                        iw * cell, ih * cell)
+        pygame.draw.rect(screen, (58, 62, 70), r)
+        pygame.draw.rect(screen, (94, 100, 112), r, 2)
+        q = get_font(20, bold=True).render("?", True, (150, 156, 168))
+        screen.blit(q, q.get_rect(center=r.center))
     dst_rect, cell2 = lay["dst"]
     draw_grid(screen, dst_rect.x, dst_rect.y, p.bag, cell2, "你的背包")
 
-    draw_button(screen, lay["takeall"], "全部拿走(逐件搜)",
-                hover=lay["takeall"].collidepoint(mx, my), small=True)
+    draw_button(screen, lay["searchall"], "全部搜出",
+                hover=lay["searchall"].collidepoint(mx, my), small=True)
+    n_known = sum(1 for pl in lc.container.items if raid.is_known(pl))
+    draw_button(screen, lay["takeall"],
+                f"全部拿走({n_known})" if n_known else "全部拿走",
+                hover=lay["takeall"].collidepoint(mx, my) and n_known > 0,
+                small=True)
     # 搜刮读条:正在搜的那件物品上画进度
     tk = getattr(raid, "take", None)
     if tk is not None and tk["lc"] is lc and tk["item"] in lc.container.items:
@@ -1168,7 +1187,11 @@ def _draw_loot_window(raid, screen):
             tq = get_font(13).render(f"队列中还有 {len(tk['queue'])} 件",
                                      True, COL["text_dim"])
             screen.blit(tq, (src_rect.x, src_rect.bottom + 12))
-    hint = ("左键物品:开始搜索(1~2 秒/件)     空武器/护甲槽时优先装备"
+    elif unknown:
+        tq = get_font(13).render(f"还有 {len(unknown)} 件没搜(点它开始搜索,"
+                                 f"1~2 秒/件)", True, COL["text_dim"])
+        screen.blit(tq, (src_rect.x, src_rect.bottom + 12))
+    hint = ("左键未知物品:搜索(1~2 秒)   左键已知物品:直接拿走   空手时武器/护甲会装备"
             if tk is None else "搜索中…走远或关窗会中断")
     t = get_font(14).render(hint, True, COL["text_dim"])
     screen.blit(t, (lay["panel"].x + 30, lay["panel"].bottom - 34))
@@ -1176,7 +1199,12 @@ def _draw_loot_window(raid, screen):
     h1 = grid_hit_px(lc.container, lay["src"], (mx, my))
     h2 = grid_hit_px(p.bag, lay["dst"], (mx, my))
     if h1 is not None:
-        draw_tooltip(screen, mx, my, h1.item)
+        if raid.is_known(h1):
+            draw_tooltip(screen, mx, my, h1.item)
+        else:
+            tt = get_font(14, bold=True).render("未知物品(点它搜索)", True,
+                                               (176, 182, 194))
+            screen.blit(tt, (mx + 14, my + 6))
     elif h2 is not None:
         draw_tooltip(screen, mx, my, h2.item)
 

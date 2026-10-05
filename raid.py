@@ -33,6 +33,7 @@ from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       weapon_params, weapon_capacity, weapon_ammo_ids,
                       weapon_slots, weapon_attach, weapon_blast_mul, ATTACH_SLOTS,
                       FOG_MOVE_STEP, FOG_VIS_REFRESH, FOG_VIS_RADIUS,
+                      MOVE_AIM_MUL, MOVE_RELOAD_MUL,
                       fmt_rub, get_font)
 import bindings
 from inventory import Item, try_move
@@ -420,6 +421,7 @@ class Raid:
         self.drop_mode = False   # 背包「丢弃模式」:手机没有右键,开着时点物品即丢
         self.take = None         # 搜刮读条:{lc, item, queue, t, need}
         self.heal_ch = None      # 打药读条:{placed, t, need}
+        self.searched = set()    # 已经搜出身份的物品(id(Placed));没搜过的是"未知"
         self.over = False
         self.result = None
         self.extract_t = 0.0
@@ -1224,9 +1226,18 @@ class Raid:
         t = LOOT_TAKE_TIME + LOOT_TAKE_PER_CELL * (w * h - 1)
         return max(LOOT_TAKE_MIN, min(LOOT_TAKE_MAX, t))
 
+    # ---------- 搜刮:未知 -> 搜索揭示 -> 取出 ----------
+    def mark_known(self, placed):
+        """标记这件东西已经知道是什么(自己丢的/放进去的/搜出来的)。"""
+        self.searched.add(id(placed))
+
+    def is_known(self, placed):
+        return id(placed) in self.searched
+
     def start_take(self, lc, items):
-        """开始逐件搜刮(1~2 秒一件);items = 箱子里的 Placed 列表(可排队)。"""
-        items = [x for x in items if lc is not None and x in lc.container.items]
+        """开始逐件搜索(1~2 秒一件);搜出来的只是"这是什么",东西还在箱子里。"""
+        items = [x for x in items if lc is not None and x in lc.container.items
+                 and not self.is_known(x)]
         if not items:
             return
         self.take = dict(lc=lc, item=items[0], queue=items[1:],
@@ -1239,8 +1250,43 @@ class Raid:
             if note:
                 self.add_toast(note, COL["text_dim"], 2.0)
 
+    def take_known(self, lc, placed):
+        """取出已经搜出来的东西(进背包;空手时武器/护甲/头盔直接装备)。"""
+        p = self.player
+        item = placed.item
+        if item.cat == "weapon" and p.weapon is None and armor_allows(p.armor, item.def_):
+            lc.container.remove_placed(placed)
+            p.weapon = item
+            p.reloading = False
+            p.reload_t = 0
+            self._log_gained(item)
+            audio.play("pickup")
+            self.add_toast(f"装备 {item.name}", COL["good"])
+            return True
+        if item.cat == "armor" and p.armor is None:
+            lc.container.remove_placed(placed)
+            p.armor = item
+            self._log_gained(item)
+            audio.play("pickup")
+            self.add_toast(f"装备 {item.name}", COL["good"])
+            return True
+        if item.cat == "helmet" and p.helmet is None:
+            lc.container.remove_placed(placed)
+            p.helmet = item
+            self._log_gained(item)
+            audio.play("pickup")
+            self.add_toast(f"装备 {item.name}", COL["good"])
+            return True
+        if try_move(lc.container, placed, p.bag):
+            self._log_gained(item)
+            audio.play("pickup")
+            self.add_toast(f"拿走 {item.name}", COL["good"], 2.0)
+            return True
+        self.add_toast("背包空间不足", COL["bad"], 3.0)
+        return False
+
     def _update_take(self, dt):
-        """搜刮读条:需要箱子还开着、物品还在、人没走远。"""
+        """搜索读条:需要箱子还开着、物品还在、人没走远;搜完 = 揭示身份。"""
         tk = self.take
         if tk is None or self.over:
             return
@@ -1251,41 +1297,18 @@ class Raid:
                  and math.hypot(lc.rect.centerx - p.x, lc.rect.centery - p.y)
                  <= INTERACT_DIST * 1.8)
         if not alive or self.loot_target is not lc:
-            self.cancel_take("搜刮中断")
+            self.cancel_take("搜索中断")
             return
         tk["t"] += dt
         if tk["t"] < tk["need"]:
             return
-        item = placed.item
         nxt = list(tk.get("queue") or [])
         self.take = None
-        if item.cat == "weapon" and p.weapon is None and armor_allows(p.armor, item.def_):
-            lc.container.remove_placed(placed)
-            p.weapon = item
-            p.reloading = False
-            p.reload_t = 0
-            self._log_gained(item)
-            audio.play("pickup")
-            self.add_toast(f"装备 {item.name}", COL["good"])
-        elif item.cat == "armor" and p.armor is None:
-            lc.container.remove_placed(placed)
-            p.armor = item
-            self._log_gained(item)
-            audio.play("pickup")
-            self.add_toast(f"装备 {item.name}", COL["good"])
-        elif item.cat == "helmet" and p.helmet is None:
-            lc.container.remove_placed(placed)
-            p.helmet = item
-            self._log_gained(item)
-            audio.play("pickup")
-            self.add_toast(f"装备 {item.name}", COL["good"])
-        elif try_move(lc.container, placed, p.bag):
-            self._log_gained(item)
-            audio.play("pickup")
-            self.add_toast(f"搜到 {item.name}", COL["good"], 2.0)
-        else:
-            self.add_toast("背包空间不足,搜刮停止", COL["bad"], 3.0)
-            return
+        self.mark_known(placed)
+        audio.play("pickup")
+        self.add_toast("搜出来了:" + placed.item.name
+                       + (f" ×{placed.item.count}" if placed.item.count > 1 else ""),
+                       COL["good"], 2.4)
         if nxt:
             self.start_take(lc, nxt)
 
@@ -1959,6 +1982,10 @@ class Raid:
         if created:
             self.containers.append(pile)
         self._unlog_gained(item)
+        for pl in pile.container.items:      # 自己丢的当然知道是什么
+            if pl.item is item:
+                self.mark_known(pl)
+                break
         return True
 
     def _stow_or_drop(self, old):
@@ -2220,16 +2247,25 @@ class Raid:
             vy = float(bindings.is_down(keys, sd, "down")
                        - bindings.is_down(keys, sd, "up"))
             walking = bindings.is_down(keys, sd, "walk")
-        immobile = (self.braced and p.weapon is not None
-                    and p.weapon.def_.get("braced_immobile"))
+        # 动作对移动的影响:架枪(瞄准)剩 20%;换弹剩 40%;
+        # 重武器(M139,braced_immobile)架枪或换弹时完全不能动
+        heavy = (p.weapon is not None
+                 and p.weapon.def_.get("braced_immobile"))
+        mul = 1.0
+        if self.braced:
+            mul = min(mul, MOVE_AIM_MUL)
+        if p.reloading:
+            mul = min(mul, MOVE_RELOAD_MUL)
+        immobile = heavy and (self.braced or p.reloading)
         moving = bool(vx or vy) and not immobile
         if moving:
             length = math.hypot(vx, vy)
-            spd = p.speed(walking)
+            spd = p.speed(walking) * mul
             scale = min(1.0, length)     # 摇杆推一半 = 半速
             dx = vx / length * spd * scale * dt
             dy = vy / length * spd * scale * dt
             p.x, p.y = self.map.move_circle((p.x, p.y), dx, dy, PLAYER["radius"])
+        self.move_mul = mul          # HUD 显示用(装填中/架枪中减速)
 
         # 瞄准:电脑用鼠标;手机自动锁敌(视野内最近的敌人,不用手动瞄准)
         if self.touch_mode:
@@ -2502,14 +2538,26 @@ class Raid:
             self.loot_target = None
             audio.play("click")
             return
-        if lay["takeall"].collidepoint(pos):
-            # 全部拿走 = 排队逐件搜(每件都要读条)
+        if lay["searchall"].collidepoint(pos):
+            # 全部搜出 = 排队逐件搜索(每件都要读条)
             self.start_take(lc, list(lc.container.items))
+            return
+        if lay["takeall"].collidepoint(pos):
+            # 全部拿走 = 只拿已经搜出来的(未知的先搜)
+            n = 0
+            for placed in list(lc.container.items):
+                if self.is_known(placed) and self.take_known(lc, placed):
+                    n += 1
+            if n == 0:
+                self.add_toast("这里还没有搜出来的东西(先点「全部搜出」)",
+                               COL["text_dim"], 2.6)
             return
         placed = raid_ui.grid_hit_px(lc.container, lay["src"], pos)
         if placed is not None:
-            # 点箱子里的东西 = 开始搜这一件(含大件 1~2 秒)
-            self.start_take(lc, [placed])
+            if self.is_known(placed):
+                self.take_known(lc, placed)      # 已知 = 直接拿走/装备
+            else:
+                self.start_take(lc, [placed])    # 未知 = 先搜(读条后才知道是什么)
             return
         placed = raid_ui.grid_hit_px(p.bag, lay["dst"], pos)
         if placed is not None:
@@ -2518,6 +2566,7 @@ class Raid:
                 return
             if try_move(p.bag, placed, lc.container):
                 self._unlog_gained(placed.item)   # 放回物品撤销搜刮记账
+                self.mark_known(placed)           # 自己放进去的当然认得
                 audio.play("click")
             else:
                 self.add_toast("放不进去", COL["bad"])
