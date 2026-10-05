@@ -65,11 +65,17 @@ class Scav:
             self.path = []
 
     def sees_player(self, raid, target=None):
-        """目标是否在视野内且视线通畅。target 已算过时直接传入,避免重复选目标。"""
+        """目标是否在视野内且视线通畅。target 已算过时直接传入,避免重复选目标。
+
+        目标是玩家时读 raid.fog_vis 缓存(refresh_fog 算好的对称视线,
+        半径大于任何视距),不再每帧每敌人打一条 DDA 射线。
+        """
         p = raid.threat_for(self) if target is None else target
         dist = math.hypot(p.x - self.x, p.y - self.y)
         if dist > self.d["view"]:
             return False
+        if p is raid.player:
+            return id(self) in raid.fog_vis
         return raid.map.los_clear(self.x, self.y, p.x, p.y)
 
     # ---- 移动 ----

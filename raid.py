@@ -32,11 +32,14 @@ from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       HQ_REACTION_COOLDOWN, REBUILD_RATE,
                       weapon_params, weapon_capacity, weapon_ammo_ids,
                       weapon_slots, weapon_attach, weapon_blast_mul, ATTACH_SLOTS,
+                      FOG_MOVE_STEP, FOG_VIS_REFRESH, FOG_VIS_RADIUS,
                       fmt_rub, get_font)
+import bindings
 from inventory import Item, try_move
 from world import GameMap, LootContainer
 from enemy import Scav
 from npc import Ally, Hostage
+import touch as touch_mod
 from touch import TouchUI
 
 
@@ -247,6 +250,8 @@ class Raid:
         self.map_key = map_key if map_key in MAPS else "border"
         self.boss_cfg = BOSSES.get(self.map_key)
         self.touch_mode = bool(getattr(game.save, "touch", False))
+        # 玩家自定义的触屏按键布局(设置页编辑)要在建 TouchUI 前生效
+        touch_mod.apply_layout(getattr(game.save, "touch_layout", None))
         self.touch = TouchUI(support=self.mode == "assault") if self.touch_mode else None
         self.aim_locked = None
         self.map = GameMap(self.map_key)
@@ -392,6 +397,7 @@ class Raid:
         self.inv_open = False
         self.loot_target = None
         self.paused = False
+        self._panels_was_open = False   # 触屏:弹窗开合沿(清理按住状态用)
         self.over = False
         self.result = None
         self.extract_t = 0.0
@@ -401,6 +407,53 @@ class Raid:
         self.revive_used = False  # 6级甲倒地自救(每局一次)
         self.warned = set()
         self._click_cd = 0.0
+        # 迷雾/可见性缓存(性能:见 refresh_fog;敌人 AI 与绘制都读它)
+        self.fog_polygon = None
+        self.fog_vis = set()
+        self.fog_px = -1e9
+        self.fog_py = -1e9
+        self.fog_t = 0.0
+        self.fog_version = 0
+        self._fog_drawn_ver = -1
+        self.refresh_fog(force=True)
+
+    def refresh_fog(self, dt=0.0, force=False):
+        """战争迷雾两级缓存(120fps 的关键)。
+
+        1) 视野多边形(140 条 DDA 射线)只在玩家移动超过 FOG_MOVE_STEP 时重算;
+        2) 可见敌人集合在(1)之外,最短每 FOG_VIS_REFRESH 秒也刷一次 ——
+           玩家站着不动时,敌人自己走进/走出视野也要能判定。
+        sees_player / threat_for / 绘制可见判定全部读 fog_vis,
+        把「每帧每个敌人一条 DDA 射线」彻底消灭掉。
+        """
+        p = self.player
+        if force:
+            do_poly = True
+        else:
+            self.fog_t += dt
+            moved = math.hypot(p.x - self.fog_px, p.y - self.fog_py) >= FOG_MOVE_STEP
+            do_poly = moved or self.fog_polygon is None
+            if not do_poly and self.fog_t < FOG_VIS_REFRESH:
+                return
+        if do_poly:
+            self.fog_polygon = self.map.visibility_polygon(p.x, p.y, 560)
+            self.fog_px, self.fog_py = p.x, p.y
+            self.fog_version += 1
+        vis = set()
+        r = FOG_VIS_RADIUS
+        px, py = p.x, p.y
+        los = self.map.los_clear
+        for s in self.scavs:
+            dx = s.x - px
+            if dx > r or dx < -r:
+                continue
+            dy = s.y - py
+            if dy > r or dy < -r:
+                continue
+            if los(px, py, s.x, s.y):
+                vis.add(id(s))
+        self.fog_vis = vis
+        self.fog_t = 0.0
 
     # ---------- 提示/粒子 ----------
     def add_toast(self, text, color=None, ttl=2.6):
@@ -665,9 +718,9 @@ class Raid:
         need = self.channel_need()
         d = math.hypot(ent.x - p.x, ent.y - p.y)
         keys = pygame.key.get_pressed()
-        moving = any(keys[k] for k in (pygame.K_w, pygame.K_a, pygame.K_s, pygame.K_d,
-                                       pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT,
-                                       pygame.K_RIGHT))
+        _sd = self.game.save
+        moving = any(bindings.is_down(keys, _sd, a)
+                     for a in ("up", "down", "left", "right"))
         if self.touch_mode and self.touch is not None:
             moving = moving or any(abs(v) > 0.1 for v in self.touch.move_axis())
         if d > INTERACT_RANGE * 1.6:
@@ -831,16 +884,26 @@ class Raid:
         self.emit_noise(x, y, 450)
 
     def threat_for(self, scav):
-        """拾荒者的当前目标:优先玩家;玩家不可见而被队友看得见时打队友。"""
+        """拾荒者的当前目标:优先玩家;玩家不可见而被队友看得见时打队友。
+
+        玩家可见性读 fog_vis 缓存(refresh_fog 算好的对称视线),
+        不再对每个敌人每帧打一条 DDA 射线。
+        """
         p = self.player
         if math.hypot(p.x - scav.x, p.y - scav.y) <= scav.d["view"] \
-                and self.map.los_clear(scav.x, scav.y, p.x, p.y):
+                and id(scav) in self.fog_vis:
             return p
         best, bd = None, scav.d["view"]
         for a in self.allies:
             if getattr(a, "downed", False):
                 continue
-            d = math.hypot(a.x - scav.x, a.y - scav.y)
+            dx = a.x - scav.x
+            if dx > bd or dx < -bd:
+                continue
+            dy = a.y - scav.y
+            if dy > bd or dy < -bd:
+                continue
+            d = math.hypot(dx, dy)
             if d < bd and self.map.los_clear(scav.x, scav.y, a.x, a.y):
                 best, bd = a, d
         return best if best is not None else p
@@ -1767,14 +1830,24 @@ class Raid:
         p = self.player
         self._click_cd = max(0.0, self._click_cd - dt)
 
-        # 结算页:任意键返回藏身处
+        # 结算页:任意键/任意触摸返回藏身处
         if self.over:
             for ev in events:
-                if ev.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
+                if ev.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN,
+                               pygame.FINGERDOWN):
                     self.game.to_hideout()
             return
 
         # 事件
+        sd = self.game.save
+        panels_open = (self.inv_open or self.loot_target is not None
+                       or self.ask_merge or self.paused)
+        if self.touch_mode and self.touch is not None:
+            # 弹窗刚打开的那一刻:清掉「按住」状态(FINGER 抬起收不到)。
+            # 注意别清 just_pressed —— 本帧的「再点一次背包=关闭」还要用它。
+            if panels_open and not self._panels_was_open:
+                self.touch.reset_hold()
+            self._panels_was_open = panels_open
         pending_edge = False
         for ev in events:
             # 对白面板优先吃掉输入(读完台词 -> 选项 -> 关闭)
@@ -1782,7 +1855,8 @@ class Raid:
                 if ev.type == pygame.KEYDOWN:
                     if ev.key == pygame.K_ESCAPE:
                         self.dialogue = None
-                    elif ev.key in (pygame.K_e, pygame.K_SPACE, pygame.K_RETURN):
+                    elif (bindings.key_matches(ev.key, sd, "interact")
+                          or ev.key in (pygame.K_SPACE, pygame.K_RETURN)):
                         self.dialogue_next()
                     elif ev.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4):
                         self.dialogue_choose({pygame.K_1: 0, pygame.K_2: 1,
@@ -1798,10 +1872,21 @@ class Raid:
                     if not hit:
                         self.dialogue_next()
                 continue
-            # 手机模式且没有弹窗时,触摸先交给虚拟摇杆/按钮
-            if self.touch_mode and not (self.inv_open or self.loot_target is not None
-                                        or self.ask_merge or self.paused):
-                if self.touch.handle_event(ev):
+            # 触屏模式:FINGER 交给虚拟摇杆/按钮;合成出来的鼠标镜像
+            # 只在弹窗打开时当点击用(战局操作已由 TouchUI 消费,避免双触发)
+            if self.touch_mode:
+                if ev.type in touch_mod.FINGER_EVENTS:
+                    if not panels_open:
+                        self.touch.handle_event(ev)
+                    continue
+                if getattr(ev, "synthetic", False):
+                    if not panels_open:
+                        continue
+                elif not panels_open and ev.type in (pygame.MOUSEBUTTONDOWN,
+                                                     pygame.MOUSEMOTION,
+                                                     pygame.MOUSEBUTTONUP):
+                    # 电脑上用 --touch 测试:真鼠标也走 TouchUI
+                    self.touch.handle_event(ev)
                     continue
             if ev.type == pygame.KEYDOWN:
                 if ev.key == pygame.K_ESCAPE:
@@ -1816,24 +1901,25 @@ class Raid:
                         self.paused = True
                 elif self.paused:
                     continue   # 暂停中其余按键不生效,防止"暂停+背包"死状态
-                elif ev.key == pygame.K_TAB:
+                elif bindings.key_matches(ev.key, sd, "bag"):
                     self.loot_target = None
                     self.ask_merge = False
                     self.inv_open = not self.inv_open
-                elif ev.key == pygame.K_e:
+                elif bindings.key_matches(ev.key, sd, "interact"):
                     self.interact()
-                elif ev.key == pygame.K_r:
+                elif bindings.key_matches(ev.key, sd, "reload"):
                     if not (self.inv_open or self.loot_target):
                         self.start_reload()
-                elif ev.key == pygame.K_h:
+                elif bindings.key_matches(ev.key, sd, "heal"):
                     if not (self.inv_open or self.loot_target):
                         self.quick_heal()
-                elif ev.key in (pygame.K_1, pygame.K_2, pygame.K_3) and self.mode == "assault":
-                    # 友军支援快捷呼叫:1 空袭 / 2 炮火覆盖 / 3 无人机侦察
-                    if not (self.inv_open or self.loot_target):
-                        idx = {pygame.K_1: 0, pygame.K_2: 1, pygame.K_3: 2}[ev.key]
-                        tx, ty = self._support_target()
-                        self.call_support(SUPPORT_ORDER[idx], tx, ty)
+                elif self.mode == "assault":
+                    for i, act in enumerate(("support1", "support2", "support3")):
+                        if bindings.key_matches(ev.key, sd, act) \
+                                and not (self.inv_open or self.loot_target):
+                            tx, ty = self._support_target()
+                            self.call_support(SUPPORT_ORDER[i], tx, ty)
+                            break
             elif ev.type == pygame.MOUSEBUTTONDOWN:
                 if self.paused:
                     self._handle_pause_click(ev.pos)
@@ -1870,11 +1956,11 @@ class Raid:
             walking = False
         else:
             keys = pygame.key.get_pressed()
-            vx = float((keys[pygame.K_d] or keys[pygame.K_RIGHT])
-                       - (keys[pygame.K_a] or keys[pygame.K_LEFT]))
-            vy = float((keys[pygame.K_s] or keys[pygame.K_DOWN])
-                       - (keys[pygame.K_w] or keys[pygame.K_UP]))
-            walking = keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]
+            vx = float(bindings.is_down(keys, sd, "right")
+                       - bindings.is_down(keys, sd, "left"))
+            vy = float(bindings.is_down(keys, sd, "down")
+                       - bindings.is_down(keys, sd, "up"))
+            walking = bindings.is_down(keys, sd, "walk")
         immobile = (self.braced and p.weapon is not None
                     and p.weapon.def_.get("braced_immobile"))
         moving = bool(vx or vy) and not immobile
@@ -1923,6 +2009,10 @@ class Raid:
                 elif name == "bag":
                     self.loot_target = None
                     self.inv_open = not self.inv_open
+                elif name == "menu":
+                    # 手机没有 ESC:虚拟按钮进/出暂停菜单
+                    self.paused = not self.paused
+                    audio.play("click")
                 elif name in ("sup1", "sup2", "sup3"):
                     idx = {"sup1": 0, "sup2": 1, "sup3": 2}[name]
                     tx, ty = self._support_target()
@@ -1984,6 +2074,9 @@ class Raid:
         else:
             self.extract_t = max(0.0, self.extract_t - dt * 3)
 
+        # 迷雾/可见性缓存刷新(敌人 AI 的 threat_for/sees_player 都读它)
+        self.refresh_fog(dt)
+
         # 实体
         for s in self.scavs:
             s.update(self, dt)
@@ -2003,12 +2096,14 @@ class Raid:
         self._update_story(dt)
         self._update_story_fx(dt)
         self._update_bullets(dt)
+        # 粒子:阻尼按 dt 折算(原来每帧 *0.9,120fps 下衰减快一倍)
+        damp = 0.9 ** (dt * 60.0)
         for pt in self.particles:
             pt["ttl"] -= dt
             pt["x"] += pt["dx"] * dt
             pt["y"] += pt["dy"] * dt
-            pt["dx"] *= 0.9
-            pt["dy"] *= 0.9
+            pt["dx"] *= damp
+            pt["dy"] *= damp
         self.particles = [pt for pt in self.particles if pt["ttl"] > 0]
         for t in self.toasts:
             t[1] -= dt

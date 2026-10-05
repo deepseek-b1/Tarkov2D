@@ -2623,6 +2623,362 @@ def run():
 
     check("剧情模式-城区大图/八时段/分支与结局", t_story)
 
+    def t_bindings():
+        """键位自定义:默认值 / 改键 / 冲突拒绝 / 存档往返 / 战局里生效。"""
+        import bindings
+        from game import Game
+        g = Game()
+        g.save = save_mod.reset_data()
+        sd = g.save
+        # 默认值:W 与 ↑ 都算"向上"
+        assert bindings.keys_for(sd, "up") == (pygame.K_w, pygame.K_UP)
+        assert bindings.label_for(sd, "interact") == "E"
+        assert bindings.label_for(sd, "bag") == "Tab"
+        assert bindings.key_matches(pygame.K_UP, sd, "up")
+        assert not bindings.key_matches(pygame.K_UP, sd, "down")
+        # 改键:交互改到 F
+        ok, conflicts = bindings.assign(sd, "interact", pygame.K_f)
+        assert ok and not conflicts
+        assert bindings.keys_for(sd, "interact") == (pygame.K_f,)
+        assert bindings.label_for(sd, "interact") == "F"
+        assert bindings.is_modified(sd, "interact")
+        # 冲突:交互改到 W(向上已占用)-> 拒绝且不改动
+        ok, conflicts = bindings.assign(sd, "interact", pygame.K_w)
+        assert not ok and "up" in conflicts, (ok, conflicts)
+        assert bindings.keys_for(sd, "interact") == (pygame.K_f,)
+        # 改绑后只认新键(默认的方向键备份被替换)
+        ok, _ = bindings.assign(sd, "up", pygame.K_i)
+        assert ok and bindings.keys_for(sd, "up") == (pygame.K_i,)
+        # 非法输入拒绝
+        assert bindings.assign(sd, "up", 0)[0] is False
+        assert bindings.assign(sd, "nope", pygame.K_i)[0] is False
+        # 存档往返
+        save_mod.save_data(sd)
+        sd2 = save_mod.load_data()
+        assert sd2.bindings.get("interact") == [pygame.K_f], sd2.bindings
+        assert sd2.bindings.get("up") == [pygame.K_i]
+        assert bindings.key_matches(pygame.K_f, sd2, "interact")
+        # 单键恢复默认 / 全部恢复
+        bindings.clear(sd2, "interact")
+        assert bindings.keys_for(sd2, "interact") == (pygame.K_e,)
+        bindings.reset_all(sd2)
+        assert not sd2.bindings
+        # is_down 支持 dict 式快照(自检里 get_pressed() 就是这种)
+        assert bindings.is_down({pygame.K_w: True}, sd2, "up") is True
+        assert bindings.is_down({pygame.K_w: True}, sd2, "down") is False
+        # 战局里生效:改键后按新键才触发
+        g2 = Game()
+        g2.save = save_mod.reset_data()
+        g2.save.seen_intro = True
+        g2.start_raid()
+        r = g2.raid
+        r.player.weapon = Item.weapon("pm", mag=8)
+        fired = []
+        r.quick_heal = lambda *a, **k: fired.append("heal")
+        g2.save.bindings = {"heal": [pygame.K_j]}
+        r.update(1 / 60, [pygame.event.Event(pygame.KEYDOWN, key=pygame.K_h)])
+        assert not fired, "旧键不该再生效"
+        r.update(1 / 60, [pygame.event.Event(pygame.KEYDOWN, key=pygame.K_j)])
+        assert fired == ["heal"], fired
+
+    check("设置-键位自定义/冲突拒绝/存档往返/战局生效", t_bindings)
+
+    def t_touch_layout():
+        """触屏按键位置自定义:覆盖生效 / 非法忽略 / 存档往返 / 开战局自动应用。"""
+        import touch
+        from game import Game
+        g = Game()
+        g.save = save_mod.reset_data()
+        sd = g.save
+        base = touch.merged_layout(False)
+        fire0 = base["fire"]["pos"]
+        assert fire0 == (int(1280 * 0.915), int(720 * 0.80))
+        assert "menu" in base, "手机需要一个「菜单」按钮来暂停"
+        # 应用覆盖(设置页保存下来的格式)
+        touch.apply_layout({"fire": [0.5, 0.5, 80], "menu": [0.1, 0.1, 24]})
+        lay = touch.merged_layout(False)
+        assert lay["fire"]["pos"] == (640, 360) and lay["fire"]["r"] == 80
+        assert lay["menu"]["pos"] == (128, 72) and lay["menu"]["r"] == 24
+        assert lay["bag"]["pos"] == base["bag"]["pos"], "没改的按键保持默认"
+        # 非法条目忽略
+        touch.apply_layout({"fire": [2.0, -1.0, 5], "bogus": [0.5, 0.5, 40]})
+        lay2 = touch.merged_layout(False)
+        assert lay2["fire"]["pos"] == fire0, "越界/过小的条目要忽略"
+        assert "bogus" not in lay2
+        # 命中判定(编辑器与 TouchUI 共用)
+        touch.apply_layout({"fire": [0.5, 0.5, 80]})
+        assert touch.hit_test((640, 360), False) == "fire"
+        assert touch.hit_test((5, 5), False) is None
+        # TouchUI 用的就是这份布局
+        ui = touch.TouchUI(support=True)
+        assert ui.button_layout()["fire"]["r"] == 80
+        assert {"sup1", "sup2", "sup3"} <= set(ui.button_layout())
+        # 存档往返
+        sd.touch_layout = {"fire": [0.5, 0.5, 80]}
+        save_mod.save_data(sd)
+        sd3 = save_mod.load_data()
+        assert sd3.touch_layout.get("fire") == [0.5, 0.5, 80], sd3.touch_layout
+        # 坏数据不会崩
+        sd3.touch_layout = {"x": "bad", "fire": [0.2, "y", 40]}
+        save_mod.save_data(sd3)
+        sd4 = save_mod.load_data()
+        assert "x" not in sd4.touch_layout and "fire" not in sd4.touch_layout
+        touch.apply_layout(None)
+        assert touch.merged_layout(False)["fire"]["pos"] == fire0, "恢复默认"
+        # 开战局时自动把存档里的布局应用上去
+        g5 = Game()
+        g5.save = save_mod.reset_data()
+        g5.save.seen_intro = True
+        g5.save.touch = True
+        g5.save.touch_layout = {"fire": [0.5, 0.5, 80]}
+        g5.start_raid()
+        assert g5.raid.touch.button_layout()["fire"]["pos"] == (640, 360)
+
+    check("设置-触屏按键位置自定义/存档/开战局应用", t_touch_layout)
+
+    def t_finger_mouse():
+        """触屏事件合成:手机上界面能点(修「第二次启动后点哪都没反应」)。"""
+        from game import Game, synth_mouse_events
+        evs = [
+            pygame.event.Event(pygame.FINGERDOWN,
+                               {"finger_id": 0, "x": 0.5, "y": 0.25}),
+            pygame.event.Event(pygame.FINGERMOTION,
+                               {"finger_id": 0, "x": 0.6, "y": 0.3,
+                                "dx": 0.1, "dy": 0.05}),
+            pygame.event.Event(pygame.FINGERUP,
+                               {"finger_id": 0, "x": 0.6, "y": 0.3}),
+        ]
+        out = synth_mouse_events(evs)
+        assert [e.type for e in out] == [
+            pygame.FINGERDOWN, pygame.MOUSEBUTTONDOWN, pygame.FINGERMOTION,
+            pygame.MOUSEMOTION, pygame.FINGERUP, pygame.MOUSEBUTTONUP], \
+            [e.type for e in out]
+        down = out[1]
+        assert down.pos == (int(1280 * 0.5), int(720 * 0.25)) and down.button == 1
+        assert getattr(down, "synthetic", False) is True
+        assert out[3].pos == (int(1280 * 0.6), int(720 * 0.3))
+        # 藏身处:真实 FINGER 点击路径能进设置页再返回
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        g.save.touch = True
+        h = g.hideout
+        h.show_intro = False
+        scr = pygame.display.set_mode((1280, 720))
+        g.draw(scr)
+        opt = h.lay["options"].center
+        g.update(1 / 60, [pygame.event.Event(
+            pygame.FINGERDOWN, {"finger_id": 0, "x": opt[0] / 1280.0,
+                                "y": opt[1] / 720.0})])
+        assert h.view == "options", h.view
+        g.draw(scr)
+        back = h.opt_close.center
+        g.update(1 / 60, [pygame.event.Event(
+            pygame.FINGERDOWN, {"finger_id": 0, "x": back[0] / 1280.0,
+                                "y": back[1] / 720.0})])
+        assert h.view == "stash", h.view
+        # 战局:合成的鼠标镜像不该让触屏按钮双触发
+        g2 = Game()
+        g2.save = save_mod.reset_data()
+        g2.save.seen_intro = True
+        g2.save.touch = True
+        g2.start_raid()
+        r = g2.raid
+        r.player.weapon = Item.weapon("pm", mag=8)
+        bx, by = r.touch.button_layout()["reload"]["pos"]
+        fires = []
+        r.start_reload = lambda *a, **k: fires.append(1)
+        g2.update(1 / 60, [pygame.event.Event(
+            pygame.FINGERDOWN, {"finger_id": 0, "x": bx / 1280.0,
+                                "y": by / 720.0})])
+        assert len(fires) == 1, f"合成鼠标让触屏按钮双触发了: {len(fires)}"
+
+    check("设置-触屏事件合成(FINGER→鼠标)/不双触发", t_finger_mouse)
+
+    def t_fog_cache():
+        """迷雾缓存:可见集与暴力重算一致 / 多边形按移动阈值重算 / 渲染不崩。"""
+        from game import Game
+        from settings import FOG_VIS_RADIUS
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        g.start_raid()
+        r = g.raid
+        p = r.player
+
+        def brute():
+            return {id(s) for s in r.scavs
+                    if abs(s.x - p.x) <= FOG_VIS_RADIUS
+                    and abs(s.y - p.y) <= FOG_VIS_RADIUS
+                    and r.map.los_clear(p.x, p.y, s.x, s.y)}
+
+        r.refresh_fog(force=True)
+        assert r.fog_polygon and len(r.fog_polygon) >= 3
+        assert r.fog_vis == brute(), (len(r.fog_vis), len(brute()))
+        ver0 = r.fog_version
+        # 小移动(<阈值):多边形不重算
+        p.x += 2.0
+        r.refresh_fog(1 / 120)
+        assert r.fog_version == ver0, "小移动不该重算视野多边形"
+        p.x -= 2.0
+        # 时间阈值:静止不动也会刷可见集
+        r.fog_t = 999.0
+        r.refresh_fog(0.016)
+        assert r.fog_t == 0.0
+        # 大移动:重算并推进版本
+        p.x += 40.0
+        r.refresh_fog(1 / 120)
+        assert r.fog_version == ver0 + 1, r.fog_version
+        assert r.fog_vis == brute()
+        # 敌人自己走进视野:可见集跟随(同点必可见)
+        for s in r.scavs[:5]:
+            s.x, s.y = p.x, p.y
+        r.refresh_fog(0.2)
+        assert all(id(s) in r.fog_vis for s in r.scavs[:5])
+        # 敌人 AI 读的就是这份缓存
+        far = [s for s in r.scavs[5:] if id(s) not in r.fog_vis]
+        if far:
+            assert far[0].sees_player(r, p) is False, "看不见的敌人不该说看见玩家"
+        # 渲染不崩(迷雾合成层按版本缓存)
+        scr = pygame.display.set_mode((1280, 720))
+        g.draw(scr)
+        p.x += 30.0
+        r.refresh_fog(1 / 60)
+        g.draw(scr)
+
+    check("性能-迷雾可见集缓存/阈值重算/渲染", t_fog_cache)
+
+    def t_options_view():
+        """设置页:标签切换 / 改键捕获 / 冲突拒绝 / 保存并应用 / 恢复默认 / 渲染。"""
+        import bindings as bmod
+        import touch as touch_mod
+        from game import Game
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        h = g.hideout
+        h.show_intro = False
+        scr = pygame.display.set_mode((1280, 720))
+
+        def click(pos):
+            h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN,
+                                                 button=1, pos=pos)])
+
+        def key(k):
+            h.update(1 / 60, [pygame.event.Event(pygame.KEYDOWN, key=k,
+                                                 unicode="")])
+        g.draw(scr)
+        click(h.lay["options"].center)
+        assert h.view == "options" and h.opt_tab == "controls", (h.view, h.opt_tab)
+        g.draw(scr)
+        # 三个标签页都能切换并渲染
+        for i, keyname in enumerate(h.opt_tab_keys):
+            click(h.opt_tab_rects[i].center)
+            assert h.opt_tab == keyname
+            g.draw(scr)
+        # 回控制页:点"交互"的键位按钮 -> 按 F
+        click(h.opt_tab_rects[0].center)
+        row = [i for i, (a, _n) in enumerate(bmod.ACTIONS) if a == "interact"][0]
+        click(h.opt_bind_rects[row].center)
+        assert h.opt_rebind == "interact"
+        g.draw(scr)
+        key(pygame.K_f)
+        assert h.opt_rebind is None
+        assert bmod.key_matches(pygame.K_f, g.save, "interact")
+        # 冲突键被拒绝,继续等新键
+        click(h.opt_bind_rects[row].center)
+        key(pygame.K_w)
+        assert h.opt_rebind == "interact", "冲突时应继续等待"
+        assert bmod.label_for(g.save, "interact") == "F"
+        key(pygame.K_ESCAPE)          # 取消改键
+        assert h.opt_rebind is None
+        assert h.view == "options", "ESC 取消改键不该退出设置页"
+        # 保存并应用 -> 落盘
+        click(h.opt_save.center)
+        sd2 = save_mod.load_data()
+        assert sd2.bindings.get("interact") == [pygame.K_f], sd2.bindings
+        # 恢复默认键位
+        click(h.opt_defaults.center)
+        assert not g.save.bindings
+        # 触屏页:拖动 + 改大小 + 保存
+        click(h.opt_tab_rects[1].center)
+        assert h.opt_tab == "touch" and "fire" in h.opt_layout
+        d0 = h.opt_layout["fire"]
+        fpos = (int(d0["rx"] * 1280), int(d0["ry"] * 720))
+        h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN,
+                                             button=1, pos=fpos)])
+        assert h.opt_sel == "fire" and h.opt_drag == "fire"
+        h.update(1 / 60, [pygame.event.Event(pygame.MOUSEMOTION, pos=(700, 400),
+                                             rel=(10, 5), buttons=(1, 0, 0))])
+        assert abs(h.opt_layout["fire"]["rx"] - 700 / 1280.0) < 1e-6
+        h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONUP,
+                                             button=1, pos=(700, 400))])
+        assert h.opt_drag is None
+        r0 = h.opt_layout["fire"]["r"]
+        click(h.opt_plus.center)
+        assert h.opt_layout["fire"]["r"] == r0 + 6
+        click(h.opt_minus.center)
+        assert h.opt_layout["fire"]["r"] == r0
+        g.draw(scr)
+        click(h.opt_save.center)
+        assert touch_mod.merged_layout(False)["fire"]["pos"] == (700, 400)
+        assert g.save.touch_layout.get("fire") == [
+            round(700 / 1280.0, 4), round(400 / 720.0, 4), r0], g.save.touch_layout
+        # 画质页:帧率上限 / FPS 开关 / 滤镜 / 恢复默认
+        click(h.opt_tab_rects[2].center)
+        g.draw(scr)
+        click(h.opt_fps_rects[0].center)
+        assert g.save.fps_cap == 60, g.save.fps_cap
+        click(h.opt_fps_rects[3].center)
+        assert g.save.fps_cap == 0
+        before_show = g.save.show_fps
+        click(h.opt_fps_toggle.center)
+        assert g.save.show_fps is (not before_show)
+        click(h.opt_filter_rects[1].center)
+        assert g.save.scale_filter == "nearest"
+        click(h.opt_defaults.center)
+        assert (g.save.fps_cap == 120 and g.save.show_fps
+                and g.save.scale_filter == "linear")
+        # 返回按钮
+        click(h.opt_close.center)
+        assert h.view == "stash"
+        # 手机(触屏)模式下设置页也能点:翻页按钮只在该模式画出来
+        g.save.touch = True
+        click(h.lay["options"].center)
+        assert h.view == "options"
+        g.draw(scr)
+        g.save.touch = False
+
+    check("设置-设置页交互/保存应用/恢复默认/渲染", t_options_view)
+
+    def t_scroll_buttons():
+        """手机翻页按钮:触屏模式下 ▲▼ 能翻仓库/商品/任务,电脑模式不出现。"""
+        from game import Game
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        g.save.touch = True
+        h = g.hideout
+        h.show_intro = False
+        scr = pygame.display.set_mode((1280, 720))
+        g.draw(scr)
+        up, dn = h._scroll_buttons()[("stash", 0)]
+        assert h.stash_max_scroll() > 0, "仓库比面板长,应该能翻"
+        before = h.stash_scroll
+        h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN,
+                                             button=1, pos=dn.center)])
+        assert h.stash_scroll == min(before + 40, h.stash_max_scroll())
+        h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN,
+                                             button=1, pos=up.center)])
+        assert h.stash_scroll == before
+        assert h._scroll_click(up.center) is True
+        # 电脑模式不显示也不响应
+        g.save.touch = False
+        assert h._scroll_click(dn.center) is False
+        g.draw(scr)
+
+    check("设置-手机翻页按钮(触屏模式)", t_scroll_buttons)
+
     ok = all(r[1] for r in results)
     report = ["Tarkov2D selftest " + ("PASS" if ok else "FAIL"), ""]
     for name, passed, err in results:

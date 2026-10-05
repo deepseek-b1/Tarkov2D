@@ -3,7 +3,7 @@
 import pygame
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.2.0"
+GAME_VERSION = "2.3.0"
 # 更新清单地址(可换成自建服务器 / GitHub raw;留空则只认 EXE 同目录的 version.json)
 UPDATE_MANIFEST_URL = "http://127.0.0.1:8765/version.json"
 UPDATE_TIMEOUT = 3   # 检查 / 下载超时(秒)
@@ -11,7 +11,16 @@ UPDATE_TIMEOUT = 3   # 检查 / 下载超时(秒)
 # ---------- 基础常量 ----------
 W, H = 1280, 720
 FPS = 60
+# 帧率上限可选项(设置页循环切换;0 = 不限)。游戏实际用存档里的 fps_cap。
+FPS_CAP_CHOICES = [60, 90, 120, 0]
 TILE = 32
+# 战争迷雾/可见性缓存(性能关键,见 raid.refresh_fog):
+# 玩家移动超过 FOG_MOVE_STEP 像素才重算视野多边形;
+# 可见敌人集合最短每 FOG_VIS_REFRESH 秒刷一次(兜住敌人自己走动);
+# 集合计算半径 FOG_VIS_RADIUS 要大于最大视距(620)。
+FOG_MOVE_STEP = 6.0
+FOG_VIS_REFRESH = 0.10
+FOG_VIS_RADIUS = 840
 RAID_TIME = 12 * 60          # 战局时长(秒)
 EXTRACT_TIME = 3.0           # 撤离引导(秒)
 INTERACT_DIST = 56           # 搜刮交互距离(像素)

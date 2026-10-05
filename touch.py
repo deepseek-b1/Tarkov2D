@@ -2,6 +2,8 @@
 """手机(触屏)操作层:左半屏虚拟摇杆移动 + 右侧按钮,配合自动锁敌。
 
 同时接受 FINGER*(真触屏,可多指)与鼠标事件(电脑上也能用手机模式测试)。
+按钮位置支持玩家自定义(sd.touch_layout,在藏身处「设置-触屏」里拖拽调整),
+覆盖数据是 [x比例, y比例, 半径]。
 """
 import math
 
@@ -17,6 +19,7 @@ BUTTONS = [
     ("heal", "打药", (0.915, 0.615), 42),
     ("loot", "搜刮", (0.835, 0.50), 42),
     ("bag", "背包", (0.955, 0.44), 40),
+    ("menu", "菜单", (0.955, 0.07), 30),
 ]
 
 # 突袭模式追加:友军支援快捷按钮(1 空袭 / 2 炮火覆盖 / 3 无人机侦察)
@@ -25,6 +28,78 @@ SUPPORT_BUTTONS = [
     ("sup2", "炮火", (0.655, 0.315), 34),
     ("sup3", "侦察", (0.735, 0.245), 34),
 ]
+
+# 玩家自定义布局(设置页编辑;Raid 启动时从存档 apply_layout 进来)
+_layout_overrides = {}
+
+
+def apply_layout(ov):
+    """应用玩家自定义布局(sd.touch_layout)。非法条目直接忽略。"""
+    global _layout_overrides
+    clean = {}
+    if isinstance(ov, dict):
+        for name, v in ov.items():
+            try:
+                rx, ry, r = float(v[0]), float(v[1]), float(v[2])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if 0.0 <= rx <= 1.0 and 0.0 <= ry <= 1.0 and 18 <= r <= 120:
+                clean[str(name)] = (rx, ry, int(r))
+    _layout_overrides = clean
+
+
+def layout_overrides():
+    return _layout_overrides
+
+
+# 触屏事件类型(不同版本暴露的常量不一样:pygame 有 FINGERDOWN/MOTION/UP,
+# SDL 的 FINGERCANCEL 不一定有 —— 直接写 pygame.FINGERCANCEL 会 AttributeError)
+FINGER_EVENTS = tuple(
+    getattr(pygame, name) for name in
+    ("FINGERDOWN", "FINGERMOTION", "FINGERUP", "FINGERCANCEL")
+    if hasattr(pygame, name))
+
+
+def merged_layout(support=False):
+    """默认布局 + 玩家覆盖 -> {name: dict(label, pos, r)}(设置页编辑器也用它)。"""
+    src = BUTTONS + SUPPORT_BUTTONS if support else BUTTONS
+    out = {}
+    for name, label, (rx, ry), r in src:
+        ov = _layout_overrides.get(name)
+        if ov is not None:
+            rx, ry, r = ov
+        out[name] = dict(label=label, pos=(int(W * rx), int(H * ry)), r=r)
+    return out
+
+
+def hit_test(pos, support=False):
+    """屏幕坐标 -> 按钮名(编辑器与 TouchUI 共用的命中判定)。"""
+    for name, d in merged_layout(support).items():
+        if math.hypot(pos[0] - d["pos"][0], pos[1] - d["pos"][1]) <= d["r"]:
+            return name
+    return None
+
+
+# 按钮贴图缓存:底色/描边/文字都不依赖每帧状态,只有 (文字, 半径, 按下) 三种变化
+_button_cache = {}
+
+
+def _button_sprite(label, r, down):
+    key = (label, r, bool(down))
+    s = _button_cache.get(key)
+    if s is None:
+        d = r * 2 + 8
+        s = pygame.Surface((d, d), pygame.SRCALPHA)
+        base = (72, 92, 120) if down else (40, 46, 58)
+        border = COL["accent"] if down else (96, 104, 118)
+        pygame.draw.circle(s, base, (d // 2, d // 2), r)
+        pygame.draw.circle(s, border, (d // 2, d // 2), r, 3)
+        t = get_font(16, bold=True).render(label, True, COL["text"])
+        s.blit(t, t.get_rect(center=(d // 2, d // 2)))
+        if len(_button_cache) > 160:
+            _button_cache.clear()
+        _button_cache[key] = s
+    return s
 
 
 class TouchUI:
@@ -44,16 +119,10 @@ class TouchUI:
         return BUTTONS + SUPPORT_BUTTONS if self.support else BUTTONS
 
     def button_layout(self):
-        out = {}
-        for name, label, (rx, ry), r in self.buttons():
-            out[name] = dict(label=label, pos=(int(W * rx), int(H * ry)), r=r)
-        return out
+        return merged_layout(self.support)
 
     def _hit_button(self, pos):
-        for name, d in self.button_layout().items():
-            if math.hypot(pos[0] - d["pos"][0], pos[1] - d["pos"][1]) <= d["r"]:
-                return name
-        return None
+        return hit_test(pos, self.support)
 
     # ---------- 事件 ----------
     def handle_event(self, ev):
@@ -111,6 +180,23 @@ class TouchUI:
             self.stick_id = None
             self.stick_vec = (0.0, 0.0)
 
+    def reset_hold(self):
+        """清掉「按住」类状态(摇杆 + 按住的按钮),但保留本帧的点按队列。
+
+        打开背包/暂停等界面弹窗时调用:弹窗期间 FINGER 事件不再喂给 TouchUI,
+        手指抬起收不到,残留的「按住开火」会在关掉弹窗后继续开火。
+        """
+        if self.touches or self.pressed or self.stick_id is not None:
+            self.touches.clear()
+            self.pressed.clear()
+            self.stick_id = None
+            self.stick_vec = (0.0, 0.0)
+
+    def reset(self):
+        """清空全部触摸状态(含本帧点按队列)。"""
+        self.reset_hold()
+        self.just_pressed = []
+
     # ---------- 查询 ----------
     def hold(self, name):
         return any(v == name for v in self.pressed.values())
@@ -148,13 +234,9 @@ class TouchUI:
             pygame.draw.circle(screen, (70, 76, 90), (bx, by), 26, 2)
             t = get_font(14).render("拖动移动", True, (120, 128, 140))
             screen.blit(t, t.get_rect(center=(bx, by + TOUCH["stick_radius"] + 16)))
-        # 按钮
-        f = get_font(16, bold=True)
+        # 按钮:整块按钮(底圆 + 描边 + 文字)预渲染成贴图,每帧只 blit 一次。
+        # 原来是每帧每个按钮 2 次 circle + 1 次文字 blit(手机 8 个按钮就是 24 次)。
         for name, d in self.button_layout().items():
-            down = self.hold(name)
-            base = (72, 92, 120) if down else (40, 46, 58)
-            border = COL["accent"] if down else (96, 104, 118)
-            pygame.draw.circle(screen, base, d["pos"], d["r"])
-            pygame.draw.circle(screen, border, d["pos"], d["r"], 3)
-            t = f.render(d["label"], True, COL["text"])
-            screen.blit(t, t.get_rect(center=(d["pos"][0], d["pos"][1])))
+            s = _button_sprite(d["label"], d["r"], self.hold(name))
+            screen.blit(s, (d["pos"][0] - s.get_width() // 2,
+                            d["pos"][1] - s.get_height() // 2))

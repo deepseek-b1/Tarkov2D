@@ -4,11 +4,43 @@ import pygame
 
 import assault
 import audio
+import bindings
 import quests
 import save as save_mod
 import story as story_mod
 import raid_ui
 from hideout import Hideout
+from settings import W, H
+
+
+def synth_mouse_events(events):
+    """触屏模式:把 FINGER* 事件额外合成一份鼠标事件(带 synthetic 标记)。
+
+    main 在触屏模式关掉了 SDL 的触摸→鼠标合成(SDL_TOUCH_MOUSE_EVENTS=0,
+    不然虚拟摇杆会和界面点击双触发),但藏身处/背包/搜刮/暂停面板全是
+    鼠标点击驱动的 —— 这里按需合成,让触屏能点所有界面。
+
+    被标记 synthetic 的鼠标事件在战局操作里会被忽略(战局由 TouchUI
+    消费原始 FINGER 事件),只在界面弹窗打开时才当点击用。
+    """
+    out = []
+    for ev in events:
+        out.append(ev)
+        t = ev.type
+        if t == pygame.FINGERDOWN:
+            out.append(pygame.event.Event(pygame.MOUSEBUTTONDOWN,
+                                          pos=(ev.x * W, ev.y * H), button=1,
+                                          synthetic=True))
+        elif t == pygame.FINGERMOTION:
+            out.append(pygame.event.Event(pygame.MOUSEMOTION,
+                                          pos=(ev.x * W, ev.y * H),
+                                          rel=(ev.dx * W, ev.dy * H),
+                                          buttons=(1, 0, 0), synthetic=True))
+        elif t == pygame.FINGERUP or t == getattr(pygame, "FINGERCANCEL", -1):
+            out.append(pygame.event.Event(pygame.MOUSEBUTTONUP,
+                                          pos=(ev.x * W, ev.y * H), button=1,
+                                          synthetic=True))
+    return out
 
 
 class Game:
@@ -26,6 +58,8 @@ class Game:
         self.story_issued = []
 
     def update(self, dt, events):
+        if self.save.touch:
+            events = synth_mouse_events(events)
         for ev in events:
             if ev.type == pygame.QUIT:
                 self.request_quit()

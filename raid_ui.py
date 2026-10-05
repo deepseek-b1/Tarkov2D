@@ -5,6 +5,7 @@ import math
 import pygame
 
 import audio
+import bindings
 from settings import (W, H, COL, BAG_W, BAG_H, RAID_TIME, EXTRACT_TIME,
                       HOSTAGE_RESCUE_TIME, REVIVE_TIME, C4_BLAST_RADIUS,
                       PLAYER, fmt_rub, get_font)
@@ -79,6 +80,23 @@ def _particle_sprite(color, radius, alpha):
         if len(_particle_cache) > 256:
             _particle_cache.clear()
         _particle_cache[key] = s
+    return s
+
+
+# HUD 小面板背景:按尺寸复用表面(每帧十几个 Surface 分配是白扔的性能),
+# 内容透明度每帧都可能变,所以 fill 每次都做,只省掉创建
+_hudbg_cache = {}
+
+
+def _hud_bg(w, h, rgba):
+    key = (int(w), int(h))
+    s = _hudbg_cache.get(key)
+    if s is None:
+        if len(_hudbg_cache) > 96:
+            _hudbg_cache.clear()
+        s = pygame.Surface(key, pygame.SRCALPHA)
+        _hudbg_cache[key] = s
+    s.fill(rgba)
     return s
 
 
@@ -354,8 +372,7 @@ def draw_raid(raid, screen):
         for f in getattr(raid, "floaters", []):
             a = max(0.0, 1.0 - f["t"] / f["dur"])
             txt = get_font(16, bold=True).render(f["text"], True, f["col"])
-            bg = pygame.Surface((txt.get_width() + 14, 24), pygame.SRCALPHA)
-            bg.fill((10, 12, 14, int(190 * a)))
+            bg = _hud_bg(txt.get_width() + 14, 24, (10, 12, 14, int(190 * a)))
             fx, fy = f["x"] + ox, f["y"] + oy - int(f["t"] * 22)
             screen.blit(bg, (fx - bg.get_width() // 2, fy))
             screen.blit(txt, txt.get_rect(center=(fx, fy + 12)))
@@ -366,8 +383,7 @@ def draw_raid(raid, screen):
             a = min(1.0, sub["t"] / 1.2)
             txt = get_font(18, bold=True).render(sub["text"], True, (238, 240, 246))
             bw = min(W - 120, txt.get_width() + 40)
-            bar = pygame.Surface((bw, 40), pygame.SRCALPHA)
-            bar.fill((8, 10, 12, int(210 * a)))
+            bar = _hud_bg(bw, 40, (8, 10, 12, int(210 * a)))
             screen.blit(bar, (W // 2 - bw // 2, H - 150))
             screen.blit(txt, txt.get_rect(center=(W // 2, H - 130)))
             t2 = get_font(13, bold=True).render("▶ 录音", True,
@@ -390,12 +406,16 @@ def draw_raid(raid, screen):
         t = get_font(14, bold=True).render(f"{label} {max(0.0, st['t']):.1f}s", True, col)
         screen.blit(t, t.get_rect(center=(sx, sy - rad - 12)))
 
-    # 拾荒者(仅玩家视线内可见;无人机侦察期间全图标记)
+    # 拾荒者(仅玩家视线内可见;无人机侦察期间全图标记)。
+    # 可见判定读 raid.fog_vis 缓存(不再每帧每敌人一条射线),先裁掉屏外的。
     recon = getattr(raid, "recon_t", 0.0) > 0
+    vis = raid.fog_vis
     for s in raid.scavs:
-        if not recon and not raid.map.los_clear(p.x, p.y, s.x, s.y):
+        if not recon and id(s) not in vis:
             continue
         x, y = s.x + ox, s.y + oy
+        if x < -50 or x > W + 50 or y < -50 or y > H + 50:
+            continue
         if recon:
             pygame.draw.circle(screen, (90, 200, 220), (int(x), int(y)), s.r + 5, 1)
         body = COL["scav"] if s.hit_flash <= 0 else (255, 200, 180)
@@ -457,12 +477,16 @@ def draw_raid(raid, screen):
         pygame.draw.circle(screen, (255, 60, 50), (int(px), int(py)),
                            PLAYER["radius"] + 6, 2)
 
-    # 战争迷雾(乘性压暗,见文件头的 _darken_layer 说明)
+    # 战争迷雾(乘性压暗,见文件头的 _darken_layer 说明)。
+    # 多边形与合成层都按 raid.fog_version 缓存(raid.refresh_fog 只在玩家
+    # 移动时才重算),平时每帧只剩一次 MULT blit。
     fog = _darken_layer("fog", (W, H), COL["fog"])
-    pts = raid.map.visibility_polygon(p.x, p.y, 560)
-    pts = [(x - raid.cam[0], y - raid.cam[1]) for x, y in pts]
-    if len(pts) >= 3:
-        pygame.draw.polygon(fog, (255, 255, 255), pts)
+    if raid._fog_drawn_ver != raid.fog_version:
+        raid._fog_drawn_ver = raid.fog_version
+        pts = [(x - raid.cam[0], y - raid.cam[1])
+               for x, y in (raid.fog_polygon or ())]
+        if len(pts) >= 3:
+            pygame.draw.polygon(fog, (255, 255, 255), pts)
     screen.blit(fog, (0, 0), special_flags=pygame.BLEND_RGB_MULT)
 
     # 受击红屏(保持原来的红色蒙版观感:
@@ -557,10 +581,10 @@ def draw_raid(raid, screen):
 
 def _draw_dialogue(raid, screen):
     """对白面板:说话人名字牌 + 台词 + 分支选项(没有立绘,只有名字)。"""
+    import bindings
     d = raid.dialogue
     panel = pygame.Rect(W // 2 - 460, H - 300, 920, 210)
-    dark = pygame.Surface((W, H), pygame.SRCALPHA)
-    dark.fill((0, 0, 0, 90))
+    dark = _overlay("dlg_dark", (W, H), (0, 0, 0, 90))
     screen.blit(dark, (0, 0))
     uikit.draw_panel(screen, panel, None)
     # 名字牌
@@ -579,12 +603,13 @@ def _draw_dialogue(raid, screen):
         screen.blit(t, (panel.x + 30, y))
         y += 30
     mx, my = pygame.mouse.get_pos()
+    next_tip = "点击 / 按 %s 继续" % bindings.label_for(raid.game.save, "interact")
     if d["reply"] is not None:
-        t = get_font(16, bold=True).render("点击 / 按 E 继续", True, COL["text_dim"])
+        t = get_font(16, bold=True).render(next_tip, True, COL["text_dim"])
         screen.blit(t, (panel.right - t.get_width() - 26, panel.bottom - 34))
         return
     if d["idx"] < len(d["lines"]) - 1:
-        t = get_font(16, bold=True).render("点击 / 按 E 继续", True, COL["text_dim"])
+        t = get_font(16, bold=True).render(next_tip, True, COL["text_dim"])
         screen.blit(t, (panel.right - t.get_width() - 26, panel.bottom - 34))
         return
     if d["choices"]:
@@ -602,7 +627,9 @@ def _draw_dialogue(raid, screen):
                                      COL["accent"] if hover else COL["text"])
             screen.blit(ft, (r.x + 10, r.y + 4))
     else:
-        t = get_font(16, bold=True).render("点击 / 按 E 结束对话", True, COL["text_dim"])
+        t = get_font(16, bold=True).render(
+            "点击 / 按 %s 结束对话" % bindings.label_for(raid.game.save, "interact"),
+            True, COL["text_dim"])
         screen.blit(t, (panel.right - t.get_width() - 26, panel.bottom - 34))
 
 
@@ -671,9 +698,11 @@ def _draw_hud(raid, screen):
             else COL["good"]
         t = get_font(13).render(txt, True, col)
         screen.blit(t, (26, H - 40))
-    # 快捷打药提示(血量过半以下且有医疗品时显示)
+    # 快捷打药提示(血量过半以下且有医疗品时显示;键名跟玩家改键走)
     if p.hp < p.max_hp * 0.5 and any(pl.item.cat == "med" for pl in p.bag.items):
-        t = get_font(14, bold=True).render("按 H 快捷打药", True, COL["good"])
+        t = get_font(14, bold=True).render(
+            "按 %s 快捷打药" % bindings.label_for(raid.game.save, "heal"),
+            True, COL["good"])
         screen.blit(t, (26, H - 92))
 
     # 武器/弹药
@@ -719,8 +748,7 @@ def _draw_hud(raid, screen):
         alive = sum(1 for a in raid.allies if not a.downed)
         info = f"人质 {done}/{len(raid.hostages)}    队友 {alive}/{len(raid.allies)}"
         t = get_font(18, bold=True).render(info, True, COL["accent"])
-        bg = pygame.Surface((t.get_width() + 20, 32), pygame.SRCALPHA)
-        bg.fill((10, 12, 14, 175))
+        bg = _hud_bg(t.get_width() + 20, 32, (10, 12, 14, 175))
         screen.blit(bg, (20, 16))
         screen.blit(t, (30, 22))
 
@@ -732,8 +760,7 @@ def _draw_hud(raid, screen):
                 f"守军 {len(raid.scavs)}   队友 {alive}/{len(raid.allies)}")
         t = get_font(18, bold=True).render(
             info, True, COL["good"] if done >= len(raid.objectives) else COL["accent"])
-        bg = pygame.Surface((t.get_width() + 20, 32), pygame.SRCALPHA)
-        bg.fill((10, 12, 14, 175))
+        bg = _hud_bg(t.get_width() + 20, 32, (10, 12, 14, 175))
         screen.blit(bg, (20, 16))
         screen.blit(t, (30, 22))
         h = _draw_reinf_line(raid, screen, 20, 50)
@@ -763,8 +790,7 @@ def _draw_hud(raid, screen):
         f = get_font(15)
         w = max(f.size(ln)[0] for ln in lines) + 24
         bh = 22 * len(lines) + 12
-        bg = pygame.Surface((w, bh), pygame.SRCALPHA)
-        bg.fill((10, 12, 14, 180))
+        bg = _hud_bg(w, bh, (10, 12, 14, 180))
         screen.blit(bg, (20, 96))
         yy = 102
         for i, ln in enumerate(lines):
@@ -774,9 +800,10 @@ def _draw_hud(raid, screen):
             screen.blit(t, (32, yy))
             yy += 22
 
-    # 提示
+    # 提示(交互键名跟玩家改键走)
     if not (raid.inv_open or raid.loot_target or raid.paused or raid.over):
         prompt = None
+        ik = bindings.label_for(raid.game.save, "interact")
         for name, r in raid.map.extracts:
             if r.collidepoint(raid.player.x, raid.player.y):
                 prompt = ("撤离区:保持不动完成撤离" if raid.allows_extract()
@@ -789,43 +816,41 @@ def _draw_hud(raid, screen):
         if prompt is None and raid.mode in ("hostage", "assault", "story"):
             kind, _ent = raid.nearest_interactable()
             if kind == "rescue":
-                prompt = "E  解救人质"
+                prompt = f"{ik}  解救人质"
             elif kind == "revive":
-                prompt = "E  拉起队友"
+                prompt = f"{ik}  拉起队友"
             elif kind == "destroy":
-                prompt = "E  安放炸药(摧毁设施)"
+                prompt = f"{ik}  安放炸药(摧毁设施)"
             elif kind == "supply":
-                prompt = "E  补充弹药(弹药库)"
+                prompt = f"{ik}  补充弹药(弹药库)"
             elif kind == "story":
                 o = _ent.obj
                 if o is None or o["kind"] == "talk":
-                    prompt = f"E  与 {_ent.name} 交谈"
+                    prompt = f"{ik}  与 {_ent.name} 交谈"
                 elif o["kind"] == "kill":
-                    prompt = f"E  {o['name']}(先清掉守军)"
+                    prompt = f"{ik}  {o['name']}(先清掉守军)"
                 elif o["kind"] == "download":
-                    prompt = f"E  下载:{o['name']}"
+                    prompt = f"{ik}  下载:{o['name']}"
                 elif o["kind"] == "take":
-                    prompt = f"E  取得:{o['name']}"
+                    prompt = f"{ik}  取得:{o['name']}"
                 else:
-                    prompt = f"E  {o['name']}"
+                    prompt = f"{ik}  {o['name']}"
         if prompt is None:
             lc = raid.nearest_container()
             if lc is not None:
-                prompt = f"E  搜刮 {lc.name}"
+                prompt = f"{ik}  搜刮 {lc.name}"
         if prompt:
             t = get_font(17, bold=True).render(prompt, True, COL["accent"])
-            bg = pygame.Surface((t.get_width() + 20, 30), pygame.SRCALPHA)
-            bg.fill((10, 10, 12, 170))
+            bg = _hud_bg(t.get_width() + 20, 30, (10, 10, 12, 170))
             screen.blit(bg, (W // 2 - bg.get_width() // 2, H - 120))
-            screen.blit(t, t.get_rect(center=(W // 2, H - 105)))
+            screen.blit(t, (W // 2 - t.get_width() // 2, H - 105))
 
     # 通知
     y = 56
     for text, ttl, maxttl, color in raid.toasts:
         a = min(1.0, ttl / 0.4)
         t = get_font(15, bold=True).render(text, True, color)
-        surf = pygame.Surface((t.get_width() + 14, 24), pygame.SRCALPHA)
-        surf.fill((12, 13, 16, int(180 * a)))
+        surf = _hud_bg(t.get_width() + 14, 24, (12, 13, 16, int(180 * a)))
         screen.blit(surf, (W // 2 - surf.get_width() // 2, y))
         screen.blit(t, (W // 2 - t.get_width() // 2, y + 4))
         y += 28

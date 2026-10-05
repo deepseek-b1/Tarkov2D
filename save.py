@@ -41,6 +41,12 @@ class SaveData:
         self.tasks = {}        # 教官任务进度:{task_id: 已累计数量}
         self.tasks_done = []   # 已领取的一次性任务 id(可重复任务不记这里)
         self.story = None      # 剧情模式《灰区二日》进度(story.py 维护)
+        # ---- 设置(bindings.py / touch.py / main.py 用) ----
+        self.bindings = {}        # 键位覆盖:{action: [键码]}(只记玩家改过的)
+        self.touch_layout = {}    # 触屏按键位置覆盖:{name: [rx, ry, r]}
+        self.fps_cap = 120        # 帧率上限(0 = 不限)
+        self.show_fps = True      # 画面右上角显示帧率
+        self.scale_filter = "linear"   # 全屏缩放滤镜:linear 柔和 / nearest 锐利
 
     def apply_pack(self):
         """按当前背包调整出战背包容量(先尽量扩容,收窄时放不下的退回仓库)。"""
@@ -108,6 +114,11 @@ class SaveData:
             "tasks": dict(self.tasks),
             "tasks_done": list(self.tasks_done),
             "story": self.story,
+            "bindings": dict(self.bindings),
+            "touch_layout": {k: list(v) for k, v in self.touch_layout.items()},
+            "fps_cap": int(self.fps_cap),
+            "show_fps": bool(self.show_fps),
+            "scale_filter": str(self.scale_filter),
         }
 
     @staticmethod
@@ -155,6 +166,32 @@ class SaveData:
         sd.tasks_done = [str(t) for t in done]
         story = data.get("story")
         sd.story = story if isinstance(story, dict) else None
+        # 设置:键位覆盖 / 触屏布局 / 帧率 / FPS 显示 / 缩放滤镜(全部带校验)
+        bind = data.get("bindings") or {}
+        sd.bindings = {}
+        for k, v in bind.items():
+            if isinstance(k, str) and isinstance(v, (list, tuple)) and v:
+                try:
+                    sd.bindings[k] = [int(x) for x in v]
+                except (TypeError, ValueError):
+                    pass
+        tl = data.get("touch_layout") or {}
+        sd.touch_layout = {}
+        for k, v in tl.items():
+            if isinstance(k, str) and isinstance(v, (list, tuple)) and len(v) == 3:
+                try:
+                    sd.touch_layout[k] = [float(v[0]), float(v[1]), int(v[2])]
+                except (TypeError, ValueError):
+                    pass
+        try:
+            sd.fps_cap = int(data.get("fps_cap", 120))
+        except (TypeError, ValueError):
+            sd.fps_cap = 120
+        if sd.fps_cap < 0:
+            sd.fps_cap = 0
+        sd.show_fps = bool(data.get("show_fps", True))
+        sf = str(data.get("scale_filter", "linear"))
+        sd.scale_filter = sf if sf in ("linear", "nearest") else "linear"
         return sd
 
 

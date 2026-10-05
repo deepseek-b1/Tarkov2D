@@ -38,12 +38,19 @@ async def run_game():
     """异步主循环:每帧 await 一下,网页版(wasm)才能正常刷新。"""
     os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
     # 手机模式:关闭 SDL 的"触摸合成鼠标"行为,避免和虚拟摇杆/按钮重复响应
+    # (界面点击由 game.synth_mouse_events 按需合成 FINGER 的镜像)
     try:
         import save as _save_mod
+        sd_boot = _save_mod.load_data()
         want_touch = "--touch" in sys.argv or (
-            "--pc" not in sys.argv and _save_mod.load_data().touch)
+            "--pc" not in sys.argv and sd_boot.touch)
         if want_touch:
             os.environ["SDL_TOUCH_MOUSE_EVENTS"] = "0"
+        # 全屏缩放滤镜(SCALED 把 720p 拉到全屏时的采样方式;须在 set_mode 前设好):
+        # linear=柔和(双线性,默认) / nearest=锐利(最近邻,可能有锯齿)
+        os.environ.setdefault(
+            "SDL_RENDER_SCALE_QUALITY",
+            "0" if sd_boot.scale_filter == "nearest" else "1")
     except Exception:
         pass
 
@@ -64,7 +71,7 @@ async def run_game():
     import audio
     audio.init()
 
-    from settings import W, H, FPS
+    from settings import W, H
     from game import Game
 
     on_android = bool(os.environ.get("ANDROID_ARGUMENT"))
@@ -110,12 +117,21 @@ async def run_game():
 
     try:
         while not game.quit:
-            dt = min(clock.tick(FPS) / 1000.0, 0.05)
+            # 帧率上限从存档读(设置页可改;0 = 不锁)
+            cap = int(getattr(game.save, "fps_cap", 0) or 0)
+            dt = min(clock.tick(cap) / 1000.0, 0.05)
             events = pygame.event.get()
             game.update(dt, events)
             if game.quit:
                 break
             game.draw(screen)
+            if getattr(game.save, "show_fps", True):
+                from settings import get_font
+                fps = clock.get_fps()
+                col = ((110, 220, 120) if fps >= 110 else
+                       (240, 200, 90) if fps >= 55 else (240, 90, 80))
+                t = get_font(15, bold=True).render(f"{fps:.0f} FPS", True, col)
+                screen.blit(t, (W - t.get_width() - 12, 8))
             pygame.display.flip()
             await asyncio.sleep(0)     # 让出控制权(网页版必需)
     finally:

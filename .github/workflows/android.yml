@@ -58,11 +58,21 @@ jobs:
           chmod +x "$HOME/.binshim/autoreconf"
           echo "$HOME/.binshim" >> "$GITHUB_PATH"
 
+      # Toolchain cache (SDK/NDK + p4a dists).
+      #
+      # The key used to include hashFiles('buildozer.spec'), so every version
+      # bump changed the key, missed the cache and rebuilt the whole toolchain
+      # (~60 min instead of ~10). The toolchain only depends on the pinned
+      # requirements/NDK lines, which change rarely, so use a stable key and
+      # keep the old prefix in restore-keys to warm the first build after this
+      # change.
       - name: Cache SDK/NDK
         uses: actions/cache@v4
         with:
           path: ~/.buildozer
-          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          key: buildozer-Linux-toolchain-v1
+          restore-keys: |
+            buildozer-Linux-
 
       # Warmup: builds the toolchain and hostpython3. It is expected to fail
       # later on (at pygame) during the first pass.

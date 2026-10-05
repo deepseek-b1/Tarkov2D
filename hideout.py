@@ -1,16 +1,19 @@
 # -*- coding: utf-8 -*-
 """藏身处:仓库管理、出战整备、开局。"""
+import math
 import time
 
 import pygame
 
 import audio
+import bindings
 import intro
 import quests
 import save as save_mod
+import touch as touch_mod
 from settings import (W, H, COL, fmt_rub, get_font, DIFF_ORDER, DIFFICULTIES,
                       weapon_slots, weapon_attach, weapon_capacity, ATTACH_SLOTS,
-                      ITEMS, TRADE_GOODS, TRADE_TABS, TRADE_PAGE_H,
+                      ITEMS, TRADE_GOODS, TRADE_TABS, TRADE_PAGE_H, FPS_CAP_CHOICES,
                       trade_buy_price, trade_sell_price, STASH_VIEW_ROWS,
                       MODE_DIFF, DEPTS, TASKS,
                       armor_allows, MAPS, MAP_ORDER, MODES, MODE_ORDER, MODE_MAP)
@@ -33,9 +36,10 @@ def _layout():
         start=pygame.Rect(542, 548, 340, 54),
         supply=pygame.Rect(30, 548, 220, 46),
         reset=pygame.Rect(262, 548, 220, 46),
-        trade=pygame.Rect(922, 548, 106, 46),
-        tasks=pygame.Rect(1032, 548, 106, 46),
-        story=pygame.Rect(1142, 548, 106, 46),
+        trade=pygame.Rect(930, 548, 72, 46),
+        tasks=pygame.Rect(1008, 548, 72, 46),
+        story=pygame.Rect(1086, 548, 72, 46),
+        options=pygame.Rect(1164, 548, 72, 46),
         organize=pygame.Rect(374, 106, 116, 24),      # 仓库:一键整理
         stash_all=pygame.Rect(712, 106, 184, 24),     # 出战配置:放回仓库并整理
         trade_stash=pygame.Rect(30, 100, 470, 570),
@@ -107,6 +111,395 @@ class Hideout:
         # 玩法简介(首次启动自动弹出)
         self.show_intro = not getattr(self.game.save, "seen_intro", False)
         self.intro_page = 0
+        # ---- 设置视图(控制 / 触屏 / 画质) ----
+        self.opt_tab = "controls"
+        self.opt_tab_keys = ["controls", "touch", "video"]
+        self.opt_tab_rects = [pygame.Rect(548 + i * 214, 132, 200, 32)
+                              for i in range(3)]
+        self.opt_close = pygame.Rect(1140, 76, 100, 36)
+        self.opt_rebind = None      # 正在等待新按键的动作名(None = 不在改键)
+        self.opt_sel = None         # 触屏布局:选中的按钮名
+        self.opt_drag = None        # 触屏布局:正在拖动的按钮名
+        self.opt_layout = {}        # 触屏布局工作副本:{name: dict(rx,ry,r,label)}
+        self.opt_bind_rects = [pygame.Rect(852, 190 + i * 30, 240, 26)
+                               for i in range(len(bindings.ACTIONS))]
+        self.opt_fps_rects = [pygame.Rect(772 + i * 108, 214, 98, 34)
+                              for i in range(len(FPS_CAP_CHOICES))]
+        self.opt_fps_toggle = pygame.Rect(772, 274, 98, 34)
+        self.opt_filter_rects = [pygame.Rect(772 + i * 134, 334, 124, 34)
+                                 for i in range(2)]
+        self.opt_minus = pygame.Rect(1000, 552, 44, 30)
+        self.opt_plus = pygame.Rect(1052, 552, 44, 30)
+        self.opt_save = pygame.Rect(548, 616, 200, 40)
+        self.opt_defaults = pygame.Rect(770, 616, 200, 40)
+        # 触屏模式的翻页按钮(手机没有滚轮)
+        self.scroll_btns = {}
+        self.rscroll_btns = {}
+
+    # ---- 设置:触屏布局编辑工作副本 ----
+    def _opt_layout_base(self):
+        base = {}
+        for name, label, (rx, ry), r in touch_mod.BUTTONS + touch_mod.SUPPORT_BUTTONS:
+            base[name] = dict(label=label, rx=float(rx), ry=float(ry), r=int(r))
+        return base
+
+    def _opt_layout_load(self):
+        """进入触屏页:默认布局 + 存档覆盖。"""
+        sd = self.game.save
+        self.opt_layout = self._opt_layout_base()
+        saved = getattr(sd, "touch_layout", None) or {}
+        for name, v in saved.items():
+            if name in self.opt_layout:
+                try:
+                    rx, ry, r = float(v[0]), float(v[1]), int(v[2])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                self.opt_layout[name].update(rx=rx, ry=ry, r=r)
+        self.opt_sel = None
+        self.opt_drag = None
+
+    def _opt_layout_to_save(self):
+        """工作副本 -> 存档覆盖(只存与默认不同的项)。"""
+        base = self._opt_layout_base()
+        out = {}
+        for name, d in self.opt_layout.items():
+            b = base[name]
+            if (abs(d["rx"] - b["rx"]) > 1e-6 or abs(d["ry"] - b["ry"]) > 1e-6
+                    or d["r"] != b["r"]):
+                out[name] = [round(d["rx"], 4), round(d["ry"], 4), int(d["r"])]
+        return out
+
+    def _opt_apply_save(self, note=None):
+        """保存并应用(触屏布局同步给 touch 模块;键位/画质本来就是即时生效)。"""
+        sd = self.game.save
+        if self.opt_tab == "touch":
+            sd.touch_layout = self._opt_layout_to_save()
+            touch_mod.apply_layout(sd.touch_layout)
+        save_mod.save_data(sd)
+        audio.play("pickup")
+        self.say(note or "设置已保存并应用", COL["good"], 3.0)
+
+    def _opt_restore_defaults(self):
+        sd = self.game.save
+        if self.opt_tab == "controls":
+            bindings.reset_all(sd)
+            save_mod.save_data(sd)
+            self.say("键位已恢复默认(点「保存并应用」写盘)", COL["accent"], 3.0)
+        elif self.opt_tab == "touch":
+            sd.touch_layout = {}
+            touch_mod.apply_layout({})
+            self._opt_layout_load()
+            save_mod.save_data(sd)
+            self.say("触屏按键位置已恢复默认", COL["accent"], 3.0)
+        else:
+            sd.fps_cap = 120
+            sd.show_fps = True
+            sd.scale_filter = "linear"
+            save_mod.save_data(sd)
+            self.say("画质设置已恢复默认(默认 120 帧上限 · 显示帧率 · 柔和)",
+                     COL["accent"], 3.2)
+
+    def _options_update(self, dt, events):
+        """设置页事件:改键捕获 / 触屏拖拽 / 点击。"""
+        sd = self.game.save
+        for ev in events:
+            if ev.type == pygame.KEYDOWN:
+                if self.opt_rebind is not None:
+                    act = self.opt_rebind
+                    if ev.key == pygame.K_ESCAPE:
+                        self.opt_rebind = None
+                        self.say("已取消改键", COL["text_dim"], 2.0)
+                        continue
+                    ok, conflicts = bindings.assign(sd, act, ev.key)
+                    if ok:
+                        self.opt_rebind = None
+                        self.say(f"{bindings.action_label(act)} → "
+                                 f"{bindings.key_label(ev.key)}(点「保存并应用」写盘)",
+                                 COL["good"], 3.2)
+                    else:
+                        names = "、".join(bindings.action_label(a) for a in conflicts)
+                        self.say(f"「{bindings.key_label(ev.key)}」已被 {names} 占用,"
+                                 f"换一个键(ESC 取消)", COL["bad"], 3.4)
+                    continue
+                if ev.key == pygame.K_ESCAPE:
+                    self.opt_rebind = None
+                    self.opt_drag = None
+                    self.view = "stash"
+                    save_mod.save_data(sd)
+                    audio.play("click")
+            elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                self._options_click(ev.pos)
+            elif ev.type == pygame.MOUSEMOTION and self.opt_drag is not None:
+                self._options_drag_to(ev.pos)
+            elif ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
+                self.opt_drag = None
+
+    def _options_drag_to(self, pos):
+        """触屏布局:把正在拖动的按钮挪到手指/鼠标位置(比例坐标,边界留 3%)。"""
+        name = self.opt_drag
+        d = self.opt_layout.get(name)
+        if d is None:
+            return
+        d["rx"] = min(0.97, max(0.03, pos[0] / float(W)))
+        d["ry"] = min(0.97, max(0.03, pos[1] / float(H)))
+
+    def _options_click(self, pos):
+        sd = self.game.save
+        mx, my = pos
+        audio.play("click")
+        if self.opt_rebind is not None:
+            # 改键等待中:点别处 = 取消
+            self.opt_rebind = None
+            return
+        if self.opt_close.collidepoint(pos) or not self._options_panel().collidepoint(pos):
+            self.view = "stash"
+            save_mod.save_data(sd)
+            return
+        for i, key in enumerate(self.opt_tab_keys):
+            if self.opt_tab_rects[i].collidepoint(pos):
+                self.opt_tab = key
+                if key == "touch":
+                    self._opt_layout_load()
+                return
+        if self.opt_save.collidepoint(pos):
+            self._opt_apply_save()
+            return
+        if self.opt_defaults.collidepoint(pos):
+            self._opt_restore_defaults()
+            return
+        if self.opt_tab == "controls":
+            for i, (act, _name) in enumerate(bindings.ACTIONS):
+                if self.opt_bind_rects[i].collidepoint(pos):
+                    self.opt_rebind = act
+                    self.say(f"按下要给「{bindings.action_label(act)}」绑定的新键"
+                             f"(ESC 取消)", COL["accent"], 4.0)
+                    return
+            return
+        if self.opt_tab == "touch":
+            if self.opt_sel is not None:
+                if self.opt_minus.collidepoint(pos):
+                    d = self.opt_layout[self.opt_sel]
+                    d["r"] = max(20, d["r"] - 6)
+                    return
+                if self.opt_plus.collidepoint(pos):
+                    d = self.opt_layout[self.opt_sel]
+                    d["r"] = min(110, d["r"] + 6)
+                    return
+            hit = None
+            for name, d in self.opt_layout.items():
+                px, py = d["rx"] * W, d["ry"] * H
+                if math.hypot(pos[0] - px, pos[1] - py) <= max(22, d["r"]):
+                    hit = name
+                    break
+            if hit is not None:
+                self.opt_sel = hit
+                self.opt_drag = hit
+                return
+            self.opt_sel = None
+            return
+        if self.opt_tab == "video":
+            from settings import FPS_CAP_CHOICES as CHOICES
+            for i, cap in enumerate(CHOICES):
+                if self.opt_fps_rects[i].collidepoint(pos):
+                    sd.fps_cap = int(cap)
+                    save_mod.save_data(sd)
+                    self.say("帧率上限已设为 "
+                             + ("不锁(能跑多快跑多快)" if cap == 0 else f"{cap} 帧"),
+                             COL["good"], 2.6)
+                    return
+            if self.opt_fps_toggle.collidepoint(pos):
+                sd.show_fps = not sd.show_fps
+                save_mod.save_data(sd)
+                self.say("帧率显示已" + ("开启" if sd.show_fps else "关闭"),
+                         COL["good"], 2.4)
+                return
+            for i, key in enumerate(("linear", "nearest")):
+                if self.opt_filter_rects[i].collidepoint(pos):
+                    if sd.scale_filter != key:
+                        sd.scale_filter = key
+                        save_mod.save_data(sd)
+                        self.say("画面缩放滤镜已改为「"
+                                 + ("柔和(双线性)" if key == "linear" else "锐利(最近邻)")
+                                 + "」,重启游戏后生效", COL["accent"], 3.6)
+                    return
+
+    def _options_panel(self):
+        return pygame.Rect(530, 100, 720, 570)
+
+    # ---- 设置页渲染 ----
+    def _draw_options(self, screen):
+        """设置页:控制 / 触屏 / 画质 三个标签页 + 保存并应用 / 恢复默认。"""
+        lay = self.lay
+        mx, my = pygame.mouse.get_pos()
+        screen.fill(COL["bg"])
+        uikit.draw_panel(screen, self._options_panel(), "设置")
+        draw_button(screen, self.opt_close, "返回",
+                    self.opt_close.collidepoint(mx, my), small=True)
+        t = get_font(30, bold=True).render("设置 — 键位 / 触屏 / 画质", True,
+                                           COL["accent"])
+        screen.blit(t, t.get_rect(center=(W // 2, 44)))
+
+        labels = {"controls": "控制(键盘)", "touch": "触屏按键", "video": "画质与帧率"}
+        for i, key in enumerate(self.opt_tab_keys):
+            r = self.opt_tab_rects[i]
+            sel = self.opt_tab == key
+            hover = r.collidepoint(mx, my)
+            pygame.draw.rect(screen,
+                             COL["panel_hi"] if (hover or sel) else COL["panel"],
+                             r, border_radius=8)
+            pygame.draw.rect(screen, COL["accent"] if sel else COL["border"], r,
+                             2 if sel else 1, border_radius=8)
+            ft = get_font(16, bold=True).render(
+                labels[key], True, COL["accent"] if sel else COL["text"])
+            screen.blit(ft, ft.get_rect(center=r.center))
+
+        if self.opt_tab == "controls":
+            self._draw_options_controls(screen, mx, my)
+        elif self.opt_tab == "touch":
+            self._draw_options_touch(screen, mx, my)
+        else:
+            self._draw_options_video(screen, mx, my)
+
+        draw_button(screen, self.opt_save, "保存并应用",
+                    self.opt_save.collidepoint(mx, my))
+        dtext = {"controls": "恢复默认键位", "touch": "恢复默认布局",
+                 "video": "恢复默认画质"}[self.opt_tab]
+        draw_button(screen, self.opt_defaults, dtext,
+                    self.opt_defaults.collidepoint(mx, my), small=True)
+        if self.opt_rebind is not None:
+            t = get_font(17, bold=True).render("请按下新按键…(ESC 取消)", True,
+                                               COL["accent"])
+            screen.blit(t, t.get_rect(center=(W // 2, 588)))
+        elif self.msg_t > 0 and self.msg:
+            t = get_font(15, bold=True).render(self.msg, True, self.msg_col)
+            screen.blit(t, t.get_rect(center=(W // 2, 588)))
+
+    def _draw_options_controls(self, screen, mx, my):
+        """控制页:每个动作一行,右边是当前的键(点它改键)。"""
+        sd = self.game.save
+        f = get_font(16)
+        fk = get_font(16, bold=True)
+        for i, (act, name) in enumerate(bindings.ACTIONS):
+            r = self.opt_bind_rects[i]
+            t = f.render(name, True, COL["text"])
+            screen.blit(t, (548, r.y + 3))
+            waiting = self.opt_rebind == act
+            modified = bindings.is_modified(sd, act)
+            hover = r.collidepoint(mx, my)
+            pygame.draw.rect(screen,
+                             COL["panel_hi"] if (hover or waiting) else COL["panel"],
+                             r, border_radius=6)
+            pygame.draw.rect(screen,
+                             COL["accent"] if (waiting or modified) else COL["border"],
+                             r, 2 if waiting else 1, border_radius=6)
+            label = "按新按键…" if waiting else bindings.label_for(sd, act)
+            ft = fk.render(label, True,
+                           COL["accent"] if (waiting or modified) else COL["text"])
+            screen.blit(ft, ft.get_rect(center=r.center))
+        tip = get_font(13).render(bindings.FIXED_NOTES, True, COL["text_dim"])
+        screen.blit(tip, (548, 560))
+        tip2 = get_font(13).render("橙色 = 已改过(可再点改;冲突时会被拒绝)",
+                                   True, COL["text_dim"])
+        screen.blit(tip2, (548, 578))
+
+    def _draw_options_touch(self, screen, mx, my):
+        """触屏页:所见即所得预览 + 拖动 + 选中后 +/- 调大小。"""
+        if not self.opt_layout:
+            self._opt_layout_load()
+        tip = get_font(15).render(
+            "拖动按钮改位置 · 选中后用 − / + 改大小 · 左半屏摇杆区固定不可移",
+            True, COL["text_dim"])
+        screen.blit(tip, (548, 176))
+        frame = pygame.Rect(560, 206, 660, 340)
+        pygame.draw.rect(screen, (16, 18, 22), frame, border_radius=8)
+        pygame.draw.rect(screen, COL["border"], frame, 1, border_radius=8)
+        sx = frame.x + frame.w * 0.22
+        sy = frame.bottom - 78
+        pygame.draw.circle(screen, (48, 52, 62), (int(sx), int(sy)), 44, 2)
+        tt = get_font(12).render("摇杆区(固定)", True, (110, 118, 132))
+        screen.blit(tt, tt.get_rect(center=(int(sx), int(sy) + 58)))
+        for name, d in self.opt_layout.items():
+            px = frame.x + d["rx"] * frame.w
+            py = frame.y + d["ry"] * frame.h
+            r = max(10, int(d["r"] * frame.h / float(H)))
+            sel = name == self.opt_sel
+            pygame.draw.circle(screen, (72, 92, 120) if sel else (40, 46, 58),
+                               (int(px), int(py)), r)
+            pygame.draw.circle(screen, COL["accent"] if sel else (96, 104, 118),
+                               (int(px), int(py)), r, 3 if sel else 2)
+            ft = get_font(12, bold=True).render(d["label"], True, COL["text"])
+            screen.blit(ft, ft.get_rect(center=(int(px), int(py))))
+        if self.opt_sel is not None:
+            d = self.opt_layout[self.opt_sel]
+            info = get_font(15, bold=True).render(
+                f"已选中「{d['label']}」 · 直径 {d['r']}px", True, COL["accent"])
+            screen.blit(info, (548, 556))
+            draw_button(screen, self.opt_minus, "−",
+                        self.opt_minus.collidepoint(mx, my), small=True)
+            draw_button(screen, self.opt_plus, "+",
+                        self.opt_plus.collidepoint(mx, my), small=True)
+        else:
+            t = get_font(15).render("点一个按钮选中它", True, COL["text_dim"])
+            screen.blit(t, (548, 560))
+
+    def _draw_options_video(self, screen, mx, my):
+        """画质页:帧率上限 / 显示帧率 / 缩放滤镜。"""
+        from settings import FPS_CAP_CHOICES
+        sd = self.game.save
+        f = get_font(17, bold=True)
+        for name, y in (("帧率上限", 214), ("显示帧率", 274), ("画面缩放滤镜", 334)):
+            t = f.render(name, True, COL["text"])
+            screen.blit(t, (548, y + 6))
+        for i, cap in enumerate(FPS_CAP_CHOICES):
+            r = self.opt_fps_rects[i]
+            sel = int(sd.fps_cap) == int(cap)
+            hover = r.collidepoint(mx, my)
+            pygame.draw.rect(screen,
+                             COL["panel_hi"] if (sel or hover) else COL["panel"],
+                             r, border_radius=6)
+            pygame.draw.rect(screen, COL["accent"] if sel else COL["border"], r,
+                             2 if sel else 1, border_radius=6)
+            label = "不锁" if cap == 0 else f"{cap}"
+            ft = get_font(15, bold=True).render(
+                label, True, COL["accent"] if sel else COL["text"])
+            screen.blit(ft, ft.get_rect(center=r.center))
+        r = self.opt_fps_toggle
+        sel = bool(sd.show_fps)
+        hover = r.collidepoint(mx, my)
+        pygame.draw.rect(screen,
+                         COL["panel_hi"] if (sel or hover) else COL["panel"],
+                         r, border_radius=6)
+        pygame.draw.rect(screen, COL["accent"] if sel else COL["border"], r,
+                         2 if sel else 1, border_radius=6)
+        ft = get_font(15, bold=True).render("开" if sel else "关", True,
+                                            COL["accent"] if sel else COL["text"])
+        screen.blit(ft, ft.get_rect(center=r.center))
+        for i, (label, key) in enumerate((("柔和(线性)", "linear"),
+                                          ("锐利(最近邻)", "nearest"))):
+            r = self.opt_filter_rects[i]
+            sel = sd.scale_filter == key
+            hover = r.collidepoint(mx, my)
+            pygame.draw.rect(screen,
+                             COL["panel_hi"] if (sel or hover) else COL["panel"],
+                             r, border_radius=6)
+            pygame.draw.rect(screen, COL["accent"] if sel else COL["border"], r,
+                             2 if sel else 1, border_radius=6)
+            ft = get_font(15, bold=True).render(
+                label, True, COL["accent"] if sel else COL["text"])
+            screen.blit(ft, ft.get_rect(center=r.center))
+        lines = [
+            "· 帧率上限:高刷屏建议 120 或不锁;发热/掉电快就退回 60",
+            "· 显示帧率:右上角实时 FPS(绿 ≥110 · 黄 ≥55 · 红更低)",
+            "· 画面缩放滤镜 = 720p 画面拉到全屏时的采样方式(重启后生效)",
+            "   柔和=平滑;锐利=最近邻(边缘更硬,可能有锯齿)",
+            "· 手机屏幕分辨率高于 720p,任何滤镜都做不到像素级清晰;",
+            "   真正清晰要按原生分辨率重做界面(后续大工程,暂不做)",
+        ]
+        y = 392
+        for ln in lines:
+            t = get_font(14).render(ln, True, COL["text_dim"])
+            screen.blit(t, (548, y))
+            y += 24
 
     # ---- 批量出售 ----
     def sell_selected(self):
@@ -429,6 +822,10 @@ class Hideout:
                     else:
                         self.intro_page = nxt
             return
+        # 设置页自己处理全部事件(改键捕获 / 触屏拖拽 / 点击)
+        if self.view == "options":
+            self._options_update(dt, events)
+            return
         for ev in events:
             if ev.type == pygame.MOUSEWHEEL:
                 if self.view == "trade":
@@ -464,6 +861,8 @@ class Hideout:
                 if self.view == "stash":
                     self._right_click(ev.pos)
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                if self._scroll_click(ev.pos):     # 触屏翻页按钮最优先
+                    return
                 if self.view == "trade":
                     self._trade_click(ev.pos)
                 elif self.view == "task":
@@ -473,6 +872,81 @@ class Hideout:
                 else:
                     self._click(ev.pos)
                 return
+
+    # ---- 触屏翻页按钮(手机没有滚轮) ----
+    def _scroll_buttons(self):
+        """触屏 ▲▼ 按钮:key = (视图, 第几块列表)。"""
+        if not self.scroll_btns:
+            self.scroll_btns = {
+                ("stash", 0): (pygame.Rect(468, 280, 28, 48),
+                               pygame.Rect(468, 336, 28, 48)),
+                ("trade", 0): (pygame.Rect(466, 250, 28, 48),
+                               pygame.Rect(466, 306, 28, 48)),
+                ("trade", 1): (pygame.Rect(1218, 250, 28, 48),
+                               pygame.Rect(1218, 306, 28, 48)),
+                ("task", 0): (pygame.Rect(1218, 300, 28, 48),
+                              pygame.Rect(1218, 356, 28, 48)),
+            }
+        return self.scroll_btns
+
+    def _scroll_click(self, pos):
+        """点 ▲▼ 翻页。返回 True = 已消费这次点击。"""
+        if not self.game.save.touch:
+            return False
+        b = self._scroll_buttons()
+
+        def step(key):
+            up, dn = b[key]
+            if up.collidepoint(pos):
+                return -1
+            if dn.collidepoint(pos):
+                return 1
+            return 0
+
+        if self.view == "stash":
+            d = step(("stash", 0))
+            if d:
+                self.stash_scroll = max(0.0, min(
+                    self.stash_scroll + d * 40, self.stash_max_scroll()))
+                return True
+        elif self.view == "trade":
+            d = step(("trade", 1))
+            if d:
+                self.trade_scroll = max(0.0, min(
+                    self.trade_scroll + d * 48, self.trade_max_scroll()))
+                return True
+            d = step(("trade", 0))
+            if d:
+                self.stash_scroll = max(0.0, min(
+                    self.stash_scroll + d * 40, self.trade_stash_max_scroll()))
+                return True
+        elif self.view == "task":
+            d = step(("task", 0))
+            if d:
+                self.task_scroll = max(0.0, min(
+                    self.task_scroll + d * 44, self.task_max_scroll()))
+                return True
+        return False
+
+    def _draw_scroll_buttons(self, screen, keys):
+        """画 ▲▼(只在触屏模式)。"""
+        if not self.game.save.touch:
+            return
+        b = self._scroll_buttons()
+        mx, my = pygame.mouse.get_pos()
+        for k in keys:
+            up, dn = b[k]
+            for r, label in ((up, "▲"), (dn, "▼")):
+                hover = r.collidepoint(mx, my)
+                pygame.draw.rect(screen,
+                                 COL["panel_hi"] if hover else COL["panel"],
+                                 r, border_radius=6)
+                pygame.draw.rect(screen,
+                                 COL["accent"] if hover else COL["border"],
+                                 r, 2, border_radius=6)
+                t = get_font(16, bold=True).render(
+                    label, True, COL["accent"] if hover else COL["text"])
+                screen.blit(t, t.get_rect(center=r.center))
 
     def _click(self, pos):
         sd = self.game.save
@@ -555,6 +1029,13 @@ class Hideout:
             return
         if lay["story"].collidepoint(pos):
             self.view = "story"
+            audio.play("click")
+            return
+        if lay["options"].collidepoint(pos):
+            self.view = "options"
+            self.opt_rebind = None
+            self.opt_tab = "controls"
+            self._opt_layout_load()
             audio.play("click")
             return
         if lay["organize"].collidepoint(pos):
@@ -862,12 +1343,17 @@ class Hideout:
             return
         if self.view == "trade":
             self._draw_trade(screen)
+            self._draw_scroll_buttons(screen, [("trade", 0), ("trade", 1)])
             return
         if self.view == "task":
             self._draw_task(screen)
+            self._draw_scroll_buttons(screen, [("task", 0)])
             return
         if self.view == "story":
             self._draw_story_brief(screen)
+            return
+        if self.view == "options":
+            self._draw_options(screen)
             return
         lay = self.lay
         sd = self.game.save
@@ -890,6 +1376,7 @@ class Hideout:
                 True, COL["text_dim"])
             screen.blit(t, (self.stash_grid[0],
                             self.stash_grid[1] + self.stash_view_h + 10))
+        self._draw_scroll_buttons(screen, [("stash", 0)])
 
         # ---- 出战配置 ----
         uikit.draw_panel(screen, lay["loadout_panel"], "出战配置")
@@ -964,17 +1451,26 @@ class Hideout:
             screen.blit(t, (sp.x + 18, sp.y + 282))
 
         y = sp.y + 302
+        kl = bindings.label_for(sd, "interact")
+        hr = bindings.label_for(sd, "heal")
+        hb = bindings.label_for(sd, "bag")
+        move_txt = "WASD 移动" if not bindings.is_modified(sd, "up") else (
+            "移动 " + "".join(bindings.label_for(sd, a)
+                              for a in ("up", "left", "down", "right")))
         lines = [
             f"出击 {st['raids']} 次    撤离 {st['extracts']} 次",
             f"阵亡 {st['deaths']} 次    击杀 {st['kills']} 人",
             f"余额 {fmt_rub(sd.rubles)}    搜刮 {fmt_rub(st['value'])}",
             "",
-            "WASD 移动 · 左键射击 · 右键架枪",
-            "弹匣空自动换弹 · H 打药 · E 搜刮/救人",
-            "TAB 背包 · 死亡会丢失带入的装备!",
+            f"{move_txt} · 左键射击 · 右键架枪",
+            f"弹匣空自动换弹 · {hr} 打药 · {kl} 搜刮/救人",
+            f"{hb} 背包 · 死亡会丢失带入的装备!",
         ]
         if assault_run:
-            lines[-1] = "TAB 背包 · 1/2/3 呼叫友军支援"
+            lines[-1] = (f"{hb} 背包 · "
+                         + " / ".join(bindings.label_for(sd, a)
+                                      for a in ("support1", "support2", "support3"))
+                         + " 呼叫友军支援")
         for ln in lines:
             col = COL["text_dim"] if ln == "" else COL["text"]
             t = f.render(ln, True, col)
@@ -989,15 +1485,17 @@ class Hideout:
                     lay["touch_btn"].collidepoint(mx, my), small=True)
         draw_button(screen, lay["start"], f"开始战局 · {MODES[sd.mode]['name']}",
                     lay["start"].collidepoint(mx, my))
-        draw_button(screen, lay["trade"], "交易所",
+        draw_button(screen, lay["trade"], "交易",
                     lay["trade"].collidepoint(mx, my), small=True)
         ready_n = sum(1 for t in TASKS
                       if quests.task_state(sd, t)[0] == "ready")
         draw_button(screen, lay["tasks"],
-                    "任务中心" + (f"({ready_n})" if ready_n else ""),
+                    "任务" + (f"({ready_n})" if ready_n else ""),
                     lay["tasks"].collidepoint(mx, my), small=True)
-        draw_button(screen, lay["story"], "剧情简报",
+        draw_button(screen, lay["story"], "剧情",
                     lay["story"].collidepoint(mx, my), small=True)
+        draw_button(screen, lay["options"], "设置",
+                    lay["options"].collidepoint(mx, my), small=True)
         if not sd.any_weapon():
             draw_button(screen, lay["supply"], "领取基础补给",
                         lay["supply"].collidepoint(mx, my), small=True)
