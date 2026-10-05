@@ -388,14 +388,29 @@ def run():
         r2.update(1 / 60, [ev])
         assert r2.inv_open is False
         r2.paused = False
-        # 5) 地面堆放不下:不留空堆,物品回背包
+        # 5) 丢弃:大件(枪)也要能丢到地上;地面堆塞满时不留空堆、物品回背包
         n_piles = len([c for c in r2.containers if c.kind == "ground"])
         r2.player.bag.clear()
         r2.player.bag.add_item(Item.weapon("ak74", mag=5))
         placed2 = r2.player.bag.first_of_cat("weapon")
         r2.drop_from_bag(placed2)
-        assert len([c for c in r2.containers if c.kind == "ground"]) == n_piles
-        assert placed2 in r2.player.bag.items
+        assert len([c for c in r2.containers if c.kind == "ground"]) == n_piles + 1, \
+            "丢东西应该在地上生成一堆"
+        pile = [c for c in r2.containers if c.kind == "ground"][-1]
+        assert any(pl.item.iid == "ak74" for pl in pile.container.items)
+        assert placed2 not in r2.player.bag.items
+        # 把这堆塞满后再丢:放不下 -> 回背包,且不生成空堆
+        for _ in range(400):
+            if not pile.container.add_item(Item("screws")):
+                break
+        n_piles2 = len([c for c in r2.containers if c.kind == "ground"])
+        r2.player.bag.clear()
+        r2.player.bag.add_item(Item("gold"))
+        placed3 = r2.player.bag.first_of_cat("valuable")
+        r2.drop_from_bag(placed3)
+        assert len([c for c in r2.containers if c.kind == "ground"]) == n_piles2, \
+            "堆满时不该再生成新的一堆"
+        assert placed3 in r2.player.bag.items, "放不下应该回背包"
         # 6) 反序列化:非法条目(越界/未知iid)被丢弃
         bad = [dict(iid="a9", count=5, rot=False, state={}, x=9, y=0),
                dict(iid="zzz", count=1, rot=False, state={}, x=0, y=0),
@@ -652,20 +667,37 @@ def run():
         p = r.player
         p.hp = 50
         r.quick_heal()                          # 缺口 50 -> 医疗包(刚好够)
+
+        def run_heal(max_frames=400):
+            """把打药读条跑完(最多 ~6.6 秒)。"""
+            for _ in range(max_frames):
+                r.update(1 / 60, [])
+                if r.heal_ch is None:
+                    return True
+            return False
+
+        assert p.hp == 50, "打药现在是读条,不能瞬间生效"
+        assert r.heal_ch is not None, "应该进入打药读条"
+        assert run_heal(), "打药读条应该能走完"
         assert p.hp == 100, p.hp
+        assert r.heal_ch is None
         assert not any(pl.item.iid == "medkit" for pl in p.bag.items)
         assert any(pl.item.iid == "bandage" for pl in p.bag.items)
         p.hp = 90
         r.quick_heal()                          # 缺口 10 -> 绷带(不浪费大药)
+        assert p.hp == 90 and r.heal_ch is not None
+        assert run_heal()
         assert p.hp == 100
         assert not any(pl.item.cat == "med" for pl in p.bag.items)
         p.hp = 80
         r.quick_heal()                          # 没药了:不崩、血量不变
-        assert p.hp == 80
-        # 按键绑定 H
+        assert p.hp == 80 and r.heal_ch is None
+        # 按键绑定 H(也要读条)
         p.bag.add_item(Item("bandage"))
         p.hp = 80
         r.update(1 / 60, [pygame.event.Event(pygame.KEYDOWN, key=pygame.K_h)])
+        assert r.heal_ch is not None, "按 H 应该开始读条"
+        assert run_heal()
         assert p.hp == 100, p.hp
         assert not any(pl.item.cat == "med" for pl in p.bag.items)
 
@@ -1356,10 +1388,16 @@ def run():
         for _ in range(20):
             r.update(1 / 60, [])
         assert p.x > x0 + 30, p.x - x0
-        # 触屏按钮:打药 / 背包
+        # 触屏按钮:打药 / 背包(先清场,免得读条时被敌人打断回血)
+        r.scavs = []
         p.hp = 60
         r.touch.just_pressed = ["heal"]
         r.update(1 / 60, [])
+        assert p.hp == 60 and r.heal_ch is not None, "手机打药也要读条"
+        for _ in range(int(6 * 60)):
+            r.update(1 / 60, [])
+            if p.hp > 60:
+                break
         assert p.hp == 80, p.hp
         r.touch.just_pressed = ["bag"]
         r.update(1 / 60, [])
@@ -3169,6 +3207,165 @@ def run():
         assert h3.view == "stash"
 
     check("黑暗行动-强制强化封锁/光源范围可见/手电与夜视/头盔槽", t_night)
+
+    def t_qol():
+        """夜战亮区不闪 / 搜刮读条 / 打药读条 / 丢弃模式 / 换装落地。"""
+        import raid_ui
+        from game import Game
+        from settings import (W as SW, H as SH, LOOT_TAKE_MAX, HEAL_TIME,
+                              HEAL_TIME_MAX, INTERACT_DIST)
+
+        # 1) 夜战亮区必须常亮:不动不转头时,两帧内容要完全一致
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        g.save.mode = "night"
+        g.save.stash.clear()
+        g.save.bag.clear()
+        g.save.weapon = Item.weapon("ak74", mag=30)
+        g.save.bag.add_item(Item("a545", count=60))
+        g.start_raid()
+        r = g.raid
+        p = r.player
+        scr = pygame.display.set_mode((SW, SH))
+        p.helmet = Item("nvg_pnv")                 # 夜视半径 300
+        r.refresh_fog(force=True)
+        g.draw(scr)
+        probe = (int(p.x - r.cam[0]) + 200, int(p.y - r.cam[1]))
+        c1 = scr.get_at(probe)
+        g.draw(scr)                                # 没动、没转头
+        c2 = scr.get_at(probe)
+        assert c1 == c2, ("亮区在没变化的两帧里必须一致(否则就是闪)", c1, c2)
+        r.player.helmet = None                     # 没夜视:同一点应该明显更暗
+        r.refresh_fog(force=True)
+        g.draw(scr)
+        c3 = scr.get_at(probe)
+        assert sum(c3[:3]) < sum(c1[:3]), (sum(c3[:3]), sum(c1[:3]))
+
+        # 2) 搜刮读条:点一件搜一件,走完才进包;走远/关窗会中断
+        g2 = Game()
+        g2.save = save_mod.reset_data()
+        g2.save.seen_intro = True
+        g2.start_raid()
+        r2 = g2.raid
+        r2.scavs = []
+        p2 = r2.player
+        lc = next(c for c in r2.containers
+                  if c.container.items and c.kind in ("crate", "med", "gun"))
+        p2.x, p2.y = lc.rect.centerx, lc.rect.centery + 10
+        r2.loot_target = lc
+        first = lc.container.items[0]
+        need = r2.loot_take_time(first.item)
+        assert 0.8 - 1e-6 <= need <= LOOT_TAKE_MAX + 1e-6, need
+        n0 = len(lc.container.items)
+        r2.start_take(lc, list(lc.container.items))
+        assert r2.take is not None and r2.take["item"] is first
+        r2.update(1 / 60, [])
+        assert first in lc.container.items, "读条没走完不该拿走东西"
+        for _ in range(int((LOOT_TAKE_MAX * n0 + 4) * 60)):
+            r2.update(1 / 60, [])
+            if r2.take is None:
+                break
+        assert r2.take is None, "全部拿走应该在合理时间内搜完"
+        assert len(lc.container.items) < n0, "应该至少搜走一件"
+        rest = list(lc.container.items)
+        if rest:
+            r2.start_take(lc, rest)
+            assert r2.take is not None
+            p2.x = lc.rect.centerx + INTERACT_DIST * 4        # 走远
+            r2.update(1 / 60, [])
+            assert r2.take is None, "走远应该中断搜刮"
+            p2.x, p2.y = lc.rect.centerx, lc.rect.centery + 10
+            r2.start_take(lc, rest)
+            assert r2.take is not None
+            r2.loot_target = None                              # 关窗
+            r2.update(1 / 60, [])
+            assert r2.take is None, "关掉搜刮窗应该中断搜刮"
+
+        # 3) 打药读条:时长按治疗量,移动时进度减半
+        p2.bag.clear()
+        p2.bag.add_item(Item("surgery"))           # heal 200 -> 接近上限
+        med = p2.bag.items[0]
+        p2.hp = 10
+        t_heal = r2.heal_time(med.item)
+        assert HEAL_TIME - 1e-6 <= t_heal <= HEAL_TIME_MAX + 1e-6, t_heal
+        r2.start_heal(med)
+        assert r2.heal_ch is not None
+        r2.player_moving = lambda: True            # 假装一直在跑
+        for _ in range(int(0.5 * 60)):
+            r2.update(1 / 60, [])
+        moving_t = r2.heal_ch["t"] if r2.heal_ch else 99.0
+        r2.player_moving = lambda: False           # 站定
+        r2.heal_ch["t"] = 0.0
+        for _ in range(int(0.5 * 60)):
+            r2.update(1 / 60, [])
+        still_t = r2.heal_ch["t"] if r2.heal_ch else 99.0
+        assert still_t > moving_t * 1.5, (moving_t, still_t)
+        for _ in range(int(6 * 60)):
+            r2.update(1 / 60, [])
+            if r2.heal_ch is None:
+                break
+        assert r2.heal_ch is None and p2.hp > 10, (r2.heal_ch, p2.hp)
+
+        # 4) 丢弃模式:点背包物品 = 丢在脚边(手机没有右键)
+        g3 = Game()
+        g3.save = save_mod.reset_data()
+        g3.save.seen_intro = True
+        g3.start_raid()
+        r3 = g3.raid
+        r3.scavs = []
+        p3 = r3.player
+        p3.bag.clear()
+        p3.bag.add_item(Item("gold"))
+        gold = p3.bag.items[0]
+        r3.inv_open = True
+        r3.drop_mode = True
+        lay = raid_ui.inv_layout(p3.bag.w, p3.bag.h)
+        rect, cell = lay["bag"]
+        pos = (rect.x + gold.x * cell + 4, rect.y + gold.y * cell + 4)
+        r3._handle_inv_click(pygame.event.Event(pygame.MOUSEBUTTONDOWN,
+                                                button=1, pos=pos))
+        assert not p3.bag.items, "丢弃模式下点物品应该丢出去"
+        assert any(lc.kind == "ground"
+                   and any(pl.item.iid == "gold" for pl in lc.container.items)
+                   for lc in r3.containers), "地上应该出现这枚金链子"
+        r3.drop_mode = False
+
+        # 5) 换装:旧枪塞不进背包 -> 丢在脚边(以前直接拒绝,像卡死)
+        p3.bag.clear()
+        p3.weapon = Item.weapon("m4a1", mag=30)    # 5×2
+        bag = p3.bag
+        for gy in range(bag.h):                    # 用 1×1 塞满,只留左上 2×2
+            for gx in range(bag.w):
+                if gx < 2 and gy < 2:
+                    continue
+                bag.add_item(Item("screws"))
+        pm = Item.weapon("pm", mag=8)              # 2×1 正好塞进那个 2×2
+        assert bag.add_item(pm), "2×2 空位应该放得下 PM"
+        placed_pm = next(pl for pl in bag.items if pl.item is pm)
+        ground_before = sum(len(lc.container.items) for lc in r3.containers
+                            if lc.kind == "ground")
+        r3.equip_from_bag(placed_pm)
+        assert p3.weapon is pm, "应该换上新枪"
+        ground_after = sum(len(lc.container.items) for lc in r3.containers
+                           if lc.kind == "ground")
+        assert ground_after == ground_before + 1, "旧枪应该被丢在脚边"
+        # 6) 渲染:背包面板(含头盔槽/丢弃按钮)与搜刮读条都不崩
+        p3.bag.add_item(Item("bandage"))
+        r3.inv_open = True
+        r3.drop_mode = True
+        g3.draw(scr)
+        r3.drop_mode = False
+        g3.draw(scr)
+        p2.hp = 40
+        p2.bag.add_item(Item("bandage"))
+        r2.start_heal(p2.bag.items[-1])
+        r2.loot_target = None
+        r2.inv_open = True
+        g2.draw(scr)
+        r2.inv_open = False
+
+    check("手感-夜战亮区不闪/搜刮读条/打药读条/丢弃模式/换装落地", t_qol)
 
     ok = all(r[1] for r in results)
     report = ["Tarkov2D selftest " + ("PASS" if ok else "FAIL"), ""]

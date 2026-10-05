@@ -417,6 +417,9 @@ class Raid:
         self.loot_target = None
         self.paused = False
         self._panels_was_open = False   # 触屏:弹窗开合沿(清理按住状态用)
+        self.drop_mode = False   # 背包「丢弃模式」:手机没有右键,开着时点物品即丢
+        self.take = None         # 搜刮读条:{lc, item, queue, t, need}
+        self.heal_ch = None      # 打药读条:{placed, t, need}
         self.over = False
         self.result = None
         self.extract_t = 0.0
@@ -1196,7 +1199,7 @@ class Raid:
         return best
 
     def quick_heal(self):
-        """快捷打药(按 H):直接用最合适的医疗品,不用开背包。"""
+        """快捷打药(按 H / 手机打药键):自动挑最合适的医疗品,然后读条 1~3 秒。"""
         p = self.player
         if p.hp >= p.max_hp:
             self.add_toast("生命值已满", COL["text_dim"])
@@ -1210,7 +1213,121 @@ class Raid:
         # 优先用刚好够用的小药,避免浪费医疗包
         pick = min(cover, key=lambda pl: pl.item.def_["heal"]) if cover else \
             max(meds, key=lambda pl: pl.item.def_["heal"])
-        self.use_med(pick)
+        self.start_heal(pick)
+
+    # ---------- 搜刮 / 打药读条 ----------
+    def loot_take_time(self, item):
+        """搜一件东西要多久:按占格数(大件更慢)。"""
+        from settings import (LOOT_TAKE_TIME, LOOT_TAKE_PER_CELL,
+                              LOOT_TAKE_MIN, LOOT_TAKE_MAX)
+        w, h = item.size()
+        t = LOOT_TAKE_TIME + LOOT_TAKE_PER_CELL * (w * h - 1)
+        return max(LOOT_TAKE_MIN, min(LOOT_TAKE_MAX, t))
+
+    def start_take(self, lc, items):
+        """开始逐件搜刮(1~2 秒一件);items = 箱子里的 Placed 列表(可排队)。"""
+        items = [x for x in items if lc is not None and x in lc.container.items]
+        if not items:
+            return
+        self.take = dict(lc=lc, item=items[0], queue=items[1:],
+                         t=0.0, need=self.loot_take_time(items[0].item))
+        audio.play("click")
+
+    def cancel_take(self, note=None):
+        if self.take is not None:
+            self.take = None
+            if note:
+                self.add_toast(note, COL["text_dim"], 2.0)
+
+    def _update_take(self, dt):
+        """搜刮读条:需要箱子还开着、物品还在、人没走远。"""
+        tk = self.take
+        if tk is None or self.over:
+            return
+        p = self.player
+        lc = tk["lc"]
+        placed = tk["item"]
+        alive = (lc in self.containers and placed in lc.container.items
+                 and math.hypot(lc.rect.centerx - p.x, lc.rect.centery - p.y)
+                 <= INTERACT_DIST * 1.8)
+        if not alive or self.loot_target is not lc:
+            self.cancel_take("搜刮中断")
+            return
+        tk["t"] += dt
+        if tk["t"] < tk["need"]:
+            return
+        item = placed.item
+        nxt = list(tk.get("queue") or [])
+        self.take = None
+        if item.cat == "weapon" and p.weapon is None and armor_allows(p.armor, item.def_):
+            lc.container.remove_placed(placed)
+            p.weapon = item
+            p.reloading = False
+            p.reload_t = 0
+            self._log_gained(item)
+            audio.play("pickup")
+            self.add_toast(f"装备 {item.name}", COL["good"])
+        elif item.cat == "armor" and p.armor is None:
+            lc.container.remove_placed(placed)
+            p.armor = item
+            self._log_gained(item)
+            audio.play("pickup")
+            self.add_toast(f"装备 {item.name}", COL["good"])
+        elif item.cat == "helmet" and p.helmet is None:
+            lc.container.remove_placed(placed)
+            p.helmet = item
+            self._log_gained(item)
+            audio.play("pickup")
+            self.add_toast(f"装备 {item.name}", COL["good"])
+        elif try_move(lc.container, placed, p.bag):
+            self._log_gained(item)
+            audio.play("pickup")
+            self.add_toast(f"搜到 {item.name}", COL["good"], 2.0)
+        else:
+            self.add_toast("背包空间不足,搜刮停止", COL["bad"], 3.0)
+            return
+        if nxt:
+            self.start_take(lc, nxt)
+
+    def heal_time(self, item):
+        from settings import (HEAL_TIME, HEAL_TIME_PER_HP, HEAL_TIME_MIN,
+                              HEAL_TIME_MAX)
+        t = HEAL_TIME + item.def_.get("heal", 0) * HEAL_TIME_PER_HP
+        return max(HEAL_TIME_MIN, min(HEAL_TIME_MAX, t))
+
+    def start_heal(self, placed):
+        """开始打药读条(1~3 秒,按治疗量);移动时进度减半。"""
+        p = self.player
+        if p.hp >= p.max_hp:
+            self.add_toast("生命值已满", COL["text_dim"])
+            return
+        if placed not in p.bag.items:
+            return
+        self.heal_ch = dict(placed=placed, t=0.0, need=self.heal_time(placed.item))
+        audio.play("click")
+
+    def player_moving(self):
+        """玩家此刻是否在推移动键/摇杆(读条时移动会减慢进度)。"""
+        if self.touch_mode and self.touch is not None:
+            return any(abs(v) > 0.1 for v in self.touch.move_axis())
+        keys = pygame.key.get_pressed()
+        sd = self.game.save
+        return any(bindings.is_down(keys, sd, a)
+                   for a in ("up", "down", "left", "right"))
+
+    def _update_heal(self, dt):
+        hc = self.heal_ch
+        if hc is None or self.over:
+            return
+        p = self.player
+        placed = hc["placed"]
+        if placed not in p.bag.items or p.hp >= p.max_hp:
+            self.heal_ch = None
+            return
+        hc["t"] += dt * (0.5 if self.player_moving() else 1.0)
+        if hc["t"] >= hc["need"]:
+            self.heal_ch = None
+            self.use_med(placed)
 
     def equip_from_bag(self, placed):
         p = self.player
@@ -1223,36 +1340,42 @@ class Raid:
                 return
             old = p.weapon
             p.bag.remove_placed(placed)
-            if old is not None and not p.bag.add_item(old):
-                p.bag.items.append(placed)   # 放不下旧枪:回滚
-                self.add_toast("背包空间不足", COL["bad"])
+            # 旧枪塞不进背包就丢在脚边(以前这里直接拒绝,感觉像"卡住了")
+            ok, note = self._stow_or_drop(old)
+            if not ok:
+                p.bag.items.append(placed)   # 回滚
+                self.add_toast(note, COL["bad"])
                 return
             p.weapon = item
             p.reloading = False   # 换枪取消装填
             p.reload_t = 0
             audio.play("click")
+            self.add_toast(note or f"换上 {item.name}", COL["accent"] if note else COL["good"], 3.0)
         elif item.cat == "armor":
             old = p.armor
             p.bag.remove_placed(placed)
-            if old is not None and not p.bag.add_item(old):
+            ok, note = self._stow_or_drop(old)
+            if not ok:
                 p.bag.items.append(placed)
-                self.add_toast("背包空间不足", COL["bad"])
+                self.add_toast(note, COL["bad"])
                 return
             p.armor = item
             audio.play("click")
+            self.add_toast(note or f"穿上 {item.name}", COL["accent"] if note else COL["good"], 3.0)
         elif item.cat == "helmet":
             old = p.helmet
             p.bag.remove_placed(placed)
-            if old is not None and not p.bag.add_item(old):
+            ok, note = self._stow_or_drop(old)
+            if not ok:
                 p.bag.items.append(placed)
-                self.add_toast("背包空间不足", COL["bad"])
+                self.add_toast(note, COL["bad"])
                 return
             p.helmet = item
             audio.play("click")
             nvg = item.def_.get("nvg")
-            if nvg:
-                self.add_toast(f"已戴上 {item.name}(夜视半径 {int(nvg[0])})",
-                               COL["good"], 3.0)
+            self.add_toast(note or (f"已戴上 {item.name}"
+                                    + (f"(夜视半径 {int(nvg[0])})" if nvg else "")),
+                           COL["accent"] if note else COL["good"], 3.0)
         elif item.cat == "attach":
             self.install_attachment(p, placed, p.bag)
 
@@ -1818,10 +1941,10 @@ class Raid:
                 if s.dead:
                     self.kill_scav(s)
 
-    def drop_from_bag(self, placed):
-        item = self.player.bag.take_placed(placed)
-        pile = None
+    def drop_to_ground(self, item):
+        """把一件东西丢在脚边(附近有地面堆就塞进去)。成功返回 True。"""
         p = self.player
+        pile = None
         for lc in self.containers:
             if lc.kind == "ground" and math.hypot(lc.rect.centerx - p.x,
                                                   lc.rect.centery - p.y) < 48:
@@ -1831,15 +1954,35 @@ class Raid:
         if pile is None:
             pile = LootContainer("ground", int(p.x), int(p.y))
             created = True
-        if pile.container.add_item(item):
-            if created:
-                self.containers.append(pile)
-            self._unlog_gained(item)
+        if not pile.container.add_item(item):
+            return False
+        if created:
+            self.containers.append(pile)
+        self._unlog_gained(item)
+        return True
+
+    def _stow_or_drop(self, old):
+        """换装时把旧装备塞回背包;塞不下就丢在脚边(别让玩家卡住)。
+
+        返回 (ok, 提示文案);失败时不做任何改动(旧装备仍在身上)。
+        """
+        if old is None:
+            return True, ""
+        if self.player.bag.add_item(old):
+            return True, ""
+        if self.drop_to_ground(old):
+            return True, f"{old.name} 放不进背包,已丢在脚边"
+        return False, "背包空间不足,地上也放不下"
+
+    def drop_from_bag(self, placed):
+        """背包里的东西丢到地上(电脑右键 / 手机「丢弃模式」点一下)。"""
+        item = self.player.bag.take_placed(placed)
+        if self.drop_to_ground(item):
             audio.play("click")
             self.add_toast(f"丢弃 {item.name}", COL["text_dim"])
         else:
-            # 放不下:物品回到背包,不留下空堆
-            self.player.bag.items.append(placed)
+            self.player.bag.items.append(placed)   # 地上也放不下:回到背包
+            self.add_toast("放不下,没能丢出去", COL["bad"])
 
     def merge_ammo(self, container=None):
         """整理弹药:把相同子弹叠放成组,每组至多 max_stack(120)发。
@@ -2202,6 +2345,8 @@ class Raid:
             h.update(self, dt)
         self._update_burn(dt)
         self._update_channel(dt)
+        self._update_take(dt)
+        self._update_heal(dt)
         self._update_support(dt)
         self._update_c4(dt)
         self._update_repair(dt)
@@ -2250,6 +2395,7 @@ class Raid:
         pos = ev.pos
         if lay["close"].collidepoint(pos):
             self.inv_open = False
+            self.drop_mode = False
             audio.play("click")
             return
         # 整理弹药按钮 -> 弹确认框询问
@@ -2257,14 +2403,35 @@ class Raid:
             self.ask_merge = True
             audio.play("click")
             return
-        # 装备槽点击 = 卸下
+        # 丢弃模式开关(手机没有右键:开着时点物品就丢)
+        if lay["drop"].collidepoint(pos):
+            self.drop_mode = not self.drop_mode
+            audio.play("click")
+            self.add_toast("丢弃模式已开启:点物品/装备槽就丢在地上" if self.drop_mode
+                           else "丢弃模式已关闭(恢复:点物品=使用/装备)",
+                           COL["accent" if self.drop_mode else "text_dim"], 3.0)
+            return
+        # 装备槽点击 = 卸下(丢弃模式下直接丢地上)
         if lay["weapon"].collidepoint(pos) and p.weapon is not None:
             old = p.weapon
-            if p.bag.add_item(old):
+            if self.drop_mode:
+                p.weapon = None
+                p.reloading = False
+                p.reload_t = 0
+                self.drop_to_ground(old)
+                audio.play("click")
+                self.add_toast(f"丢弃 {old.name}", COL["text_dim"])
+            elif p.bag.add_item(old):
                 p.weapon = None
                 p.reloading = False   # 卸枪取消装填
                 p.reload_t = 0
                 audio.play("click")
+            elif self.drop_to_ground(old):
+                p.weapon = None
+                p.reloading = False
+                p.reload_t = 0
+                audio.play("click")
+                self.add_toast(f"{old.name} 放不进背包,已丢在脚边", COL["accent"], 3.0)
             else:
                 self.add_toast("背包空间不足", COL["bad"])
             return
@@ -2275,21 +2442,47 @@ class Raid:
                     COL["bad"], 3.0)
                 return
             old = p.armor
-            if p.bag.add_item(old):
+            if self.drop_mode:
+                p.armor = None
+                self.drop_to_ground(old)
+                audio.play("click")
+                self.add_toast(f"丢弃 {old.name}", COL["text_dim"])
+            elif p.bag.add_item(old):
                 p.armor = None
                 audio.play("click")
+            elif self.drop_to_ground(old):
+                p.armor = None
+                audio.play("click")
+                self.add_toast(f"{old.name} 放不进背包,已丢在脚边", COL["accent"], 3.0)
+            else:
+                self.add_toast("背包空间不足", COL["bad"])
+            return
+        if lay["helmet"].collidepoint(pos) and p.helmet is not None:
+            old = p.helmet
+            if self.drop_mode:
+                p.helmet = None
+                self.drop_to_ground(old)
+                audio.play("click")
+                self.add_toast(f"丢弃 {old.name}", COL["text_dim"])
+            elif p.bag.add_item(old):
+                p.helmet = None
+                audio.play("click")
+            elif self.drop_to_ground(old):
+                p.helmet = None
+                audio.play("click")
+                self.add_toast(f"{old.name} 放不进背包,已丢在脚边", COL["accent"], 3.0)
             else:
                 self.add_toast("背包空间不足", COL["bad"])
             return
         placed = raid_ui.grid_hit_px(p.bag, lay["bag"], pos)
         if placed is None:
             return
-        if ev.button == 3:
+        if ev.button == 3 or self.drop_mode:
             self.drop_from_bag(placed)
         elif ev.button == 1:
             if placed.item.cat == "med":
-                self.use_med(placed)
-            elif placed.item.cat in ("weapon", "armor", "attach"):
+                self.start_heal(placed)      # 打药要读条
+            elif placed.item.cat in ("weapon", "armor", "helmet", "attach"):
                 self.equip_from_bag(placed)
             else:
                 self.add_toast(f"{placed.item.name}:自动装填消耗 / 右键丢弃",
@@ -2310,42 +2503,19 @@ class Raid:
             audio.play("click")
             return
         if lay["takeall"].collidepoint(pos):
-            for placed in list(lc.container.items):
-                if try_move(lc.container, placed, self.player.bag):
-                    self._log_gained(placed.item)
-            audio.play("pickup")
+            # 全部拿走 = 排队逐件搜(每件都要读条)
+            self.start_take(lc, list(lc.container.items))
             return
         placed = raid_ui.grid_hit_px(lc.container, lay["src"], pos)
         if placed is not None:
-            item = placed.item
-            # 空槽时武器/护甲直接装备(受限武器需 6 级甲,否则进背包)
-            if (item.cat == "weapon" and p.weapon is None
-                    and not armor_allows(p.armor, item.def_)):
-                self.add_toast(
-                    f"需 {item.def_['req_armor_level']} 级护甲才能持用 {item.name}",
-                    COL["bad"], 3.0)
-            if item.cat == "weapon" and p.weapon is None and armor_allows(p.armor, item.def_):
-                lc.container.remove_placed(placed)
-                p.weapon = item
-                p.reloading = False
-                p.reload_t = 0
-                self._log_gained(item)
-                audio.play("pickup")
-                self.add_toast(f"装备 {item.name}", COL["good"])
-            elif item.cat == "armor" and p.armor is None:
-                lc.container.remove_placed(placed)
-                p.armor = item
-                self._log_gained(item)
-                audio.play("pickup")
-                self.add_toast(f"装备 {item.name}", COL["good"])
-            elif try_move(lc.container, placed, p.bag):
-                self._log_gained(item)
-                audio.play("pickup")
-            else:
-                self.add_toast("背包空间不足", COL["bad"])
+            # 点箱子里的东西 = 开始搜这一件(含大件 1~2 秒)
+            self.start_take(lc, [placed])
             return
         placed = raid_ui.grid_hit_px(p.bag, lay["dst"], pos)
         if placed is not None:
+            if getattr(self, "drop_mode", False):
+                self.drop_from_bag(placed)      # 丢弃模式:直接从背包丢地上
+                return
             if try_move(p.bag, placed, lc.container):
                 self._unlog_gained(placed.item)   # 放回物品撤销搜刮记账
                 audio.play("click")

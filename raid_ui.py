@@ -47,6 +47,25 @@ def _darken_layer(key, size, rgba):
     return surf
 
 
+def _mask_surface(key, size):
+    """取/建压暗层缓存表面(不填充)。
+
+    关键:填充(整屏压暗)与"打洞"(亮区/视野多边形)**必须在同一帧完成**。
+    以前是每帧 fill、只在版本变化时打洞 —— 版本没变的那些帧里洞被填掉,
+    表现就是亮区一闪一闪(夜里尤其明显:整屏几乎全黑)。
+    """
+    surf = _rgb_cache.get(key)
+    if surf is None:
+        surf = pygame.Surface(size)
+        _rgb_cache[key] = surf
+    return surf
+
+
+def _darken_fill(surf, rgba):
+    a = rgba[3]
+    surf.fill(tuple(min(255, (255 - a) + (rgba[i] * a) // 255) for i in range(3)))
+
+
 # 撤离区呼吸边框:每帧给每个撤离点新建 Surface + 重画圆角框太浪费。
 # 按尺寸复用一个,只有呼吸亮度跨过一档才重画。
 _extract_cache = {}
@@ -107,12 +126,14 @@ def inv_layout(bag_w=6, bag_h=4):
     cell = 44
     bag = (pygame.Rect(panel.right - 40 - bag_w * cell, panel.y + 80,
                        bag_w * cell, bag_h * cell), cell)
-    weapon = pygame.Rect(panel.x + 30, panel.y + 80, 300, 100)
-    armor = pygame.Rect(panel.x + 30, panel.y + 210, 300, 100)
+    weapon = pygame.Rect(panel.x + 30, panel.y + 80, 300, 88)
+    armor = pygame.Rect(panel.x + 30, panel.y + 180, 300, 88)
+    helmet = pygame.Rect(panel.x + 30, panel.y + 280, 300, 58)
     close = pygame.Rect(panel.right - 50, panel.y + 16, 34, 34)
-    merge = pygame.Rect(panel.x + 30, panel.bottom - 92, 320, 42)
-    return dict(panel=panel, bag=bag, weapon=weapon, armor=armor,
-                close=close, merge=merge)
+    merge = pygame.Rect(panel.x + 30, panel.bottom - 104, 168, 38)
+    drop = pygame.Rect(panel.x + 208, panel.bottom - 104, 132, 38)
+    return dict(panel=panel, bag=bag, weapon=weapon, armor=armor, helmet=helmet,
+                close=close, merge=merge, drop=drop)
 
 
 def ask_layout():
@@ -478,16 +499,14 @@ def draw_raid(raid, screen):
         pygame.draw.circle(screen, (255, 60, 50), (int(px), int(py)),
                            PLAYER["radius"] + 6, 2)
 
-    # 战争迷雾 / 夜战光照(乘性压暗,见文件头的 _darken_layer 说明)。
-    # 合成层按 raid.fog_version 缓存(raid.refresh_fog 只在玩家移动/转头时
-    # 重算),平时每帧只剩一次 MULT blit。
+    # 战争迷雾 / 夜战光照(乘性压暗,见文件头的 _mask_surface 说明)。
+    # 缓存表面只在 fog_version 变化(移动/转头)时"填充 + 打洞",
+    # 其它帧只做一次 MULT blit —— 亮区必须保持常亮,不能每帧被填掉。
     dark_mode = getattr(raid, "dark", False)
-    if dark_mode:
-        layer = _darken_layer("night", (W, H), (*NIGHT_DARK_RGB, 255))
-    else:
-        layer = _darken_layer("fog", (W, H), COL["fog"])
+    layer = _mask_surface("night" if dark_mode else "fog", (W, H))
     if raid._fog_drawn_ver != raid.fog_version:
         raid._fog_drawn_ver = raid.fog_version
+        _darken_fill(layer, (*NIGHT_DARK_RGB, 255) if dark_mode else COL["fog"])
         cx, cy = raid.cam[0], raid.cam[1]
         if dark_mode:
             for shape in getattr(raid, "light_shapes", ()):
@@ -573,6 +592,24 @@ def draw_raid(raid, screen):
         pygame.draw.rect(screen, (30, 30, 36), (bx, by, bw, 9), border_radius=4)
         col = COL["accent"] if raid.channel["kind"] == "destroy" else COL["good"]
         pygame.draw.rect(screen, col, (bx, by, bw * ratio, 9), border_radius=4)
+
+    # 搜刮 / 打药读条(玩家头顶一条,和引导条同一位置逻辑)
+    tk = getattr(raid, "take", None)
+    hc = getattr(raid, "heal_ch", None)
+    if tk is not None or hc is not None:
+        if tk is not None:
+            ratio = min(1.0, tk["t"] / max(0.01, tk["need"]))
+            label, col = "搜索中", COL["good"]
+        else:
+            ratio = min(1.0, hc["t"] / max(0.01, hc["need"]))
+            label, col = "治疗中", (120, 220, 160)
+        bw = 110
+        bx = px - bw / 2
+        by = py - 54
+        pygame.draw.rect(screen, (30, 30, 36), (bx, by, bw, 10), border_radius=4)
+        pygame.draw.rect(screen, col, (bx, by, bw * ratio, 10), border_radius=4)
+        t = get_font(13, bold=True).render(f"{label} {int(ratio * 100)}%", True, col)
+        screen.blit(t, t.get_rect(center=(px, by - 12)))
 
     _draw_hud(raid, screen)
 
@@ -717,7 +754,7 @@ def _draw_hud(raid, screen):
     # 快捷打药提示(血量过半以下且有医疗品时显示;键名跟玩家改键走)
     if p.hp < p.max_hp * 0.5 and any(pl.item.cat == "med" for pl in p.bag.items):
         t = get_font(14, bold=True).render(
-            "按 %s 快捷打药" % bindings.label_for(raid.game.save, "heal"),
+            "按 %s 打药(读条 1~3 秒)" % bindings.label_for(raid.game.save, "heal"),
             True, COL["good"])
         screen.blit(t, (26, H - 92))
 
@@ -1015,24 +1052,50 @@ def _draw_inventory(raid, screen):
                     hover=lay["weapon"].collidepoint(mx, my))
     uikit.draw_slot(screen, lay["armor"], p.armor, "护甲",
                     hover=lay["armor"].collidepoint(mx, my))
+    uikit.draw_slot(screen, lay["helmet"], p.helmet, "头盔",
+                    hover=lay["helmet"].collidepoint(mx, my))
     bag_rect, cell = lay["bag"]
     draw_grid(screen, bag_rect.x, bag_rect.y, p.bag, cell,
               f"出战背包 {p.bag.w}×{p.bag.h}")
-    # 携行/自救状态
+    # 携行/自救状态(挪到背包网格下面,别和头盔槽打架)
     ry = get_font(14)
+    ty = bag_rect.bottom + 8
     t = ry.render(f"携行容量 {p.bag.w}×{p.bag.h} 格(战局内不可换包)",
                   True, COL["text_dim"])
-    screen.blit(t, (lay["panel"].x + 30, lay["armor"].bottom + 8))
+    screen.blit(t, (bag_rect.x, ty))
     if p.armor is not None and p.armor.def_.get("revive"):
         rv = "已用" if raid.revive_used else "可用"
         col = COL["text_dim"] if raid.revive_used else COL["good"]
         t = ry.render(f"倒地自救:{rv}(每局一次)", True, col)
-        screen.blit(t, (lay["panel"].x + 30, lay["armor"].bottom + 30))
-    # 整理弹药按钮
+        screen.blit(t, (bag_rect.x, ty + 22))
+    if p.helmet is not None and p.helmet.def_.get("nvg"):
+        t = ry.render(f"夜视仪:半径 {int(p.helmet.def_['nvg'][0])}", True,
+                      (140, 220, 160))
+        screen.blit(t, (bag_rect.x, ty + 44))
+    # 打药读条(在面板上也显示一条,免得只看画面顶部)
+    hc = getattr(raid, "heal_ch", None)
+    if hc is not None:
+        ratio = min(1.0, hc["t"] / max(0.01, hc["need"]))
+        bar = pygame.Rect(bag_rect.x, ty + 68, bag_rect.w, 14)
+        pygame.draw.rect(screen, COL["grid_bg"], bar, border_radius=4)
+        pygame.draw.rect(screen, COL["good"],
+                         (bar.x, bar.y, int(bar.w * ratio), bar.h), border_radius=4)
+        tt = get_font(13, bold=True).render(
+            f"治疗中 {int(ratio * 100)}%", True, (240, 240, 240))
+        screen.blit(tt, tt.get_rect(center=bar.center))
+    # 整理弹药 / 丢弃模式
     draw_button(screen, lay["merge"], "整理弹药(叠至 120 发/组)",
                 hover=lay["merge"].collidepoint(mx, my), small=True)
-    hint = "左键:使用/装备   右键:丢弃   点击装备槽:卸下"
-    t = get_font(14).render(hint, True, COL["text_dim"])
+    drop_on = getattr(raid, "drop_mode", False)
+    draw_button(screen, lay["drop"],
+                "丢弃模式:开" if drop_on else "丢弃模式:关",
+                hover=lay["drop"].collidepoint(mx, my), small=True)
+    hint = ("丢弃模式已开:点物品/装备槽 = 丢在脚边" if drop_on else
+            "左键:使用/装备   右键:丢弃   点装备槽:卸下")
+    if raid.touch_mode and not drop_on:
+        hint += "   手机:开「丢弃模式」再点物品"
+    t = get_font(14).render(hint, True,
+                            COL["accent"] if drop_on else COL["text_dim"])
     screen.blit(t, (lay["panel"].x + 30, lay["panel"].bottom - 34))
 
     hovered = grid_hit_px(p.bag, lay["bag"], (mx, my))
@@ -1040,6 +1103,8 @@ def _draw_inventory(raid, screen):
         draw_tooltip(screen, mx, my, p.weapon)
     elif hovered is None and lay["armor"].collidepoint(mx, my) and p.armor:
         draw_tooltip(screen, mx, my, p.armor)
+    elif hovered is None and lay["helmet"].collidepoint(mx, my) and p.helmet:
+        draw_tooltip(screen, mx, my, p.helmet)
     if hovered is not None:
         draw_tooltip(screen, mx, my, hovered.item)
 
@@ -1079,9 +1144,32 @@ def _draw_loot_window(raid, screen):
     dst_rect, cell2 = lay["dst"]
     draw_grid(screen, dst_rect.x, dst_rect.y, p.bag, cell2, "你的背包")
 
-    draw_button(screen, lay["takeall"], "拾取全部",
+    draw_button(screen, lay["takeall"], "全部拿走(逐件搜)",
                 hover=lay["takeall"].collidepoint(mx, my), small=True)
-    hint = "左键物品:拾取 / 放回     空武器/护甲槽时点击可直接装备"
+    # 搜刮读条:正在搜的那件物品上画进度
+    tk = getattr(raid, "take", None)
+    if tk is not None and tk["lc"] is lc and tk["item"] in lc.container.items:
+        placed = tk["item"]
+        iw, ih = placed.item.size()
+        r = pygame.Rect(src_rect.x + placed.x * cell, src_rect.y + placed.y * cell,
+                        iw * cell, ih * cell)
+        hl = _hud_bg(r.w, r.h, (120, 200, 120, 70))
+        screen.blit(hl, r)
+        pygame.draw.rect(screen, COL["good"], r, 3)
+        ratio = min(1.0, tk["t"] / max(0.01, tk["need"]))
+        bar = pygame.Rect(r.x, r.bottom + 4, r.w, 5)
+        pygame.draw.rect(screen, COL["grid_bg"], bar, border_radius=3)
+        pygame.draw.rect(screen, COL["good"],
+                         (bar.x, bar.y, int(bar.w * ratio), bar.h), border_radius=3)
+        tt = get_font(13, bold=True).render(
+            f"搜索中 {int(ratio * 100)}%", True, COL["good"])
+        screen.blit(tt, tt.get_rect(center=(r.centerx, r.y - 12)))
+        if tk.get("queue"):
+            tq = get_font(13).render(f"队列中还有 {len(tk['queue'])} 件",
+                                     True, COL["text_dim"])
+            screen.blit(tq, (src_rect.x, src_rect.bottom + 12))
+    hint = ("左键物品:开始搜索(1~2 秒/件)     空武器/护甲槽时优先装备"
+            if tk is None else "搜索中…走远或关窗会中断")
     t = get_font(14).render(hint, True, COL["text_dim"])
     screen.blit(t, (lay["panel"].x + 30, lay["panel"].bottom - 34))
 

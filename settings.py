@@ -3,7 +3,7 @@
 import pygame
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.4.1"
+GAME_VERSION = "2.5.0"
 # 更新清单地址(可换成自建服务器 / GitHub raw;留空则只认 EXE 同目录的 version.json)
 UPDATE_MANIFEST_URL = "http://127.0.0.1:8765/version.json"
 UPDATE_TIMEOUT = 3   # 检查 / 下载超时(秒)
@@ -24,6 +24,15 @@ FOG_VIS_RADIUS = 840
 RAID_TIME = 12 * 60          # 战局时长(秒)
 EXTRACT_TIME = 3.0           # 撤离引导(秒)
 INTERACT_DIST = 56           # 搜刮交互距离(像素)
+# 搜刮/打药读条(秒):以前是瞬发,现在要花时间
+LOOT_TAKE_TIME = 1.0         # 搜刮单件的基础时间
+LOOT_TAKE_PER_CELL = 0.16    # 每多占一格多花的时间(大件更慢)
+LOOT_TAKE_MIN = 0.8
+LOOT_TAKE_MAX = 2.6
+HEAL_TIME = 1.6              # 打药基础时间
+HEAL_TIME_PER_HP = 0.010     # 每点治疗量额外时间
+HEAL_TIME_MIN = 1.0
+HEAL_TIME_MAX = 3.0
 STASH_W, STASH_H = 10, 20    # 藏身处仓库(格子多了,藏身处用滚轮上下翻)
 STASH_VIEW_ROWS = 8          # 仓库面板一次能看到几行(其余靠滚轮)
 BAG_W, BAG_H = 4, 2          # 无背包时的口袋容量(装备背包后按 grid 扩容)
@@ -860,5 +869,5 @@ CONTAINER_INFO = {
     "val": ("保险箱", 3, 2),
     "corpse": ("尸体", 4, 3),
     "boss_corpse": ("头目尸体", 8, 5),
-    "ground": ("地面", 3, 2),
+    "ground": ("地面", 8, 5),   # 丢在地上的东西:要放得下大枪/重甲
 }
