@@ -125,7 +125,7 @@ class Hideout:
         self.opt_sel = None         # 触屏布局:选中的按钮名
         self.opt_drag = None        # 触屏布局:正在拖动的按钮名
         self.opt_layout = {}        # 触屏布局工作副本:{name: dict(rx,ry,r,label)}
-        self.opt_bind_rects = [pygame.Rect(852, 190 + i * 30, 240, 26)
+        self.opt_bind_rects = [pygame.Rect(852, 184 + i * 28, 240, 26)
                                for i in range(len(bindings.ACTIONS))]
         self.opt_fps_rects = [pygame.Rect(772 + i * 108, 214, 98, 34)
                               for i in range(len(FPS_CAP_CHOICES))]

@@ -9,7 +9,8 @@ import bindings
 from settings import (W, H, COL, BAG_W, BAG_H, RAID_TIME, EXTRACT_TIME,
                       HOSTAGE_RESCUE_TIME, REVIVE_TIME, C4_BLAST_RADIUS,
                       NIGHT_DARK_RGB, NIGHT_BEAM_RGB, PLAYER, fmt_rub, get_font,
-                      weapon_beam, helmet_nvg)
+                      weapon_beam, helmet_nvg, weapon_fire_mode,
+                      weapon_fire_modes, fire_mode_name)
 import uikit
 from uikit import CELL, draw_grid, draw_item_icon, draw_tooltip, draw_button, draw_slot
 
@@ -773,6 +774,15 @@ def _draw_hud(raid, screen):
         big = get_font(30, bold=True).render(
             f"{p.weapon.state.get('mag', 0)} / {p.reserve_count()}", True, col)
         screen.blit(big, (W - big.get_width() - 26, H - 64))
+        # 射击模式(按 G / 手机「模式」按钮切换):全自动武器才有得切
+        mode = weapon_fire_mode(p.weapon)
+        mcol = {"semi": COL["text_dim"], "burst": (255, 190, 90),
+                "auto": COL["good"]}.get(mode, COL["text_dim"])
+        mtext = fire_mode_name(mode)
+        if len(weapon_fire_modes(p.weapon)) > 1 and not getattr(raid, "touch_mode", False):
+            mtext += "(%s 切)" % bindings.label_for(raid.game.save, "firemode")
+        mt = get_font(16, bold=True).render(mtext, True, mcol)
+        screen.blit(mt, (W - big.get_width() - 26 - mt.get_width() - 16, H - 58))
         cal = get_font(13).render(ITEMS_CAL(d), True, COL["text_dim"])
         screen.blit(cal, (W - cal.get_width() - 26, H - 30))
         if p.reloading:

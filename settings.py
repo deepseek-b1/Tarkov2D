@@ -3,7 +3,7 @@
 import pygame
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.7.0"
+GAME_VERSION = "2.8.0"
 # 更新清单地址(可换成自建服务器 / GitHub raw;留空则只认 EXE 同目录的 version.json)
 UPDATE_MANIFEST_URL = "http://127.0.0.1:8765/version.json"
 UPDATE_TIMEOUT = 3   # 检查 / 下载超时(秒)
@@ -792,6 +792,54 @@ def weapon_ammo_ids(item):
 def weapon_blast_mul(item):
     tal = TALENTS.get(item.iid, {}) if item is not None else {}
     return tal.get("blast_mul", 1.0)
+
+
+# ---------- 射击模式(按 G 切换) ----------
+# 全自动枪械:单发 → 三连发 → 全自动 循环;半自动/栓动/泵动枪只有单发。
+# 当前模式存在武器 state["fire_mode"] 里,所以换枪、存档都跟着武器走。
+FIRE_MODE_NAMES = {"semi": "单发", "burst": "三连发", "auto": "全自动"}
+FIRE_MODE_ORDER = ["semi", "burst", "auto"]
+BURST_COUNT = 3          # 三连发:扣一次扳机打几发
+
+
+def weapon_fire_modes(item_or_def):
+    """这把枪支持的射击模式(按切换顺序)。"""
+    d = item_or_def.def_ if hasattr(item_or_def, "def_") else item_or_def
+    return list(FIRE_MODE_ORDER) if d.get("auto") else ["semi"]
+
+
+def weapon_default_fire_mode(item_or_def):
+    """默认模式:全自动枪用全自动(与老版本行为一致),其余单发。"""
+    d = item_or_def.def_ if hasattr(item_or_def, "def_") else item_or_def
+    return "auto" if d.get("auto") else "semi"
+
+
+def weapon_fire_mode(item):
+    """当前射击模式(存档里的旧武器没有该项时回落到默认值)。"""
+    if item is None:
+        return "semi"
+    modes = weapon_fire_modes(item)
+    m = item.state.get("fire_mode")
+    if m in modes:
+        return m
+    dflt = weapon_default_fire_mode(item)
+    return dflt if dflt in modes else modes[0]
+
+
+def cycle_fire_mode(item):
+    """切到下一个射击模式并写回武器 state;只有一种模式时返回 None。"""
+    if item is None:
+        return None
+    modes = weapon_fire_modes(item)
+    if len(modes) < 2:
+        return None
+    nxt = modes[(modes.index(weapon_fire_mode(item)) + 1) % len(modes)]
+    item.state["fire_mode"] = nxt
+    return nxt
+
+
+def fire_mode_name(mode):
+    return FIRE_MODE_NAMES.get(mode, FIRE_MODE_NAMES["semi"])
 
 # ---------- 游戏模式 ----------
 MODES = {

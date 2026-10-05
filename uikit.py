@@ -4,7 +4,8 @@ import pygame
 
 from settings import (get_font, COL, fmt_rub, ITEMS, ATTACH_SLOTS,
                       weapon_params, weapon_capacity, weapon_ammo_ids,
-                      weapon_slots, weapon_attach, weapon_talent, weapon_class)
+                      weapon_slots, weapon_attach, weapon_talent, weapon_class,
+                      weapon_fire_modes, weapon_fire_mode, fire_mode_name)
 from inventory import Container, Placed
 
 CELL = 40  # 界面格子像素
@@ -175,7 +176,10 @@ def item_info_lines(item):
         sub.append(f"伤害 {dmg:.0f}×{pellets}  射速 {d['rof']}s  "
                    f"弹匣 {item.state.get('mag', 0)}/{cap}")
         names = "/".join(ITEMS[a]["name"] for a in weapon_ammo_ids(item) if a in ITEMS)
-        sub.append(f"弹药: {names}  {'全自动' if d['auto'] else '半自动'}")
+        modes = weapon_fire_modes(item)
+        sub.append(f"弹药: {names}  " + "/".join(fire_mode_name(m) for m in modes)
+                   + (f"  当前:{fire_mode_name(weapon_fire_mode(item))}"
+                      if len(modes) > 1 else ""))
         if burn:
             sub.append(f"★ 燃烧伤害 {burn:.0f}/秒")
         if d.get("spread_braced") is not None:

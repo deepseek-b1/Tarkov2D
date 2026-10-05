@@ -32,6 +32,8 @@ from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       HQ_REACTION_COOLDOWN, REBUILD_RATE,
                       weapon_params, weapon_capacity, weapon_ammo_ids,
                       weapon_slots, weapon_attach, weapon_blast_mul, ATTACH_SLOTS,
+                      weapon_fire_mode, weapon_fire_modes, cycle_fire_mode,
+                      fire_mode_name, BURST_COUNT,
                       FOG_MOVE_STEP, FOG_VIS_REFRESH, FOG_VIS_RADIUS,
                       MOVE_AIM_MUL, MOVE_RELOAD_MUL,
                       fmt_rub, get_font)
@@ -155,9 +157,19 @@ class Player:
         self.bag = sd.bag
         self.aim = 0.0
         self.fire_cd = 0.0
+        self.burst_left = 0       # 三连发剩余待发数(按 G 可切换射击模式)
         self.reload_t = 0.0
         self.reloading = False
         self.hurt_flash = 0.0
+
+    def fire_mode(self):
+        """当前武器的射击模式(semi/burst/auto)。"""
+        return weapon_fire_mode(self.weapon)
+
+    def cycle_fire_mode(self):
+        """按 G 切到下一个射击模式;只有单发的枪返回 None。"""
+        self.burst_left = 0
+        return cycle_fire_mode(self.weapon)
 
     def take_damage(self, dmg, raid, rpg=False):
         if rpg:
@@ -255,6 +267,10 @@ class Raid:
         # 玩家自定义的触屏按键布局(设置页编辑)要在建 TouchUI 前生效
         touch_mod.apply_layout(getattr(game.save, "touch_layout", None))
         self.touch = TouchUI(support=self.mode == "assault") if self.touch_mode else None
+        if self.touch is not None:
+            # 「模式」按钮先写上当前武器的射击模式(update 里每帧刷新)
+            self.touch.mode_label = fire_mode_name(
+                weapon_fire_mode(getattr(game.save, "weapon", None)))
         self.aim_locked = None
         self.map = GameMap(self.map_key)
         self.map_surf = self.map.prerender()
@@ -932,16 +948,29 @@ class Raid:
         if w is None or p.reload_t > 0 or p.fire_cd > 0:
             return
         d = w.def_
-        if not d["auto"] and not self.fire_edge:
-            return
-        if d["auto"] and not held:
-            return
+        mode = p.fire_mode()
+        if mode == "auto":
+            if not held:
+                return
+        elif mode == "burst":
+            # 三连发:扣一次扳机打 BURST_COUNT 发,打完必须松手再扣
+            # (点按也算一次扣扳机 —— 手机点按只给 fire_edge,没有 held)
+            if p.burst_left <= 0:
+                if not self.fire_edge:
+                    return
+                p.burst_left = BURST_COUNT
+        else:
+            if not self.fire_edge:
+                return
         if w.state.get("mag", 0) <= 0:
             if self.fire_edge:
                 audio.play("empty")
+            p.burst_left = 0
             return
         dmg, pellets, hip, braced_s, rng, _rl, loud, burn = weapon_params(w)
         w.state["mag"] -= 1
+        if mode == "burst":
+            p.burst_left = max(0, p.burst_left - 1)
         p.fire_cd = d["rof"]
         tx = p.x + math.cos(p.aim) * 22
         ty = p.y + math.sin(p.aim) * 22
@@ -962,6 +991,19 @@ class Raid:
                            (255, 210, 90), speed=160)
         self.shake = min(12, self.shake + (6.0 if is_rpg
                                           else (2.5 if pellets > 1 else 1.2)))
+
+    def cycle_shoot_mode(self):
+        """按 G 切换射击模式(单发 / 三连发 / 全自动)。"""
+        p = self.player
+        if p.weapon is None:
+            self.add_toast("空手,没有可切换的射击模式", COL["text_dim"], 2.0)
+            return
+        nxt = p.cycle_fire_mode()
+        if nxt is None:
+            self.add_toast(f"{p.weapon.name} 只有单发模式", COL["text_dim"], 2.0)
+            return
+        audio.play("click")
+        self.add_toast(f"射击模式:{fire_mode_name(nxt)}", COL["accent"], 2.0)
 
     def spawn_scav_bullet(self, x, y, ang, dmg, pellets, spread, rng, sfx,
                           rpg=False, src=None):
@@ -1147,6 +1189,7 @@ class Raid:
             return
         p.reload_t = weapon_params(w)[5]
         p.reloading = True
+        p.burst_left = 0          # 装填会打断三连发
         audio.play("reload")
 
     def _finish_reload(self):
@@ -1257,6 +1300,7 @@ class Raid:
         if item.cat == "weapon" and p.weapon is None and armor_allows(p.armor, item.def_):
             lc.container.remove_placed(placed)
             p.weapon = item
+            p.burst_left = 0
             p.reloading = False
             p.reload_t = 0
             self._log_gained(item)
@@ -1370,6 +1414,7 @@ class Raid:
                 self.add_toast(note, COL["bad"])
                 return
             p.weapon = item
+            p.burst_left = 0      # 换枪重置三连发
             p.reloading = False   # 换枪取消装填
             p.reload_t = 0
             audio.play("click")
@@ -2196,6 +2241,9 @@ class Raid:
                 elif bindings.key_matches(ev.key, sd, "reload"):
                     if not (self.inv_open or self.loot_target):
                         self.start_reload()
+                elif bindings.key_matches(ev.key, sd, "firemode"):
+                    if not (self.inv_open or self.loot_target):
+                        self.cycle_shoot_mode()
                 elif bindings.key_matches(ev.key, sd, "heal"):
                     if not (self.inv_open or self.loot_target):
                         self.quick_heal()
@@ -2297,6 +2345,8 @@ class Raid:
                     self.fire_edge = True       # 点按也能点射
                 elif name == "reload":
                     self.start_reload()
+                elif name == "mode":
+                    self.cycle_shoot_mode()
                 elif name == "heal":
                     self.quick_heal()
                 elif name == "loot":
@@ -2312,6 +2362,8 @@ class Raid:
                     idx = {"sup1": 0, "sup2": 1, "sup3": 2}[name]
                     tx, ty = self._support_target()
                     self.call_support(SUPPORT_ORDER[idx], tx, ty)
+            # 「模式」按钮上写当前射击模式(处理完本帧点按后再刷新)
+            self.touch.mode_label = fire_mode_name(p.fire_mode())
         else:
             held = pygame.mouse.get_pressed()[0]
             self.braced = bool(pygame.mouse.get_pressed()[2])   # 右键=架枪

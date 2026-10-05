@@ -16,6 +16,8 @@ BUTTONS = [
     ("fire", "开火", (0.915, 0.80), 66),
     ("brace", "架枪", (0.795, 0.90), 48),
     ("reload", "装填", (0.665, 0.905), 42),
+    # 射击模式:按钮文字每帧由 Raid 更新成当前模式(单发/三连发/全自动)
+    ("mode", "模式", (0.72, 0.72), 40),
     ("heal", "打药", (0.915, 0.615), 42),
     ("loot", "搜刮", (0.835, 0.50), 42),
     ("bag", "背包", (0.955, 0.44), 40),
@@ -113,6 +115,7 @@ class TouchUI:
         self.pressed = {}        # id -> button name
         self.just_pressed = []   # 本帧新按下的按钮名(供点射用)
         self.support = support   # 是否显示友军支援按钮(突袭模式)
+        self.mode_label = "模式"  # 「模式」按钮上的文字:当前射击模式(Raid 每帧刷新)
 
     # ---------- 几何 ----------
     def buttons(self):
@@ -237,6 +240,7 @@ class TouchUI:
         # 按钮:整块按钮(底圆 + 描边 + 文字)预渲染成贴图,每帧只 blit 一次。
         # 原来是每帧每个按钮 2 次 circle + 1 次文字 blit(手机 8 个按钮就是 24 次)。
         for name, d in self.button_layout().items():
-            s = _button_sprite(d["label"], d["r"], self.hold(name))
+            label = self.mode_label if name == "mode" else d["label"]
+            s = _button_sprite(label, d["r"], self.hold(name))
             screen.blit(s, (d["pos"][0] - s.get_width() // 2,
                             d["pos"][1] - s.get_height() // 2))

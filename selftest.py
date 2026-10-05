@@ -3492,6 +3492,149 @@ def run():
 
     check("手感-搜索揭示/移动减速/滚动条/枪械分类", t_qol)
 
+    def t_firemode():
+        """射击模式:全自动枪按 G 循环 单发/三连发/全自动,半自动只有单发,手机有「模式」按钮。"""
+        from game import Game
+        from settings import (weapon_fire_modes, weapon_fire_mode, cycle_fire_mode,
+                              fire_mode_name, BURST_COUNT, FIRE_MODE_NAMES)
+        from touch import TouchUI
+        import touch as touch_mod
+        import bindings as bmod2
+        # 1) 配置层:模式表 / 默认键 G / 全自动枪可切、半自动枪只有单发
+        assert set(FIRE_MODE_NAMES) == {"semi", "burst", "auto"}
+        assert BURST_COUNT >= 2
+        assert bmod2.keys_for(None, "firemode") == (pygame.K_g,)
+        assert bmod2.label_for(None, "firemode") == "G"
+        w = Item.weapon("ak74", mag=30)
+        assert weapon_fire_modes(w) == ["semi", "burst", "auto"], weapon_fire_modes(w)
+        assert weapon_fire_mode(w) == "auto", "全自动枪默认该是全自动(不改变老行为)"
+        assert cycle_fire_mode(w) == "semi"
+        assert cycle_fire_mode(w) == "burst"
+        assert cycle_fire_mode(w) == "auto"
+        assert w.state["fire_mode"] == "auto"
+        # 模式跟着武器 state 走 -> 存档往返后还在
+        assert weapon_fire_mode(Item.from_dict(w.serialize())) == "auto"
+        # 非法/过期值回落到默认
+        w.state["fire_mode"] = "plasma"
+        assert weapon_fire_mode(w) == "auto"
+        # 半自动/栓动枪:只有单发,切不动
+        pm = Item.weapon("pm", mag=8)
+        assert weapon_fire_modes(pm) == ["semi"]
+        assert weapon_fire_mode(pm) == "semi"
+        assert cycle_fire_mode(pm) is None
+        assert Item.weapon("m700", mag=5).state.get("fire_mode") is None
+        assert weapon_fire_mode(Item.weapon("m870", mag=8)) == "semi"
+
+        # 2) 战局内:单发 / 全自动 / 三连发的扣扳机规则
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        g.save.weapon = Item.weapon("ak74", mag=30)
+        g.save.bag.clear()
+        g.save.bag.add_item(Item("a545", count=120))
+        g.start_raid()
+        r = g.raid
+        r.scavs = []
+        r.allies = []
+        p = r.player
+        w = p.weapon
+
+        def hold_fire(frames):
+            """模拟按住扳机 frames 帧(只有第 1 帧有 fire_edge,跟真实循环一致)。"""
+            before = w.state["mag"]
+            for i in range(frames):
+                p.fire_cd = 0.0
+                r.fire_edge = (i == 0)
+                r.try_fire(True)
+            r.fire_edge = False
+            return before - w.state["mag"]
+
+        def tap_fire():
+            """模拟点按(手机点射:有 fire_edge 但没有 held)。"""
+            before = w.state["mag"]
+            p.fire_cd = 0.0
+            r.fire_edge = True
+            r.try_fire(False)
+            r.fire_edge = False
+            for _ in range(12):        # 后续帧松手,三连发也要打完
+                p.fire_cd = 0.0
+                r.try_fire(False)
+            return before - w.state["mag"]
+
+        w.state["fire_mode"] = "semi"
+        assert hold_fire(6) == 1, "单发:按住也只打一发"
+        w.state["fire_mode"] = "auto"
+        assert hold_fire(6) == 6, "全自动:按住就一直打"
+        w.state["fire_mode"] = "burst"
+        w.state["mag"] = 30
+        assert hold_fire(30) == BURST_COUNT, "三连发:按住也只打一串"
+        assert hold_fire(30) == BURST_COUNT, "松手再扣:还能再打一串"
+        w.state["mag"] = 30
+        assert tap_fire() == BURST_COUNT, "点按一下也要打满一串"
+        assert w.state["mag"] == 30 - BURST_COUNT
+        # 打空时不会卡住 burst 计数
+        w.state["mag"] = 0
+        assert hold_fire(5) == 0
+        assert p.burst_left == 0
+        w.state["mag"] = 30
+
+        # 3) 按 G 走真实 KEYDOWN 路径切换(改键后按新键)
+        w.state["fire_mode"] = "auto"
+        r.update(1 / 60, [pygame.event.Event(pygame.KEYDOWN, key=pygame.K_g)])
+        assert p.fire_mode() == "semi", p.fire_mode()
+        r.update(1 / 60, [pygame.event.Event(pygame.KEYDOWN, key=pygame.K_g)])
+        assert p.fire_mode() == "burst"
+        g.save.bindings = {"firemode": [pygame.K_v]}
+        r.update(1 / 60, [pygame.event.Event(pygame.KEYDOWN, key=pygame.K_g)])
+        assert p.fire_mode() == "burst", "改键后旧键不该再生效"
+        r.update(1 / 60, [pygame.event.Event(pygame.KEYDOWN, key=pygame.K_v)])
+        assert p.fire_mode() == "auto"
+        g.save.bindings = {}
+        # 半自动枪:按 G 只提示,模式不变
+        p.weapon = Item.weapon("pm", mag=8)
+        p.burst_left = 3
+        r.update(1 / 60, [pygame.event.Event(pygame.KEYDOWN, key=pygame.K_g)])
+        assert p.fire_mode() == "semi"
+        assert p.burst_left == 0, "切模式/换枪要清掉三连发计数"
+        assert any("单发" in t[0] for t in r.toasts), r.toasts
+
+        # 4) 手机:多一个「模式」按钮(写着当前模式),点它能切
+        for name, d in touch_mod.merged_layout(False).items():
+            assert touch_mod.hit_test(d["pos"], False) == name, name   # 按钮不重叠
+        assert "mode" in touch_mod.merged_layout(False)
+        g2 = Game()
+        g2.save = save_mod.reset_data()
+        g2.save.seen_intro = True
+        g2.save.touch = True
+        g2.save.weapon = Item.weapon("ak74", mag=30)
+        g2.start_raid()
+        r2 = g2.raid
+        r2.scavs = []
+        assert isinstance(r2.touch, TouchUI)
+        assert r2.touch.mode_label == "全自动", r2.touch.mode_label
+        r2.touch.just_pressed.append("mode")       # 触屏点按
+        r2.update(1 / 60, [])
+        assert r2.player.fire_mode() == "semi", r2.player.fire_mode()
+        assert r2.touch.mode_label == "单发", r2.touch.mode_label
+        # 真实 FINGER 事件(合成鼠标镜像是 synthetic,不该双触发)
+        d = r2.touch.button_layout()["mode"]
+        ev = pygame.event.Event(pygame.FINGERDOWN, finger_id=3,
+                                x=d["pos"][0] / float(1280),
+                                y=d["pos"][1] / float(720), dx=0.0, dy=0.0)
+        r2.update(1 / 60, [ev])
+        assert r2.player.fire_mode() == "burst", r2.player.fire_mode()
+        assert r2.touch.mode_label == "三连发", r2.touch.mode_label
+        # 手机上「模式」按钮也是点给玩家自己看的 + HUD/按钮渲染不炸
+        scr2 = pygame.display.set_mode((1280, 720))
+        r2.touch.draw(scr2)
+        import raid_ui as _rui
+        _rui.draw_raid(r2, scr2)
+        # 电脑模式的 HUD 也要画模式(带键位提示)
+        r.game.save.bindings = {}
+        _rui.draw_raid(r, scr2)
+
+    check("射击模式-G切换单发/三连发/全自动(含手机按钮)", t_firemode)
+
     ok = all(r[1] for r in results)
     report = ["Tarkov2D selftest " + ("PASS" if ok else "FAIL"), ""]
     for name, passed, err in results:
