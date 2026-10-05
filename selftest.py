@@ -987,14 +987,14 @@ def run():
     check("武器-M139装轮机枪(弹容/持用限制/架枪)", t_minigun)
 
     def t_braced():
-        """架枪规则:除狙击枪外全枪械可架枪;M139 架枪时不能移动。"""
+        """架枪规则:狙击步枪不参与架枪,其它枪都更准;M139 架枪时不能移动。"""
         from game import Game
-        from settings import ITEMS
+        from settings import ITEMS, weapon_class
         for iid, d in ITEMS.items():
             if d.get("cat") != "weapon":
                 continue
-            if iid == "m700":
-                assert "spread_braced" not in d, "狙击枪不参与架枪"
+            if weapon_class(iid) == "狙击步枪":
+                assert "spread_braced" not in d, f"{iid} 狙击枪不参与架枪"
             else:
                 assert d.get("spread_braced") is not None, iid
                 assert d["spread_braced"] < d["spread"], iid
@@ -1388,8 +1388,9 @@ def run():
         for _ in range(20):
             r.update(1 / 60, [])
         assert p.x > x0 + 30, p.x - x0
-        # 触屏按钮:打药 / 背包(先清场,免得读条时被敌人打断回血)
+        # 触屏按钮:打药 / 背包(先清场 + 清掉空中的子弹,免得读条时被打断回血)
         r.scavs = []
+        r.bullets.clear()
         p.hp = 60
         r.touch.just_pressed = ["heal"]
         r.update(1 / 60, [])
