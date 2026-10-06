@@ -405,9 +405,9 @@ def try_move(src, placed, dst):
 
 
 # ---------- 一键整理 ----------
-# 分区顺序:枪 / 甲 / 配件 / 背包 / 子弹 / 药 / 杂物 / 值钱货
-CATEGORY_ORDER = ("weapon", "armor", "attach", "pack", "ammo", "med", "misc",
-                  "valuable")
+# 分区顺序:枪 / 甲 / 头盔 / 配件 / 背包 / 子弹 / 药 / 杂物 / 值钱货
+CATEGORY_ORDER = ("weapon", "armor", "helmet", "attach", "pack", "ammo", "med",
+                  "misc", "valuable")
 
 
 def merge_stacks(items):

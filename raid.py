@@ -198,6 +198,9 @@ class Player:
             return
         if self.armor is not None:
             dmg *= (1 - self.armor.def_.get("reduce", 0))
+        if self.helmet is not None:
+            # 头盔再分担一部分伤害(乘在护甲减伤之后;火箭弹规则只看护甲等级)
+            dmg *= (1 - self.helmet.def_.get("reduce", 0))
         dmg = max(1, round(dmg))
         self.hp -= dmg
         self.hurt_flash = 0.45

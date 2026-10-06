@@ -217,6 +217,16 @@ def item_info_lines(item):
         sub.append(txt)
         if d.get("revive"):
             sub.append("★ 倒地自救 ×1(每局一次)")
+    elif item.cat == "helmet":
+        txt = ""
+        if d.get("level"):
+            txt += f"防弹级别 {d['level']}   "
+        if d.get("reduce"):
+            txt += f"额外减伤 {int(d['reduce'] * 100)}%"
+        if txt:
+            sub.append(txt.strip())
+        if d.get("nvg"):
+            sub.append(f"★ 夜视:周围 {int(d['nvg'][0])} 全向可见(黑暗模式)")
     elif item.cat == "pack":
         gw, gh = d.get("grid", (0, 0))
         sub.append(f"携行容量 {gw}×{gh} 格")

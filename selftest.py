@@ -1590,11 +1590,17 @@ def run():
         w2.state["attach"]["laser"] = "laser_ir"
         hip2 = weapon_params(w2)[2]
         assert hip2 < hip1 * 0.9, (hip1, hip2)
-        # 4) 天赋
+        # 4) 天赋(每把枪都必须有)
         assert TALENTS["akm"]["dmg_mul"] > 1
         assert weapon_params(Item.weapon("akm"))[0] > ITEMS["akm"]["dmg"]
         assert weapon_params(Item.weapon("vector"))[5] < 1.0      # 装填更快
         assert weapon_params(Item.weapon("m700"))[3] < ITEMS["m700"]["spread"]
+        _no_tal = [i for i, d in ITEMS.items()
+                   if d.get("cat") == "weapon" and not TALENTS.get(i)]
+        assert not _no_tal, f"这些枪没有天赋:{_no_tal}"
+        # 每把枪的天赋都要有名字与说明(描述与倍率的一致性靠人工维护)
+        for _iid, _t in TALENTS.items():
+            assert _t.get("name") and _t.get("desc"), (_iid, _t)
         # 5) M139 不装配件
         assert weapon_slots("m139") == []
         # 6) 弹药分级
@@ -3634,6 +3640,87 @@ def run():
         _rui.draw_raid(r, scr2)
 
     check("射击模式-G切换单发/三连发/全自动(含手机按钮)", t_firemode)
+
+    def t_gear_catalog():
+        """暗区防具扩充:护甲/头盔目录不变式 + 头盔减伤机制。"""
+        from game import Game
+        from settings import (ITEMS, TRADE_GOODS, trade_cat_match, NEW_ARMORS,
+                              NEW_HELMETS, HELMET_REDUCE_BY_LEVEL,
+                              W as SW, H as SH)
+        import uikit as _uk
+        import raid_ui as _rui
+        # 1) 护甲不变式:级别/减伤/移速;6 级必带倒地自救,6 级以下不许带
+        armors = {i: d for i, d in ITEMS.items() if d["cat"] == "armor"}
+        assert len(armors) >= 25, len(armors)
+        for iid, d in armors.items():
+            assert 1 <= d.get("level", 0) <= 6, iid
+            assert 0 < d["reduce"] < 1, iid
+            assert 0 <= d.get("slow", 0) < 0.5, iid
+            assert d["price"] > 0, iid
+            assert bool(d.get("revive")) == (d["level"] == 6), iid
+        # 2) 头盔不变式:减伤必须与级别表完全一致(夜视头盔也不例外)
+        helmets = {i: d for i, d in ITEMS.items() if d["cat"] == "helmet"}
+        assert len(helmets) >= 26, len(helmets)
+        for iid, d in helmets.items():
+            assert d.get("level") in HELMET_REDUCE_BY_LEVEL, iid
+            assert abs(d["reduce"] - HELMET_REDUCE_BY_LEVEL[d["level"]]) < 1e-9, \
+                (iid, d["reduce"])
+            if d.get("nvg"):
+                assert d["nvg"][0] > 0 and d["nvg"][1] > 0, iid
+        # 3) 新装备全部在目录里且分类正确
+        assert len(NEW_ARMORS) == 23 and len(NEW_HELMETS) == 26
+        assert all(ITEMS[i]["cat"] == "armor" for i in NEW_ARMORS)
+        assert all(ITEMS[i]["cat"] == "helmet" for i in NEW_HELMETS)
+        # 4) 所有护甲/头盔都必须上架交易站,且分区归类正确
+        trade = {i for i, _c in TRADE_GOODS}
+        for iid in list(armors) + list(helmets):
+            assert iid in trade, f"{iid} 没上架交易站"
+            assert trade_cat_match(iid, ITEMS[iid]["cat"]), iid
+        # 5) 价格阶梯:每个防护级别的最低价随级别递增
+        for cat in ("armor", "helmet"):
+            by_lv = {}
+            for iid, d in ITEMS.items():
+                if d["cat"] == cat:
+                    by_lv.setdefault(d["level"], []).append(d["price"])
+            assert len(by_lv) >= 5, (cat, sorted(by_lv))
+            for lv in sorted(by_lv)[:-1]:
+                assert min(by_lv[lv]) < min(by_lv[lv + 1]), (cat, lv)
+        # 6) 头盔减伤生效:乘在护甲减伤之后
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        g.start_raid()
+        r = g.raid
+        p = r.player
+        p.armor = Item("paca")
+        p.helmet = None
+        p.hp = p.max_hp
+        p.take_damage(100, r)
+        assert p.max_hp - p.hp == 72, (p.max_hp - p.hp)     # 100 × (1-0.28)
+        p.hp = p.max_hp
+        p.helmet = Item("h_6bnt")                            # 6 级盔:再减 40%
+        p.take_damage(100, r)
+        assert p.max_hp - p.hp == 43, (p.max_hp - p.hp)     # 100 × 0.72 × 0.60
+        p.hp = p.max_hp
+        p.armor = None                                       # 只戴头盔
+        p.take_damage(100, r)
+        assert p.max_hp - p.hp == 60, (p.max_hp - p.hp)
+        assert p.hp > 0, "这里不该被打死"
+        # 7) 悬浮信息与 HUD 渲染(普通头盔显示减伤,夜视头盔显示夜视)
+        lines = _uk.item_info_lines(Item("h_03"))
+        assert any("防弹级别 5" in ln for ln in lines), lines
+        assert any("额外减伤 30%" in ln for ln in lines), lines
+        lines = _uk.item_info_lines(Item("nvg_pnv"))
+        assert any("夜视" in ln for ln in lines), lines
+        assert any("防弹级别 3" in ln for ln in lines), lines
+        scr = pygame.display.set_mode((SW, SH))
+        r.player.helmet = Item("h_03")
+        _rui.draw_raid(r, scr)                              # 背包面板头盔减伤行
+        _uk.draw_tooltip(scr, 200, 200, Item("h_an95"))
+        _uk.draw_tooltip(scr, 260, 260, Item("kn_composite"))
+        pygame.display.flip()
+
+    check("防具目录-暗区护甲头盔级别与头盔减伤", t_gear_catalog)
 
     ok = all(r[1] for r in results)
     report = ["Tarkov2D selftest " + ("PASS" if ok else "FAIL"), ""]

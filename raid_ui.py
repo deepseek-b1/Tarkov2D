@@ -1086,6 +1086,10 @@ def _draw_inventory(raid, screen):
         t = ry.render(f"夜视仪:半径 {int(p.helmet.def_['nvg'][0])}", True,
                       (140, 220, 160))
         screen.blit(t, (bag_rect.x, ty + 44))
+    elif p.helmet is not None and p.helmet.def_.get("reduce"):
+        t = ry.render(f"头盔额外减伤:{int(p.helmet.def_['reduce'] * 100)}%",
+                      True, COL["text_dim"])
+        screen.blit(t, (bag_rect.x, ty + 44))
     # 打药读条(在面板上也显示一条,免得只看画面顶部)
     hc = getattr(raid, "heal_ch", None)
     if hc is not None:

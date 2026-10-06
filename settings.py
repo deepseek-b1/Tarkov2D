@@ -3,7 +3,7 @@
 import pygame
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.8.0"
+GAME_VERSION = "2.9.0"
 # 更新清单地址(可换成自建服务器 / GitHub raw;留空则只认 EXE 同目录的 version.json)
 UPDATE_MANIFEST_URL = "http://127.0.0.1:8765/version.json"
 UPDATE_TIMEOUT = 3   # 检查 / 下载超时(秒)
@@ -469,6 +469,82 @@ ITEMS.update({
                    price=8000, stack=5),
 })
 
+# ---------- 暗区防具扩充(一):护甲 2~6 级 ----------
+# 减伤/移速按级别阶梯;6 级甲全部自带「倒地自救」,并满足重武器(M139 等)的持用门槛
+NEW_ARMORS = ["m1955",
+              "s926", "sent3", "b65",
+              "tm1", "tm2", "sent305",
+              "s926c", "kn_field", "hlc", "bt6", "imtv", "defm4", "defl4", "bn30",
+              "avs", "spartan_c", "al_assault", "al_tactical", "al_commander",
+              "marshal", "bt101", "kn_composite"]
+ITEMS.update({
+    # 2 级
+    "m1955": dict(name="M1955 战斗马甲", cat="armor", w=2, h=2,
+                  color=(104, 112, 86), price=15000, reduce=0.18, slow=0.0, level=2),
+    # 3 级(轻便胸挂,与 PACA 同档)
+    "s926": dict(name="926 安保胸挂甲", cat="armor", w=2, h=2,
+                 color=(92, 104, 120), price=21000, reduce=0.26, slow=0.02, level=3),
+    "sent3": dict(name="哨兵3型胸挂甲", cat="armor", w=2, h=2,
+                  color=(108, 100, 92), price=26000, reduce=0.29, slow=0.03, level=3),
+    "b65": dict(name="6B5 弹挂甲", cat="armor", w=2, h=2,
+                color=(96, 100, 84), price=32000, reduce=0.32, slow=0.05, level=3),
+    # 4 级(与 6B43 同档)
+    "tm1": dict(name="TM1 胸挂甲", cat="armor", w=3, h=2,
+                color=(110, 102, 88), price=52000, reduce=0.42, slow=0.08, level=4),
+    "tm2": dict(name="TM2 胸挂甲", cat="armor", w=3, h=2,
+                color=(100, 98, 92), price=60000, reduce=0.45, slow=0.10, level=4),
+    "sent305": dict(name="哨兵305 胸挂甲", cat="armor", w=3, h=2,
+                    color=(94, 106, 100), price=68000, reduce=0.48,
+                    slow=0.11, level=4),
+    # 5 级(减伤 75%~90%,与 6B23/Zhuk/Korund 同架)
+    "s926c": dict(name="926 复合防弹衣", cat="armor", w=3, h=2,
+                  color=(88, 100, 116), price=70000, reduce=0.75, slow=0.08, level=5),
+    "kn_field": dict(name="KN 野战指挥官防弹衣", cat="armor", w=3, h=2,
+                     color=(98, 94, 86), price=80000, reduce=0.78, slow=0.09,
+                     level=5),
+    "hlc": dict(name="H-LC 战术防弹衣", cat="armor", w=3, h=2,
+                color=(84, 96, 90), price=88000, reduce=0.80, slow=0.10, level=5),
+    "bt6": dict(name="BT6 重型防弹衣", cat="armor", w=3, h=2,
+                color=(78, 80, 92), price=96000, reduce=0.83, slow=0.11, level=5),
+    "imtv": dict(name="IMTV 武士防弹衣", cat="armor", w=3, h=2,
+                 color=(92, 88, 84), price=106000, reduce=0.85, slow=0.12, level=5),
+    "defm4": dict(name="防卫者M4 防弹衣", cat="armor", w=3, h=2,
+                  color=(86, 92, 104), price=118000, reduce=0.87, slow=0.13,
+                  level=5),
+    "defl4": dict(name="防卫者L4 防弹衣", cat="armor", w=3, h=2,
+                  color=(76, 88, 102), price=128000, reduce=0.88, slow=0.13,
+                  level=5),
+    "bn30": dict(name="BN30 全护甲", cat="armor", w=3, h=2,
+                 color=(70, 74, 84), price=140000, reduce=0.90, slow=0.15, level=5),
+    # 6 级(重装;全部自带倒地自救,可持用重武器)
+    "avs": dict(name="AVS 重装弹挂甲", cat="armor", w=3, h=2,
+                color=(82, 86, 96), price=168000, reduce=0.95, slow=0.16,
+                level=6, revive=True),
+    "spartan_c": dict(name="斯巴达C 重装弹挂甲", cat="armor", w=3, h=2,
+                      color=(88, 78, 74), price=190000, reduce=0.96, slow=0.17,
+                      level=6, revive=True),
+    "al_assault": dict(name="AL 突击弹挂甲", cat="armor", w=3, h=2,
+                       color=(80, 90, 84), price=205000, reduce=0.965, slow=0.18,
+                       level=6, revive=True),
+    "al_tactical": dict(name="AL 战术弹挂甲", cat="armor", w=3, h=2,
+                        color=(74, 84, 92), price=220000, reduce=0.97, slow=0.18,
+                        level=6, revive=True),
+    "al_commander": dict(name="AL 指挥官弹挂甲", cat="armor", w=3, h=2,
+                         color=(92, 86, 66), price=240000, reduce=0.975, slow=0.19,
+                         level=6, revive=True),
+    "marshal": dict(name="治安官重型防弹衣", cat="armor", w=3, h=2,
+                    color=(66, 70, 78), price=262000, reduce=0.98, slow=0.20,
+                    level=6, revive=True),
+    "bt101": dict(name="BT101 战术防弹衣", cat="armor", w=3, h=2,
+                  color=(58, 62, 72), price=285000, reduce=0.985, slow=0.21,
+                  level=6, revive=True),
+    "kn_composite": dict(name="KN 复合防弹衣", cat="armor", w=3, h=2,
+                         color=(54, 58, 66), price=310000, reduce=0.99, slow=0.22,
+                         level=6, revive=True),
+})
+# 新护甲全部上架交易站「护甲」分区
+TRADE_GOODS += [(iid, 1) for iid in NEW_ARMORS]
+
 # 特殊枪械(头目专属)全部上架到交易站的「特殊枪械」分区
 SPECIAL_WEAPONS = ["asval", "vector", "pkp", "rpg", "rpg2"]
 
@@ -526,16 +602,84 @@ ITEMS.update({
                            beam=(580, 32), desc="夜战照明:锥形亮区 580 内可见"),
 })
 
-# ---------- 夜视头盔(黑暗模式) ----------
-# cat="helmet":占用新增的「头盔」装备槽(和护甲不冲突);nvg=(半径, 亮度) 自带夜视仪
+# ---------- 头盔(黑暗模式夜视头盔 + 常规防护头盔) ----------
+# cat="helmet":占用「头盔」装备槽(和护甲不冲突);reduce=额外减伤(乘在护甲减伤之后);
+# nvg=(半径, 亮度) 自带夜视仪(黑暗模式)。各级头盔减伤统一按这张表(自检逐件核对)
+HELMET_REDUCE_BY_LEVEL = {1: 0.06, 2: 0.10, 3: 0.15, 4: 0.22, 5: 0.30, 6: 0.40}
+NEW_HELMETS = ["h_tank", "h_moto", "h_light", "h_fire",
+               "h_steel", "h_oldmil", "h_guard",
+               "h_pas2", "h_6b4", "h_6b5", "h_f70", "h_sh12",
+               "h_56k", "h_f80", "h_sh18", "h_sh40",
+               "h_fa", "h_sh50", "h_maska2", "h_03", "h_rsp", "h_an95",
+               "h_ind70", "h_as200", "h_hg84", "h_6bnt"]
 ITEMS.update({
     "nvg_pnv": dict(name="PNV-10T 夜视头盔", cat="helmet", w=2, h=2,
-                    color=(84, 104, 76), price=180000, level=3,
+                    color=(84, 104, 76), price=180000, level=3, reduce=0.15,
                     nvg=(300, 150), desc="夜视:周围 300 全向可见(微光)"),
     "nvg_gpnvg": dict(name="GPNVG-18 四眼夜视头盔", cat="helmet", w=3, h=2,
-                      color=(74, 96, 72), price=480000, level=4,
+                      color=(74, 96, 72), price=480000, level=4, reduce=0.22,
                       nvg=(440, 205), desc="夜视:周围 440 全向可见(更亮更远)"),
+    # 1 级:民用/作业头盔
+    "h_tank": dict(name="坦克兵防护帽", cat="helmet", w=2, h=2,
+                   color=(98, 104, 92), price=3500, level=1, reduce=0.06),
+    "h_moto": dict(name="摩托车头盔", cat="helmet", w=2, h=2,
+                   color=(120, 72, 64), price=5500, level=1, reduce=0.06),
+    "h_light": dict(name="轻型安全头盔", cat="helmet", w=2, h=2,
+                    color=(216, 150, 60), price=7500, level=1, reduce=0.06),
+    "h_fire": dict(name="凯尔斯消防头盔", cat="helmet", w=2, h=2,
+                   color=(188, 60, 48), price=9500, level=1, reduce=0.06),
+    # 2 级:老式军用/安保头盔
+    "h_steel": dict(name="老式钢盔", cat="helmet", w=2, h=2,
+                    color=(104, 108, 96), price=12000, level=2, reduce=0.10),
+    "h_oldmil": dict(name="老式军用头盔", cat="helmet", w=2, h=2,
+                     color=(92, 98, 84), price=16000, level=2, reduce=0.10),
+    "h_guard": dict(name="安保防爆头盔", cat="helmet", w=2, h=2,
+                    color=(88, 96, 112), price=22000, level=2, reduce=0.10),
+    # 3 级:制式军用头盔
+    "h_pas2": dict(name="PAS2型头盔", cat="helmet", w=2, h=2,
+                   color=(90, 100, 88), price=32000, level=3, reduce=0.15),
+    "h_6b4": dict(name="6B4型头盔", cat="helmet", w=2, h=2,
+                  color=(86, 94, 80), price=38000, level=3, reduce=0.15),
+    "h_6b5": dict(name="6B5型头盔", cat="helmet", w=2, h=2,
+                  color=(94, 98, 90), price=42000, level=3, reduce=0.15),
+    "h_f70": dict(name="F70战术头盔", cat="helmet", w=2, h=2,
+                  color=(76, 90, 100), price=48000, level=3, reduce=0.15),
+    "h_sh12": dict(name="SH12军用头盔", cat="helmet", w=2, h=2,
+                   color=(70, 80, 92), price=55000, level=3, reduce=0.15),
+    # 4 级:现代复合盔
+    "h_56k": dict(name="56K型直升机头盔", cat="helmet", w=2, h=2,
+                  color=(96, 86, 72), price=62000, level=4, reduce=0.22),
+    "h_f80": dict(name="F80战术头盔", cat="helmet", w=2, h=2,
+                  color=(72, 86, 96), price=72000, level=4, reduce=0.22),
+    "h_sh18": dict(name="SH18军用头盔", cat="helmet", w=2, h=2,
+                   color=(68, 78, 88), price=82000, level=4, reduce=0.22),
+    "h_sh40": dict(name="SH40军用头盔", cat="helmet", w=2, h=2,
+                   color=(64, 74, 84), price=95000, level=4, reduce=0.22),
+    # 5 级:重型战术盔
+    "h_fa": dict(name="FA突击战术头盔", cat="helmet", w=2, h=2,
+                 color=(78, 84, 94), price=120000, level=5, reduce=0.30),
+    "h_sh50": dict(name="SH50军用头盔", cat="helmet", w=2, h=2,
+                   color=(66, 72, 82), price=140000, level=5, reduce=0.30),
+    "h_maska2": dict(name="SH马斯卡2型头盔", cat="helmet", w=2, h=2,
+                     color=(60, 66, 76), price=168000, level=5, reduce=0.30),
+    "h_03": dict(name="03重型战术头盔", cat="helmet", w=2, h=2,
+                 color=(58, 62, 72), price=190000, level=5, reduce=0.30),
+    "h_rsp": dict(name="RSP重装战术头盔", cat="helmet", w=2, h=2,
+                  color=(52, 56, 66), price=212000, level=5, reduce=0.30),
+    "h_an95": dict(name="AN95重型防爆头盔", cat="helmet", w=2, h=2,
+                   color=(46, 50, 60), price=238000, level=5, reduce=0.30),
+    # 6 级:特勤/特攻顶级盔(比 6 级甲还贵的孤品)
+    "h_ind70": dict(name="IND70战术头盔", cat="helmet", w=2, h=2,
+                    color=(72, 66, 58), price=270000, level=6, reduce=0.40),
+    "h_as200": dict(name="AS200重型战术头盔", cat="helmet", w=2, h=2,
+                    color=(60, 58, 70), price=330000, level=6, reduce=0.40),
+    "h_hg84": dict(name="HG84特攻型头盔", cat="helmet", w=2, h=2,
+                   color=(54, 56, 62), price=395000, level=6, reduce=0.40),
+    "h_6bnt": dict(name="6BNT型头盔", cat="helmet", w=2, h=2,
+                   color=(48, 50, 56), price=460000, level=6, reduce=0.40),
 })
+# 新头盔全部上架交易站「头盔」分区
+TRADE_GOODS += [(iid, 1) for iid in NEW_HELMETS]
 
 
 def helmet_nvg(item):
@@ -543,6 +687,13 @@ def helmet_nvg(item):
     if item is None or item.def_.get("cat") != "helmet":
         return None
     return item.def_.get("nvg")
+
+
+def helmet_reduce(item):
+    """头盔的额外减伤比例(0~1);没戴头盔返回 0。"""
+    if item is None or item.def_.get("cat") != "helmet":
+        return 0.0
+    return item.def_.get("reduce", 0.0)
 
 
 def weapon_beam(item):
@@ -570,6 +721,93 @@ TALENTS = {
     "pkp": dict(name="弹链供给", desc="装填速度 +40%", reload_mul=0.60),
     "rpg": dict(name="轰天雷", desc="爆炸溅射更远", blast_mul=1.25),
     "rpg2": dict(name="四连轰", desc="爆炸溅射更远", blast_mul=1.25),
+    # ===== 扩展枪械天赋(对应下面的 EXTRA_WEAPONS,按分类分组)=====
+    # ---- 突击步枪(5.56×45)----
+    "hk416": dict(name="模块化", desc="装填速度 +20%", reload_mul=0.80),
+    "scar_l": dict(name="稳定平台", desc="散布 -10%", spread_mul=0.90),
+    "mdr": dict(name="无托结构", desc="散布 -12%", spread_mul=0.88),
+    "aug": dict(name="一体瞄具", desc="架枪散布 -22%", brace_mul=0.78),
+    "f2000": dict(name="前抛壳", desc="枪声 -20%", loud_mul=0.80),
+    "g36": dict(name="轻量聚合物", desc="装填速度 +18%", reload_mul=0.82),
+    "sg550": dict(name="精密枪管", desc="伤害 +6%", dmg_mul=1.06),
+    "mcx": dict(name="消音潜力", desc="枪声 -25%", loud_mul=0.75),
+    "arx160": dict(name="快速换枪", desc="装填速度 +22%", reload_mul=0.78),
+    "ar15": dict(name="平民神器", desc="伤害 +5%", dmg_mul=1.05),
+    "m16": dict(name="三发点射", desc="架枪散布 -18%", brace_mul=0.82),
+    "ak102": dict(name="短管突击", desc="散布 -8%", spread_mul=0.92),
+    # ---- 突击步枪(5.45×39 / 5.8×42)----
+    "ak12": dict(name="现代化", desc="装填速度 +20%", reload_mul=0.80),
+    "a545r": dict(name="平衡后坐", desc="散布 -12%", spread_mul=0.88),
+    "aek": dict(name="反冲平衡", desc="架枪散布 -20%", brace_mul=0.80),
+    "an94": dict(name="双发点射", desc="伤害 +8%", dmg_mul=1.08),
+    "ak74u": dict(name="近战卡宾", desc="散布 -10%", spread_mul=0.90),
+    "aks74u": dict(name="空降利器", desc="装填速度 +25%", reload_mul=0.75),
+    "t951": dict(name="国产精工", desc="伤害 +5%", dmg_mul=1.05),
+    "t03": dict(name="皮轨扩展", desc="架枪散布 -15%", brace_mul=0.85),
+    "qbz191": dict(name="模块化突击", desc="散布 -10%", spread_mul=0.90),
+    # ---- 战斗步枪(7.62×51 / 7.62×39)----
+    "fal": dict(name="自由世界右臂", desc="伤害 +8%", dmg_mul=1.08),
+    "g3": dict(name="滚柱闭锁", desc="架枪散布 -25%", brace_mul=0.75),
+    "scar_h": dict(name="重型压制", desc="伤害 +7%", dmg_mul=1.07),
+    "scar_hamr": dict(name="反器材改", desc="伤害 +10%", dmg_mul=1.10),
+    "ace31": dict(name="加利尔血统", desc="装填速度 +20%", reload_mul=0.80),
+    # ---- 特种步枪(9×39 微声)----
+    "groza": dict(name="无托突击", desc="散布 -12%", spread_mul=0.88),
+    "9a91": dict(name="微声突击", desc="枪声 -45%", loud_mul=0.55),
+    "vss": dict(name="亚音速", desc="枪声 -55%", loud_mul=0.45),
+    # ---- 冲锋枪 ----
+    "mpx": dict(name="短冲精英", desc="散布 -10%", spread_mul=0.90),
+    "p90": dict(name="高射速", desc="装填速度 +25%", reload_mul=0.75),
+    "ump45": dict(name="点射稳定", desc="架枪散布 -18%", brace_mul=0.82),
+    "pp19": dict(name="弹鼓狂潮", desc="装填速度 +30%", reload_mul=0.70),
+    "t79": dict(name="廉价猛冲", desc="伤害 +6%", dmg_mul=1.06),
+    "mp40": dict(name="二战老兵", desc="散布 -12%", spread_mul=0.88),
+    "uzi": dict(name="倾泻火力", desc="装填速度 +22%", reload_mul=0.78),
+    "mp9": dict(name="瑞士精密", desc="散布 -14%", spread_mul=0.86),
+    "mac10": dict(name="狂风暴雨", desc="装填速度 +28%", reload_mul=0.72),
+    "m3a1": dict(name="注油枪", desc="枪声 -15%", loud_mul=0.85),
+    "qc61": dict(name="微声特工", desc="枪声 -50%", loud_mul=0.50),
+    # ---- 霰弹枪 ----
+    "m870": dict(name="泵动可靠", desc="伤害 +8%", dmg_mul=1.08),
+    "s12k": dict(name="半自动猛兽", desc="装填速度 +20%", reload_mul=0.80),
+    "usas12": dict(name="全自动暴风", desc="散布 -12%", spread_mul=0.88),
+    "spr310": dict(name="猎手", desc="伤害 +6%", dmg_mul=1.06),
+    # ---- 精确射手步枪 ----
+    "m14": dict(name="经典射手", desc="伤害 +6%", dmg_mul=1.06),
+    "mk14": dict(name="模块化射手", desc="架枪散布 -25%", brace_mul=0.75),
+    "m110": dict(name="精密狙击系统", desc="架枪散布 -22%", brace_mul=0.78),
+    "bm59": dict(name="意大利风格", desc="伤害 +5%", dmg_mul=1.05),
+    "m96": dict(name="瑞典工业", desc="散布 -12%", spread_mul=0.88),
+    "sks": dict(name="廉价精确", desc="装填速度 +20%", reload_mul=0.80),
+    "sa85m": dict(name="猎兵卡宾", desc="散布 -10%", spread_mul=0.90),
+    "mini14": dict(name="轻快射手", desc="架枪散布 -18%", brace_mul=0.82),
+    "adar215": dict(name="民用改", desc="伤害 +5%", dmg_mul=1.05),
+    "t88": dict(name="精准点射", desc="架枪散布 -20%", brace_mul=0.80),
+    "svtu": dict(name="老将", desc="伤害 +7%", dmg_mul=1.07),
+    "hunter": dict(name="狩猎本能", desc="伤害 +8%", dmg_mul=1.08),
+    # ---- 狙击步枪(不参与架枪,只给伤害/装填/枪声)----
+    "svds": dict(name="快速补射", desc="装填速度 +15%", reload_mul=0.85),
+    "mosin": dict(name="一枪一命", desc="伤害 +8%", dmg_mul=1.08),
+    "m24": dict(name="猎杀专家", desc="伤害 +6%", dmg_mul=1.06),
+    "sj16": dict(name="国产远程", desc="伤害 +7%", dmg_mul=1.07),
+    "ax50": dict(name="反器材", desc="伤害 +10%", dmg_mul=1.10),
+    # ---- 轻机枪 ----
+    "rpk16": dict(name="班用机枪", desc="装填速度 +30%", reload_mul=0.70),
+    "evolys": dict(name="轻量弹链", desc="装填速度 +35%", reload_mul=0.65),
+    "negev7": dict(name="狂暴压制", desc="散布 -15%", spread_mul=0.85),
+    # ---- 手枪 ----
+    "g17": dict(name="可靠警枪", desc="散布 -10%", spread_mul=0.90),
+    "g18c": dict(name="全自动手枪", desc="装填速度 +30%", reload_mul=0.70),
+    "m9a3": dict(name="军用手枪", desc="伤害 +5%", dmg_mul=1.05),
+    "deagle": dict(name="一枪制敌", desc="伤害 +10%", dmg_mul=1.10),
+    "deagle_gold": dict(name="黄金威慑", desc="伤害 +12%", dmg_mul=1.12),
+    "f57": dict(name="穿甲手枪", desc="伤害 +7%", dmg_mul=1.07),
+    "t54": dict(name="托卡列夫", desc="伤害 +6%", dmg_mul=1.06),
+    "t05": dict(name="微声手枪", desc="枪声 -50%", loud_mul=0.50),
+    "m1911": dict(name="百年经典", desc="伤害 +6%", dmg_mul=1.06),
+    "m45a1": dict(name="现代1911", desc="架枪散布 -15%", brace_mul=0.85),
+    "cz52": dict(name="滚柱手枪", desc="装填速度 +25%", reload_mul=0.75),
+    "m300": dict(name="转轮猛兽", desc="伤害 +8%", dmg_mul=1.08),
 }
 
 # 武器可装的配件槽(M139 机枪按需求不装任何配件)
@@ -1055,6 +1293,9 @@ LOOT = {
     "crate": [("a9", 30, 10), ("a545", 30, 8), ("a12db", 20, 8), ("bandage", 1, 10),
               ("medkit", 1, 4), ("gold", 1, 3), ("cpu", 1, 2), ("pm", 1, 3),
               ("mp5", 1, 3), ("paca", 1, 2), ("pack_small", 1, 3), ("pack_mid", 1, 2),
+              # 低级防具:补给箱里偶尔翻出旧头盔/老马甲
+              ("m1955", 1, 2), ("h_moto", 1, 2), ("h_steel", 1, 2),
+              ("h_guard", 1, 1),
               # 杂物(权重高,产出多)
               ("coffee", 1, 12), ("lighter", 1, 11), ("screwdriver", 1, 12),
               ("tape", 1, 11), ("screws", 1, 10), ("plug", 1, 10),
@@ -1105,6 +1346,10 @@ LOOT = {
     "val": [("gold", 1, 5), ("cpu", 1, 4), ("btc", 1, 1), ("vase", 1, 2),
             ("b45", 1, 2), ("bt201", 1, 1), ("pack_large", 1, 2), ("pack_xl", 1, 1),
             ("b23", 1, 2), ("zhuk", 1, 2), ("korund", 1, 2),
+            # 暗区防具:高级货小概率开出(越高难度 rolls 越多越肥)
+            ("tm1", 1, 2), ("sent305", 1, 2), ("bt6", 1, 1), ("imtv", 1, 1),
+            ("avs", 1, 1), ("bt101", 1, 1),
+            ("h_sh50", 1, 2), ("h_03", 1, 1), ("h_ind70", 1, 1),
             ("gpu", 1, 4), ("motor", 1, 4), ("oscilloscope", 1, 4), ("tools", 1, 2),
             ("solar", 1, 2), ("filter", 1, 3), ("fuelcan", 1, 3),
             ("nvg_pnv", 1, 2), ("nvg_gpnvg", 1, 1),
