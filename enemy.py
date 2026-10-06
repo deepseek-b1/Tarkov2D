@@ -61,6 +61,7 @@ class Scav:
         self.tgt_see = False
         self.tgt_t = -1.0
         self.think = random.uniform(0.0, THINK_INTERVAL)   # 错峰相位
+        self.lod_phase = random.randint(0, 3)              # 远景降频的错峰相位
         self.view2 = float(d["view"]) * d["view"]
 
     @property
@@ -178,6 +179,15 @@ class Scav:
         d2p = dpx * dpx + dpy * dpy
         self.path_interval = 0.6 if d2p <= _LOD2 else 1.6
         if d2p > _LOD2 and self.state != "chase":
+            # 远景降级:连屏幕都够不到的守军(玩家在哪儿都看不到他)每 4 帧才
+            # 动一次,步长乘 4 保持同样的平均速度。50 人以上的大本营里大多数
+            # 守军都在这个档位,这一条把它们的模拟开销直接砍到 1/4。
+            # 阈值用 raid.view_reach2(每帧按真实相机位置算出的可见半径),
+            # 所以画面里绝不会出现"该动却没动"的守军。
+            if d2p > raid.view_reach2:
+                if (raid.frame + self.lod_phase) & 3:
+                    return
+                dt *= 4.0
             if self.state == "idle":
                 self.wander_t -= dt
                 if self.wander_t <= 0:

@@ -475,6 +475,8 @@ class Raid:
         # AI 共用的单调时钟:各单位「选目标」按它错峰重算(见 enemy.THINK_INTERVAL)
         self.now = 0.0
         self._aim_t = -1.0          # 辅助瞄准的下次重算时刻
+        self.frame = 0              # 帧序号(远景守军按它错峰降频)
+        self.view_reach2 = 1e18     # 玩家屏幕位置到四个屏幕角的最大距离²(每帧算)
 
     # ---------- 黑暗模式:光照形状 ----------
     def night_light(self):
@@ -2524,6 +2526,20 @@ class Raid:
 
         # 迷雾/可见性缓存刷新(敌人 AI 的 threat_for/sees_player 都读它)
         self.refresh_fog(dt)
+
+        # 「玩家屏幕位置到四个屏幕角的最大距离」—— 超过它的守军一定在画面外,
+        # 于是可以降频模拟(enemy.Scav.update 里的远景降级)。摄像机贴地图边时
+        # 玩家不在屏幕正中,所以必须每帧按实际相机位置算,不能用常数。
+        self.frame += 1
+        camx, camy = self.cam
+        pxs = p.x - camx
+        pys = p.y - camy
+        wx = W - pxs
+        hy = H - pys
+        self.view_reach2 = max(pxs * pxs + pys * pys,
+                               wx * wx + pys * pys,
+                               pxs * pxs + hy * hy,
+                               wx * wx + hy * hy)
 
         # 实体
         for s in self.scavs:

@@ -500,6 +500,10 @@ def draw_raid(raid, screen):
         add = batch.append
         for pt in raid.particles:
             a = pt["ttl"] / pt["max_ttl"]
+            # 透明度按 16 归档缓存,255*a < 16 时精灵本身就是全透明的:
+            # 直接跳过,画面一模一样,少一次合成。
+            if a < 0.0628:
+                continue
             rad = int(pt["size"] * a + 1)
             sx = pt["x"] + ox - rad - 1
             sy = pt["y"] + oy - rad - 1
