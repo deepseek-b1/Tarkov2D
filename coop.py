@@ -29,6 +29,11 @@ def p2_key_set():
 _hint_cache = {}
 
 
+def primary(action):
+    """该动作的主键位(提示里只写这个 —— 替代键太占地方)。"""
+    return COOP["keys"][action][0]
+
+
 def key_hint(short=False):
     """P2 操作提示(藏身处提示、开局 toast 用全版;局内 HUD 用短版省地方)。
 
@@ -40,22 +45,19 @@ def key_hint(short=False):
     import bindings
     k = COOP["keys"]
 
-    def lab(action, alt=False):
-        joiner = "或" if alt else "/"
-        return joiner.join(bindings.key_label(x) for x in k[action])
+    def lab(action):
+        return bindings.key_label(k[action][0])
 
-    move = "".join(bindings.key_label(x) for x in
-                   (k["up"][0], k["left"][0], k["down"][0], k["right"][0]))
+    move = "".join(bindings.key_label(k[a][0])
+                   for a in ("up", "left", "down", "right"))
     if short:
         # 局内 HUD 的那一行:只写主键位(面板窄,别挡住中间的通知条)
-        text = (f"P2:{move} 移动 · {bindings.key_label(k['fire'][0])} 开火 · "
-                f"{bindings.key_label(k['interact'][0])} 交互 · "
-                f"{bindings.key_label(k['reload'][0])} 换弹 · "
-                f"{bindings.key_label(k['heal'][0])} 打药")
+        text = (f"P2:{move} 移动 · {lab('fire')} 开火 · {lab('interact')} 交互 · "
+                f"{lab('reload')} 换弹 · {lab('heal')} 打药")
     else:
         text = (f"P2:{move} 移动 · {lab('fire')} 开火(自动瞄准) · "
-                f"{lab('interact', True)} 交互/自动搜刮 · "
-                f"{lab('reload', True)} 换弹 · {lab('heal', True)} 打药")
+                f"{lab('interact')} 交互/自动搜刮 · {lab('reload')} 换弹 · "
+                f"{lab('heal')} 打药(旁边的小键盘键也能用)")
     _hint_cache[short] = text
     return text
 

@@ -2685,8 +2685,9 @@ class Raid:
                             tx, ty = self._support_target()
                             self.call_support(SUPPORT_ORDER[i], tx, ty)
                             break
-                # 双人合作:P2 的动作键(与 P1 的键不重叠,不会互相触发)
-                if self.coop and not (self.inv_open or self.loot_target):
+                # 双人合作:P2 的动作键(与 P1 的键不重叠,不会互相触发;
+                # P2 不受 P1 的面板影响 —— 各干各的)
+                if self.coop:
                     self._p2_key(ev.key)
             elif ev.type == pygame.MOUSEBUTTONDOWN:
                 if self.paused:
@@ -2945,8 +2946,31 @@ class Raid:
                           edge=self.p2_fire_edge, braced=False)
         self.p2_fire_edge = False
 
+    def p2_reload(self):
+        """P2 换弹:任何情况都给一句反馈 —— 免得"按了没反应"看着像键坏了。"""
+        p2 = self.player2
+        if p2 is None or p2.out:
+            return
+        if p2.weapon is None:
+            self.add_toast("P2:手上没武器", COL["text_dim"], 2.0)
+            return
+        if p2.reloading or p2.reload_t > 0:
+            self.add_toast("P2:正在装填…", COL["text_dim"], 1.6)
+            return
+        cap = weapon_capacity(p2.weapon)
+        if p2.weapon.state.get("mag", 0) >= cap:
+            self.add_toast(f"P2:弹匣是满的({cap}/{cap}),不用换", COL["text_dim"], 2.2)
+            return
+        if p2.reserve_count() <= 0:
+            self.add_toast("P2:背包里没有备用弹药!", COL["bad"], 2.6)
+            return
+        self.start_reload(p2)
+
     def _p2_key(self, key):
-        """P2 按下的动作键(不认识的键直接忽略)。"""
+        """P2 按下的动作键(不认识的键直接忽略)。
+
+        P2 做自己的事,不受 P1 有没有打开背包/搜刮窗影响(双人时各干各的)。
+        """
         if self.player2 is None or self.player2.out:
             return
         k = COOP["keys"]
@@ -2955,11 +2979,9 @@ class Raid:
         elif key in k["interact"]:
             self.p2_interact()
         elif key in k["reload"]:
-            if not (self.inv_open or self.loot_target is not None):
-                self.start_reload(self.player2)
+            self.p2_reload()
         elif key in k["heal"]:
-            if not (self.inv_open or self.loot_target is not None):
-                self.p2_quick_heal()
+            self.p2_quick_heal()
 
     def nearest_container_for(self, p, dist):
         best, bd = None, dist

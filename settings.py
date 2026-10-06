@@ -3,7 +3,7 @@
 import pygame
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.12.3"
+GAME_VERSION = "2.12.4"
 # 更新清单地址(可换成自建服务器 / GitHub raw;留空则只认 EXE 同目录的 version.json)
 UPDATE_MANIFEST_URL = "http://127.0.0.1:8765/version.json"
 UPDATE_TIMEOUT = 3   # 检查 / 下载超时(秒)
@@ -1232,9 +1232,15 @@ COOP = dict(
         left=(pygame.K_LEFT,),
         right=(pygame.K_RIGHT,),
         fire=(pygame.K_RSHIFT,),
-        interact=(pygame.K_RCTRL, pygame.K_SLASH),
-        reload=(pygame.K_KP0, pygame.K_PERIOD),
-        heal=(pygame.K_KP1, pygame.K_COMMA),
+        # 交互 / 自动搜刮:斜杠(右Shift 旁边)、右 Ctrl、小键盘回车
+        interact=(pygame.K_SLASH, pygame.K_RCTRL, pygame.K_KP_ENTER),
+        # 换弹:句点(右Shift 左边一格)、小键盘 0 / 小键盘 .
+        #       —— NumLock 关掉时小键盘 0 与 . 会变成 Insert / Delete,一并认
+        reload=(pygame.K_PERIOD, pygame.K_KP0, pygame.K_KP_PERIOD,
+                pygame.K_INSERT, pygame.K_DELETE),
+        # 打药:逗号(句点左边一格)、小键盘 1 / 小键盘 2
+        #       —— NumLock 关掉时小键盘 1 会变成 End,一并认
+        heal=(pygame.K_COMMA, pygame.K_KP1, pygame.K_KP2, pygame.K_END),
     ),
 )
 # 能开双人合作的模式(夜战也支持:两位玩家都拿系统配发装备,枪上都带强光探照灯)

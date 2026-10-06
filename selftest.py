@@ -4308,6 +4308,7 @@ def run():
         """双人合作:同一台电脑两人玩(P2 键盘 + 自动瞄准 + 自动搜刮)。"""
         from game import Game
         from settings import W as SW, H as SH, COOP, PLAYER, EXTRACT_TIME
+        import bindings
         import coop as coop_mod
         import raid as raid_mod
         screen = pygame.display.set_mode((SW, SH))
@@ -4636,6 +4637,82 @@ def run():
         g.draw(screen)
         g.to_hideout()
         g.save.mode = "raid"
+        # 14) P2 的每一个动作键都必须真的接上(含替代键 / NumLock 关掉时的小键盘键)
+        from settings import (weapon_capacity as _cap,
+                              weapon_ammo_ids as _ammo_ids)
+        g.save.coop = True
+        g.save.mode = "raid"
+        g.save.touch = False
+        g.start_raid()
+        r = g.raid
+        p2 = r.player2
+
+        def _key_event(key):
+            return pygame.event.Event(pygame.KEYDOWN, key=key, unicode="")
+
+        for key in COOP["keys"]["reload"]:
+            p2.reloading = False
+            p2.reload_t = 0.0
+            p2.weapon.state["mag"] = max(0, _cap(p2.weapon) - 5)
+            p2.bag.clear()
+            p2.bag.add_item(Item(_ammo_ids(p2.weapon)[0], count=60))
+            r.update(1 / 60, [_key_event(key)])
+            assert p2.reloading, f"换弹键 {key} 没接上"
+        for key in COOP["keys"]["heal"]:
+            p2.reloading = False
+            p2.hp = 40
+            p2.bag.clear()
+            p2.bag.add_item(Item("medkit"))
+            r.update(1 / 60, [_key_event(key)])
+            assert p2.hp > 40, f"打药键 {key} 没接上"
+        for key in COOP["keys"]["interact"]:
+            lc = next(c for c in r.containers
+                      if c.kind in ("crate", "val", "med", "gun"))
+            lc.container.items = []
+            lc.container.add_item(Item("gold"))
+            p2.x, p2.y = lc.rect.centerx, lc.rect.centery
+            r.p2_take = None
+            r.update(1 / 60, [_key_event(key)])
+            assert r.p2_take is not None, f"交互键 {key} 没接上"
+        # 满弹匣按换弹也要有反馈(不能"按了没反应")
+        p2.reloading = False
+        p2.reload_t = 0.0
+        p2.weapon.state["mag"] = _cap(p2.weapon)
+        r.toasts = []
+        r.update(1 / 60, [_key_event(COOP["keys"]["reload"][0])])
+        assert any("满" in t[0] for t in r.toasts), r.toasts
+        # P1 开着背包/搜刮窗也不影响 P2 操作(双人各干各的)
+        p2.reloading = False
+        p2.reload_t = 0.0
+        p2.weapon.state["mag"] = max(0, _cap(p2.weapon) - 5)
+        p2.bag.clear()
+        p2.bag.add_item(Item(_ammo_ids(p2.weapon)[0], count=60))
+        r.inv_open = True
+        r.update(1 / 60, [_key_event(COOP["keys"]["reload"][0])])
+        assert p2.reloading, "P1 开背包不该挡住 P2 换弹"
+        r.inv_open = False
+        # 键位不与 P1 的默认键冲突(方向键 + 右Shift 是刻意让给 P2 的)
+        p1_keys = set()
+        for act, _nm in bindings.ACTIONS:
+            p1_keys.update(bindings.keys_for(g.save, act))
+        assert p1_keys & coop_mod.p2_key_set() == {
+            pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT,
+            pygame.K_RSHIFT}, p1_keys & coop_mod.p2_key_set()
+        # 提示写的是主键位,而且换弹/打药不再依赖小键盘
+        hint = coop_mod.key_hint(short=True)
+        assert "." in hint and "," in hint, hint
+        assert "小" not in hint, hint
+        # 玩法简介每页都要能整页画完(行距自适应,最多 25 行)
+        import intro as _intro
+        for title, lines in _intro.PAGES:
+            assert len(lines) <= 25, (title, len(lines))
+            top, bottom = 150, SH - 116
+            step = min(34, max(18, (bottom - top) // max(1, len(lines))))
+            assert top + step * (len(lines) - 1) <= bottom, (title, len(lines))
+        _intro.draw(screen, 0)         # 简介页渲染
+        _intro.draw(screen, len(_intro.PAGES) - 1)
+        g.draw(screen)                 # 新键位的 HUD 提示
+        g.to_hideout()
         pygame.display.flip()
 
     check("账号-名字+密码多档登录/老存档并入/登录界面", t_accounts)
