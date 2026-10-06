@@ -870,10 +870,11 @@ def run():
     check("护甲-6级减伤与倒地自救", t_revive)
 
     def t_misc_doc():
-        """杂物价格梯度 + 机密文件仅在强化封锁的保险箱固定刷出。"""
+        """杂物价格梯度 + 机密文件 0.1% 概率(仅强化封锁的保险箱)。"""
         from game import Game
-        from settings import (ITEMS, CLASSIFIED, DOC_HARDENED_COUNT,
+        from settings import (ITEMS, CLASSIFIED, DOC_SPAWN_CHANCE,
                               W as SW, H as SH)
+        import raid as raid_mod
         import uikit
         # 杂物:价格不等的 11 种 + 机密文件
         misc_ids = [iid for iid, d in ITEMS.items() if d["cat"] == "misc"]
@@ -898,27 +899,43 @@ def run():
         uikit.draw_grid(screen, 10, 10, c, 40)
         uikit.draw_tooltip(screen, 200, 200, Item(CLASSIFIED))
         pygame.display.flip()
-        # 强化封锁:机密文件固定刷在保险箱
-        g = Game()
-        g.save.difficulty = "hardened"
-        g.start_raid()
-        r = g.raid
-        safes = [c for c in r.containers if c.kind == "val"]
-        assert len(safes) >= 3
-        found = [(c, p) for c in safes for p in c.container.items
-                 if p.item.iid == CLASSIFIED]
-        assert len(found) == DOC_HARDENED_COUNT, len(found)
-        # 封锁/简单:不出机密文件,但保险箱仍是 9 个
-        for diff in ("lockdown", "easy"):
-            g2 = Game()
-            g2.save.difficulty = diff
-            g2.start_raid()
-            r2 = g2.raid
-            assert len([c for c in r2.containers if c.kind == "val"]) == 9
+        # 强化封锁:机密文件 0.1% 概率刷 1 份(打补丁验证两头)
+        assert abs(DOC_SPAWN_CHANCE - 0.001) < 1e-9, DOC_SPAWN_CHANCE
+        old_chance = raid_mod.DOC_SPAWN_CHANCE
+        try:
+            # 概率拉满 -> 必刷,且只刷 1 份
+            raid_mod.DOC_SPAWN_CHANCE = 1.0
+            g = Game()
+            g.save.difficulty = "hardened"
+            g.start_raid()
+            r = g.raid
+            safes = [c for c in r.containers if c.kind == "val"]
+            assert len(safes) >= 3
+            found = [(c, p) for c in safes for p in c.container.items
+                     if p.item.iid == CLASSIFIED]
+            assert len(found) == 1, len(found)
+            assert r.doc_spawned is True
+            # 简单/封锁:概率拉满也不刷(仅强化封锁)
+            for diff in ("lockdown", "easy"):
+                g2 = Game()
+                g2.save.difficulty = diff
+                g2.start_raid()
+                r2 = g2.raid
+                assert len([c for c in r2.containers if c.kind == "val"]) == 9
+                assert not any(p.item.iid == CLASSIFIED
+                               for c in r2.containers for p in c.container.items)
+                assert r2.doc_spawned is False
+            # 概率归零 -> 强化封锁也不刷
+            raid_mod.DOC_SPAWN_CHANCE = 0.0
+            g3 = Game()
+            g3.save.difficulty = "hardened"
+            g3.start_raid()
             assert not any(p.item.iid == CLASSIFIED
-                           for c in r2.containers for p in c.container.items)
+                           for c in g3.raid.containers for p in c.container.items)
+        finally:
+            raid_mod.DOC_SPAWN_CHANCE = old_chance
 
-    check("杂物-价格梯度与机密文件(仅强化封锁)", t_misc_doc)
+    check("杂物-价格梯度与机密文件(0.1% 仅强化封锁)", t_misc_doc)
 
     def t_minigun():
         """M139 装轮机枪:500 弹容 / 7.62×45 / 需 6 级甲 / 架枪收拢散布。"""
@@ -2816,12 +2833,18 @@ def run():
         g.update(1 / 60, [pygame.event.Event(
             pygame.FINGERDOWN, {"finger_id": 0, "x": opt[0] / 1280.0,
                                 "y": opt[1] / 720.0})])
+        g.update(1 / 60, [pygame.event.Event(
+            pygame.FINGERUP, {"finger_id": 0, "x": opt[0] / 1280.0,
+                              "y": opt[1] / 720.0})])
         assert h.view == "options", h.view
         g.draw(scr)
         back = h.opt_close.center
         g.update(1 / 60, [pygame.event.Event(
             pygame.FINGERDOWN, {"finger_id": 0, "x": back[0] / 1280.0,
                                 "y": back[1] / 720.0})])
+        g.update(1 / 60, [pygame.event.Event(
+            pygame.FINGERUP, {"finger_id": 0, "x": back[0] / 1280.0,
+                              "y": back[1] / 720.0})])
         assert h.view == "stash", h.view
         # 战局:合成的鼠标镜像不该让触屏按钮双触发
         g2 = Game()
@@ -2907,7 +2930,10 @@ def run():
         scr = pygame.display.set_mode((1280, 720))
 
         def click(pos):
+            # 触屏模式下点按延迟到抬起生效 -> 按下/抬起成对发送(两种模式都适用)
             h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN,
+                                                 button=1, pos=pos)])
+            h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONUP,
                                                  button=1, pos=pos)])
 
         def key(k):
@@ -3013,8 +3039,12 @@ def run():
         before = h.stash_scroll
         h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN,
                                              button=1, pos=dn.center)])
+        h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONUP,
+                                             button=1, pos=dn.center)])
         assert h.stash_scroll == min(before + 40, h.stash_max_scroll())
         h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN,
+                                             button=1, pos=up.center)])
+        h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONUP,
                                              button=1, pos=up.center)])
         assert h.stash_scroll == before
         assert h._scroll_click(up.center) is True
@@ -3721,6 +3751,238 @@ def run():
         pygame.display.flip()
 
     check("防具目录-暗区护甲头盔级别与头盔减伤", t_gear_catalog)
+
+    def t_safe_hold_rotate():
+        """保险箱(2格→40任务→4格)+ 触屏长按详情 + 物品横竖旋转。"""
+        import json
+        from game import Game
+        from inventory import rotate_in_place, Container, Placed
+        from settings import (SAFE_CONTRACT, SAFE_BASE, SAFE_UPGRADED,
+                              STASH_VIEW_ROWS, W as SW, H as SH)
+        import quests
+        import uikit as _uk
+        import raid_ui as _rui
+        # 1) 40 项承包商任务:结构校验
+        assert len(SAFE_CONTRACT) == 40, len(SAFE_CONTRACT)
+        ids = [t["id"] for t in SAFE_CONTRACT]
+        assert len(set(ids)) == 40, "任务 id 不能重复"
+        kinds = {"kills", "extracts", "value", "hostage_win", "assault_win"}
+        for t in SAFE_CONTRACT:
+            assert t["kind"] in kinds, t
+            assert int(t["need"]) > 0 and t["name"] and t["desc"], t
+            assert t["reward"].get("rubles", 0) > 0, t
+        # 2) 保险箱默认 2 格;存读往返;旧档迁移;阵亡不丢
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        sd = g.save
+        assert (sd.safe.w, sd.safe.h) == tuple(SAFE_BASE), (sd.safe.w, sd.safe.h)
+        assert sd.safe.items == []
+        sd.safe.add_item(Item("gold"))
+        sd2 = save_mod.SaveData.deserialize(sd.serialize())
+        assert (sd2.safe.w, sd2.safe.h) == tuple(SAFE_BASE)
+        assert [p.item.iid for p in sd2.safe.items] == ["gold"], "保险箱要能存读"
+        # 旧档(没有 safe 字段)迁移:给空 2 格,不报错
+        old = sd.serialize()
+        for k in ("safe", "safe_w", "safe_h"):
+            old.pop(k)
+        sd_old = save_mod.SaveData.deserialize(old)
+        assert (sd_old.safe.w, sd_old.safe.h) == tuple(SAFE_BASE)
+        assert sd_old.safe.items == []
+        # 阵亡不清保险箱
+        sd.safe.add_item(Item("btc"))
+        sd.wipe_loadout()
+        assert [p.item.iid for p in sd.safe.items] == ["gold", "btc"], \
+            "阵亡必须保住保险箱"
+        # 3) 40 项全完成 -> 4 格(幂等;物品保留)
+        assert quests.safe_done_count(sd) == 0
+        assert not quests.safe_upgraded(sd)
+        for t in SAFE_CONTRACT[:-1]:
+            sd.tasks_done.append(t["id"])
+        assert not quests.safe_upgraded(sd), "差一项不能提前升级"
+        assert quests.check_safe_upgrade(sd) == ""
+        sd.tasks_done.append(SAFE_CONTRACT[-1]["id"])
+        assert quests.safe_upgraded(sd)
+        msg = quests.check_safe_upgrade(sd)
+        assert msg and "4 格" in msg, msg
+        assert (sd.safe.w, sd.safe.h) == tuple(SAFE_UPGRADED)
+        assert [p.item.iid for p in sd.safe.items] == ["gold", "btc"], \
+            "升级不能丢东西"
+        assert quests.check_safe_upgrade(sd) == "", "重复调用应无副作用"
+        # 存读之后再升的旧档:读档自动补齐到 4 格
+        snap = sd.serialize()
+        snap["safe_w"], snap["safe_h"] = SAFE_BASE
+        sd3 = save_mod.SaveData.deserialize(snap)
+        assert (sd3.safe.w, sd3.safe.h) == tuple(SAFE_UPGRADED), "读档要自动补升级"
+        # 4) 藏身处:存入开关 + 存取;承包商标签页真实点击领取
+        g2 = Game()
+        g2.save = save_mod.reset_data()
+        g2.save.seen_intro = True
+        h = g2.hideout
+        h.show_intro = False
+        assert quests.safe_done_count(g2.save) == 0
+        # 存入一行金币
+        g2.save.stash.clear()
+        g2.save.stash.add_item(Item("gold"))
+        pl = g2.save.stash.items[0]
+        h._click(h.safe_toggle.center)                 # 开存入模式
+        assert h.safe_in
+        h._click((h.stash_grid[0] + 5, h.stash_grid[1] + 5))
+        assert not g2.save.stash.items and len(g2.save.safe.items) == 1, "要存进保险箱"
+        # 点保险箱物品取回
+        sr = h.safe_rect()
+        h._click((sr.x + 5, sr.y + 5))
+        assert g2.save.safe.items == [] and len(g2.save.stash.items) == 1, "要能取回"
+        h._click(h.safe_toggle.center)                 # 关存入模式
+        assert not h.safe_in
+        assert h.stash_view_h == 40 * STASH_VIEW_ROWS
+        # 任务中心:承包商标签页 + 领取最后一项触发扩容
+        sdg = g2.save
+        for t in SAFE_CONTRACT[:-1]:
+            sdg.tasks_done.append(t["id"])
+        last = SAFE_CONTRACT[-1]
+        sdg.tasks[last["id"]] = int(last["need"])      # 最后一项就绪
+        h.view = "task"
+        h.task_dept = "contractor"
+        h.task_scroll = h.task_max_scroll()
+        entries, per = h.task_rows()
+        assert len(entries) == 40, len(entries)
+        rect = h.task_row_rect(39)
+        h._task_click(rect.center)
+        assert (sdg.safe.w, sdg.safe.h) == tuple(SAFE_UPGRADED), \
+            "领完 40 项应升到 4 格"
+        assert "保险箱" in h.msg, h.msg
+        h.task_dept = "instructor"
+        h.view = "stash"
+        # 5) 藏身处渲染冒烟(保险箱条 + 4 格)
+        scr = pygame.display.set_mode((SW, SH))
+        h.draw(scr)
+        h.view = "task"
+        h.task_dept = "contractor"
+        h.draw(scr)
+        h.view = "stash"
+        # 6) 右键旋转(非背包=原位横竖互换;方形=提示)
+        sdg.stash.clear()
+        sdg.stash.add_item(Item("bandage"))
+        h._right_click((h.stash_grid[0] + 5, h.stash_grid[1] + 5))
+        assert "方形" in h.msg, h.msg
+        # 7) 触屏长按:按住 0.45s 弹详情;普通点按延迟到抬起(重放)
+        g2.save.touch = True
+        h.hold.reset()
+        item_pos = (h.stash_grid[0] + 5, h.stash_grid[1] + 5)
+        h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN,
+                                             pos=item_pos, button=1)])
+        for _ in range(40):
+            h.update(1 / 60, [])
+        assert h.hold.active(), "长按应弹出详情面板"
+        assert any("绷带" in ln for ln in h.hold.lines), h.hold.lines
+        lines_ok = any("价格" in ln or "¥" in ln for ln in h.hold.lines)
+        assert lines_ok, h.hold.lines
+        h.draw(scr)
+        # 抬起 -> 面板保留;再点别处 -> 关闭且不触发其它操作
+        h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONUP,
+                                             pos=item_pos, button=1)])
+        assert h.hold.active(), "松手后面板先保留(等下一次点击)"
+        h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN,
+                                             pos=(700, 700), button=1)])
+        assert not h.hold.active(), "点别处应关闭面板"
+        # 普通点按(按下+抬起)仍然生效:点仓库里的枪 = 装备
+        sdg.stash.clear()
+        sdg.stash.add_item(Item.weapon("mp5", mag=30))
+        pos = (h.stash_grid[0] + 5, h.stash_grid[1] + 5)
+        h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN,
+                                             pos=pos, button=1)])
+        h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONUP,
+                                             pos=pos, button=1)])
+        assert sdg.weapon is not None and sdg.weapon.iid == "mp5", \
+            "触屏普通点按要照常装备(延迟到抬起)"
+        assert not h.hold.active()
+        g2.save.touch = False
+        # 8) 旋转:原位成功 / 转不开 / 方形
+        c = Container(3, 3)
+        tall = Item("bandage")
+        c.items.append(Placed(tall, 0, 0))
+        assert rotate_in_place(c, c.items[0]) is None        # 1×1 方形
+        gun = Item("ak74")                                   # 5×2
+        c2 = Container(5, 2)
+        c2.items.append(Placed(gun, 0, 0))
+        assert rotate_in_place(c2, c2.items[0]) is False, "2×5 塞不进 5×2"
+        c3 = Container(5, 5)
+        ak = Item("ak74")
+        c3.items.append(Placed(ak, 0, 0))
+        assert rotate_in_place(c3, c3.items[0]) is True
+        assert ak.size() == (2, 5), ak.size()
+        # 9) 战局:保险箱随身、搜刮兜底、模式限制
+        g3 = Game()
+        g3.save = save_mod.reset_data()
+        g3.save.seen_intro = True
+        g3.start_raid()
+        r = g3.raid
+        p = r.player
+        assert p.safe is g3.save.safe, "战局里要用同一个保险箱"
+        # 搜刮:背包塞满 -> 拿走物品自动进保险箱
+        p.bag.items.clear()
+        for gy in range(p.bag.h):
+            for gx in range(p.bag.w):
+                p.bag.items.append(Placed(Item("bandage"), gx, gy))
+        lc = next(c for c in r.containers if c.kind == "crate")
+        lc.container.items.insert(0, Placed(Item("gold"), 0, 0))
+        top = lc.container.items[0]
+        r.mark_known(top)
+        assert r.take_known(lc, top) is True
+        assert any(pl.item.iid == "gold" for pl in p.safe.items), "背包满应兜底进保险箱"
+        # 剧情模式:保险箱只出不进
+        g4 = Game()
+        g4.save = save_mod.reset_data()
+        g4.save.seen_intro = True
+        g4.save.mode = "story"
+        g4.start_raid()
+        r4 = g4.raid
+        r4.inv_open = True
+        lay4 = _rui.inv_layout(r4.player.bag.w, r4.player.bag.h,
+                               r4.player.safe.w, r4.player.safe.h)
+        ev = pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                                pos=lay4["safe_mode"].center)
+        r4._handle_inv_click(ev)
+        assert r4.safe_mode is False, "剧情模式不允许开启存入"
+        assert any("只出不进" in t[0] for t in r4.toasts), r4.toasts
+        # 背包面板:保险箱点击取回(背包有空间时)
+        r4.player.bag.items.clear()
+        r4.player.safe.add_item(Item("gold"))
+        ev = pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                                pos=(lay4["safe"][0].x + 5, lay4["safe"][0].y + 5))
+        r4._handle_inv_click(ev)
+        assert not r4.player.safe.items, "点保险箱物品要取回背包"
+        # 战局渲染冒烟(背包面板含保险箱)
+        r4.inv_open = True
+        _rui.draw_raid(r4, scr)
+        # 10) 战局触屏长按:面板打开时按住物品弹详情
+        g5 = Game()
+        g5.save = save_mod.reset_data()
+        g5.save.seen_intro = True
+        g5.save.touch = True
+        g5.start_raid()
+        r5 = g5.raid
+        r5.inv_open = True
+        p5 = r5.player
+        p5.bag.items.clear()
+        p5.bag.items.append(Placed(Item("gold"), 0, 0))
+        lay5 = _rui.inv_layout(p5.bag.w, p5.bag.h, p5.safe.w, p5.safe.h)
+        bp = (lay5["bag"][0].x + 5, lay5["bag"][0].y + 5)
+        r5.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN,
+                                              pos=bp, button=1,
+                                              synthetic=True)])
+        for _ in range(40):
+            r5.update(1 / 60, [])
+        assert r5.hold.active(), "战局背包里长按也要弹详情"
+        assert any("金链子" in ln for ln in r5.hold.lines), r5.hold.lines
+        _rui.draw_raid(r5, scr)
+        r5.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONUP,
+                                              pos=bp, button=1,
+                                              synthetic=True)])
+        assert not r5.over
+
+    check("保险箱-40任务解锁/长按详情/横竖旋转", t_safe_hold_rotate)
 
     ok = all(r[1] for r in results)
     report = ["Tarkov2D selftest " + ("PASS" if ok else "FAIL"), ""]

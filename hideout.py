@@ -15,7 +15,7 @@ from settings import (W, H, COL, fmt_rub, get_font, DIFF_ORDER, DIFFICULTIES,
                       weapon_slots, weapon_attach, weapon_capacity, ATTACH_SLOTS,
                       ITEMS, TRADE_GOODS, TRADE_TABS, TRADE_PAGE_H, FPS_CAP_CHOICES,
                       trade_buy_price, trade_sell_price, STASH_VIEW_ROWS,
-                      MODE_DIFF, DEPTS, TASKS,
+                      MODE_DIFF, DEPTS, TASKS, SAFE_CONTRACT,
                       armor_allows, MAPS, MAP_ORDER, MODES, MODE_ORDER, MODE_MAP,
                       weapon_class, WEAPON_CLASS_COL)
 from inventory import Item, Placed, organize, try_move
@@ -77,10 +77,17 @@ class Hideout:
         self.stash_scroll = 0.0
         self.stash_grid = (66, 176)
         self.stash_view_h = 40 * STASH_VIEW_ROWS
-        # 任务中心:三个部门(教官 / 医疗部门 / 后勤部门)
+        # 保险箱(阵亡不丢):仓库面板底部一条;40 个承包商任务全部完成升 4 格
+        self.safe_in = False                 # 存入模式:点仓库物品进保险箱
+        self.safe_grid = (66, 478)
+        self.safe_cell = 24
+        self.safe_toggle = pygame.Rect(262, 484, 158, 30)
+        # 触屏长按(显示物品详情;普通点按延迟到抬起判定)
+        self.hold = uikit.HoldInfo()
+        # 任务中心:四个部门(教官 / 医疗 / 后勤 / 保险承包商)
         self.task_dept = "instructor"
         self.task_scroll = 0.0
-        self.task_tab_rects = [pygame.Rect(548 + i * 214, 132, 200, 32)
+        self.task_tab_rects = [pygame.Rect(548 + i * 176, 132, 168, 32)
                                for i in range(len(DEPTS))]
         self.task_view_top = 186
         self.task_view_bottom = 600
@@ -739,16 +746,24 @@ class Hideout:
         return True, f"{it.name} 已展开"
 
     def _right_click(self, pos):
-        """仓库/出战背包里右键背包 -> 卷起/展开。"""
+        """仓库/背包/保险箱里右键:背包类 = 卷起/展开;其他物品 = 原位横竖旋转。"""
         sd = self.game.save
         if self.lay["stash_panel"].collidepoint(pos):
             placed = self.stash_hit(pos)
-            if placed is not None and placed.item.cat == "pack":
-                ok, msg = self._toggle_roll(sd.stash, placed)
-                if msg:
-                    save_mod.save_data(sd)
-                    audio.play("click")
-                    self.say(msg, COL["good"] if ok else COL["bad"], 3.0)
+            if placed is not None:
+                if placed.item.cat == "pack":
+                    ok, msg = self._toggle_roll(sd.stash, placed)
+                    if msg:
+                        save_mod.save_data(sd)
+                        audio.play("click")
+                        self.say(msg, COL["good"] if ok else COL["bad"], 3.0)
+                else:
+                    self._rotate_placed(sd.stash, placed)
+            return
+        if self.safe_rect().collidepoint(pos):
+            placed = self._safe_at(pos)
+            if placed is not None:
+                self._rotate_placed(sd.safe, placed)
             return
         if self.bag_rect().collidepoint(pos):
             cell = self.bag_cell()
@@ -756,18 +771,129 @@ class Hideout:
             gx = int((pos[0] - brect.x) // cell)
             gy = int((pos[1] - brect.y) // cell)
             placed = sd.bag.at(gx, gy)
-            if placed is not None and placed.item.cat == "pack":
-                ok, msg = self._toggle_roll(sd.bag, placed)
-                if msg:
-                    save_mod.save_data(sd)
-                    audio.play("click")
-                    self.say(msg, COL["good"] if ok else COL["bad"], 3.0)
+            if placed is not None:
+                if placed.item.cat == "pack":
+                    ok, msg = self._toggle_roll(sd.bag, placed)
+                    if msg:
+                        save_mod.save_data(sd)
+                        audio.play("click")
+                        self.say(msg, COL["good"] if ok else COL["bad"], 3.0)
+                else:
+                    self._rotate_placed(sd.bag, placed)
+
+    # ---- 保险箱(阵亡不丢) ----
+    def safe_rect(self):
+        sd = self.game.save
+        return pygame.Rect(self.safe_grid[0], self.safe_grid[1],
+                           sd.safe.w * self.safe_cell, sd.safe.h * self.safe_cell)
+
+    def _safe_at(self, pos):
+        gx = int((pos[0] - self.safe_grid[0]) // self.safe_cell)
+        gy = int((pos[1] - self.safe_grid[1]) // self.safe_cell)
+        return self.game.save.safe.at(gx, gy)
+
+    def _rotate_placed(self, container, placed):
+        """原位横竖旋转 + 反馈。旋转成功会落盘。"""
+        from inventory import rotate_in_place
+        res = rotate_in_place(container, placed)
+        if res is None:
+            self.say(f"{placed.item.name} 是方形,不用旋转", COL["text_dim"], 2.0)
+        elif res:
+            save_mod.save_data(self.game.save)
+            audio.play("click")
+            self.say(f"已调整 {placed.item.name} 的摆放方向(横 / 竖)")
+        else:
+            self.say("原位转不开,先给它周围腾点地方", COL["bad"], 2.6)
+
+    # ---- 触屏长按:点按延迟到抬起 + 按住 0.45s 弹详情 ----
+    def _hold_filter(self, dt, events):
+        """触屏事件过滤。普通点按在抬起时重放;长按弹面板;拖动不误触。"""
+        out = []
+        for ev in events:
+            if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                if self.hold.active():
+                    # 面板已弹出:点旋转按钮 = 旋转;点别处 = 关闭(都吞掉)
+                    if (self.hold.rotate_rect is not None
+                            and self.hold.rotate_rect.collidepoint(ev.pos)):
+                        self._hold_rotate()
+                    self.hold.hide()
+                    continue
+                if self.view == "trade" and self.trade_slider is not None:
+                    track, _handle = self.trade_slider
+                    if track.collidepoint(ev.pos):
+                        out.append(ev)      # 滚动条保持立即拖动
+                        continue
+                self.hold.press(ev.pos)
+                continue
+            if ev.type == pygame.MOUSEMOTION:
+                self.hold.move(ev.pos)
+                out.append(ev)
+                continue
+            if ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
+                if self.hold.consume_release():
+                    # 普通点按:重放成一次按下(所有原逻辑照常)
+                    out.append(pygame.event.Event(pygame.MOUSEBUTTONDOWN,
+                                                  pos=ev.pos, button=1))
+                else:
+                    out.append(ev)
+                continue
+            out.append(ev)
+        self.hold.update(dt, self._hold_query)
+        return out
+
+    def _hold_rotate(self):
+        cb = self.hold.rotate_cb
+        if cb is None:
+            return
+        container, placed = cb
+        if placed not in container.items:
+            return
+        self._rotate_placed(container, placed)
+
+    def _hold_query(self, pos):
+        """长按落点查询:返回 (item, (container, placed)) 或 None。"""
+        sd = self.game.save
+        if self.view == "trade":
+            placed = self.trade_stash_hit(pos)
+            if placed is not None:
+                return placed.item, (sd.stash, placed)
+            goods, per, row_h = self.trade_rows()
+            for i, (iid, _c) in enumerate(goods):
+                if (iid in ITEMS
+                        and self.trade_row_rect(i, per, row_h).collidepoint(pos)):
+                    it = (Item.weapon(iid) if ITEMS[iid]["cat"] == "weapon"
+                          else Item(iid))
+                    return it, None
+            return None
+        placed = self.stash_hit(pos)
+        if placed is not None:
+            return placed.item, (sd.stash, placed)
+        if self.safe_rect().collidepoint(pos):
+            placed = self._safe_at(pos)
+            if placed is not None:
+                return placed.item, (sd.safe, placed)
+        brect = self.bag_rect()
+        if brect.collidepoint(pos):
+            cell = self.bag_cell()
+            gx = int((pos[0] - brect.x) // cell)
+            gy = int((pos[1] - brect.y) // cell)
+            placed = sd.bag.at(gx, gy)
+            if placed is not None:
+                return placed.item, (sd.bag, placed)
+        for name in ("weapon", "armor", "helmet", "pack"):
+            it = getattr(sd, name)
+            if it is not None and self.lay[name].collidepoint(pos):
+                return it, None
+        return None
 
     # ---- 任务中心 ----
     def task_entries(self):
         """当前部门的条目列表。"""
         if self.task_dept == "instructor":
             return [(t, quests.task_state(self.game.save, t)) for t in TASKS]
+        if self.task_dept == "contractor":
+            return [(t, quests.task_state(self.game.save, t))
+                    for t in SAFE_CONTRACT]
         return [(e, ("doing" if not quests.can_barter(self.game.save, e) else "ready"),
                  None, None) for e in quests.barter_list(self.task_dept)]
 
@@ -801,7 +927,7 @@ class Hideout:
         for i, entry in enumerate(entries):
             if not self.task_row_rect(i).collidepoint(pos):
                 continue
-            if self.task_dept == "instructor":
+            if self.task_dept in ("instructor", "contractor"):
                 task = entry[0]
                 ok, msg = quests.claim(sd, task)
             else:
@@ -848,6 +974,9 @@ class Hideout:
         if self.view == "options":
             self._options_update(dt, events)
             return
+        # 触屏(仓库/交易所):长按弹物品详情;普通点按延迟到抬起判定
+        if self.game.save.touch and self.view in ("stash", "trade"):
+            events = self._hold_filter(dt, events)
         for ev in events:
             # 商品列表滚动条拖动中:鼠标移动 = 改滚动位置
             if ev.type == pygame.MOUSEMOTION and self.trade_drag:
@@ -880,6 +1009,9 @@ class Hideout:
                     self.task_scroll = max(0.0, min(self.task_scroll,
                                                     self.task_max_scroll()))
             elif ev.type == pygame.KEYDOWN:
+                if ev.key == pygame.K_ESCAPE and self.hold.active():
+                    self.hold.hide()
+                    continue
                 if ev.key == pygame.K_ESCAPE and self.view in ("trade", "task",
                                                                "story"):
                     self.view = "stash"
@@ -1135,11 +1267,36 @@ class Hideout:
                     self.say("仓库空间不足", COL["bad"])
             return
 
+        # 保险箱:存入开关 / 点物品取回仓库
+        if self.safe_toggle.collidepoint(pos):
+            self.safe_in = not self.safe_in
+            self.say("存入模式已开启:点仓库里的物品就会放进保险箱(阵亡不丢)"
+                     if self.safe_in else
+                     "存入模式已关闭(恢复:点物品=装备/放背包)", COL["accent"], 3.2)
+            return
+        if self.safe_rect().collidepoint(pos):
+            placed = self._safe_at(pos)
+            if placed is not None:
+                if try_move(sd.safe, placed, sd.stash):
+                    save_mod.save_data(sd)
+                    self.say(f"{placed.item.name} 已从保险箱取出")
+                else:
+                    self.say("仓库空间不足", COL["bad"])
+            return
+
         # 仓库物品 -> 装备/出战背包
         if lay["stash_panel"].collidepoint(pos):
             placed = self.stash_hit(pos)
             if placed is not None:
                 item = placed.item
+                if self.safe_in:
+                    if try_move(sd.stash, placed, sd.safe):
+                        save_mod.save_data(sd)
+                        self.say(f"{item.name} 已存入保险箱(阵亡不丢)")
+                    else:
+                        self.say("保险箱放不下(40 个承包商任务完成后扩为 4 格)",
+                                 COL["bad"], 3.2)
+                    return
                 if item.cat == "weapon":
                     if not armor_allows(sd.armor, item.def_):
                         self.say(f"需先穿上 {item.def_['req_armor_level']} 级护甲,"
@@ -1438,8 +1595,25 @@ class Hideout:
                 f"滚轮上下翻(仓库共 {sd.stash.h} 行)",
                 True, COL["text_dim"])
             screen.blit(t, (self.stash_grid[0],
-                            self.stash_grid[1] + self.stash_view_h + 10))
+                            self.stash_grid[1] + self.stash_view_h + 4))
         self._draw_scroll_buttons(screen, [("stash", 0)])
+
+        # ---- 保险箱条(阵亡不丢;40 个承包商任务升 4 格) ----
+        sr = self.safe_rect()
+        draw_grid(screen, sr.x, sr.y, sd.safe, self.safe_cell,
+                  title=None)
+        up = quests.safe_upgraded(sd)
+        t = get_font(14, bold=True).render(
+            f"保险箱 {sd.safe.w}×{sd.safe.h}(阵亡不丢)", True,
+            COL["good"] if up else COL["accent"])
+        screen.blit(t, (sr.right + 10, sr.y + 1))
+        sub = ("已升级 4 格:承包商 40 项全部完成!" if up else
+               f"承包商任务 {quests.safe_done_count(sd)}/40 → 全完成扩为 4 格")
+        t = get_font(12).render(sub, True, COL["text_dim"])
+        screen.blit(t, (sr.right + 10, sr.y + 20))
+        draw_button(screen, self.safe_toggle,
+                    "存入:开" if self.safe_in else "存入:关",
+                    hover=self.safe_toggle.collidepoint(mx, my), small=True)
 
         # ---- 出战配置 ----
         uikit.draw_panel(screen, lay["loadout_panel"], "出战配置")
@@ -1534,7 +1708,7 @@ class Hideout:
             "",
             f"{move_txt} · 左键射击 · 右键架枪",
             f"弹匣空自动换弹 · {hr} 打药 · {kl} 搜刮/救人",
-            f"{hb} 背包 · 死亡会丢失带入的装备!",
+            f"{hb} 背包 · 死亡会丢装备(保险箱除外)",
         ]
         if assault_run:
             lines[-1] = (f"{hb} 背包 · "
@@ -1603,6 +1777,9 @@ class Hideout:
         if hover_item is not None:
             draw_tooltip(screen, mx, my, hover_item)
 
+        # ---- 触屏长按信息面板(最上层) ----
+        uikit.draw_hold(screen, self.hold)
+
     # ---------- 剧情简报 ----------
     def _story_panel(self):
         return pygame.Rect(120, 92, W - 240, 460)
@@ -1669,7 +1846,7 @@ class Hideout:
         screen.blit(bal, (W - bal.get_width() - 30, 36))
 
         uikit.draw_panel(screen, self.lay["trade_goods"],
-                         "部门 — 教官发任务,医疗/后勤用局内材料换东西")
+                         "部门 — 教官/承包商发任务,医疗/后勤用局内材料换东西")
         # 部门标签
         for i, (key, label) in enumerate(DEPTS):
             r = self.task_tab_rects[i]
@@ -1682,10 +1859,14 @@ class Hideout:
                 ready = sum(1 for tk in TASKS
                             if quests.task_state(sd, tk)[0] == "ready")
                 label = f"{label}(可领 {ready})" if ready else label
+            elif key == "contractor":
+                label = f"{label} {quests.safe_done_count(sd)}/{len(SAFE_CONTRACT)}"
             ft = get_font(16, bold=True).render(
                 label, True, COL["accent"] if sel else COL["text"])
             screen.blit(ft, ft.get_rect(center=r.center))
-        hint = ("左键:领取奖励" if self.task_dept == "instructor"
+        hint = ("左键:领取奖励 · 全部 40 项完成解锁 4 格保险箱"
+                if self.task_dept == "contractor"
+                else "左键:领取奖励" if self.task_dept == "instructor"
                 else "左键:交货换东西(材料从仓库+背包里扣)")
         if self.task_max_scroll() > 0:
             hint += " · 滚轮翻页"
@@ -1699,7 +1880,7 @@ class Hideout:
             rect = self.task_row_rect(i)
             if rect.bottom < self.task_view_top or rect.top > self.task_view_bottom:
                 continue
-            if self.task_dept == "instructor":
+            if self.task_dept in ("instructor", "contractor"):
                 task, (state, p, need) = entry
                 done = state == "done"
                 ready = state == "ready"
@@ -1906,5 +2087,7 @@ class Hideout:
                         preview = Item(iid, count=count)
                     draw_tooltip(screen, mx, my, preview)
                     break
+        # ---- 触屏长按信息面板 ----
+        uikit.draw_hold(screen, self.hold)
         if self.sell_ask is not None:
             self._draw_sell_ask(screen)

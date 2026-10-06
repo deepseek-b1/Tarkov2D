@@ -2,8 +2,10 @@
 """任务系统:教官发任务(进度由战局结算累计),医疗/后勤用局内材料交货换东西。
 
 奖励/交货都是"先试算再落盘":仓库放不下就不发,绝不让玩家白交材料或白领奖励。
+保险承包商:40 个长线任务,全部完成后保险箱(阵亡不丢)从 2 格升为 4 格。
 """
-from settings import TASKS, DEPARTMENT_BARTERS, ITEMS
+from settings import (TASKS, DEPARTMENT_BARTERS, ITEMS, SAFE_CONTRACT,
+                      SAFE_UPGRADED, SAFE_BASE)
 from inventory import Container, Item
 
 
@@ -28,12 +30,40 @@ def task_state(sd, task):
 
 
 def add_progress(sd, kind, amount):
-    """战局结算时累计进度(击杀/撤离/价值/人质/突袭)。"""
+    """战局结算时累计进度(击杀/撤离/价值/人质/突袭)。教官与承包商任务一起涨。"""
     if amount <= 0:
         return
-    for t in TASKS:
+    for t in TASKS + SAFE_CONTRACT:
         if t["kind"] == kind:
             sd.tasks[t["id"]] = progress(sd, t) + int(amount)
+
+
+# ---------- 保险承包商(保险箱扩容) ----------
+def safe_done_count(sd):
+    """已完成(已领取)的承包商任务数。"""
+    done = set(sd.tasks_done)
+    return sum(1 for t in SAFE_CONTRACT if t["id"] in done)
+
+
+def safe_upgraded(sd):
+    """40 个承包商任务是否全部完成(保险箱 4 格)。"""
+    return safe_done_count(sd) >= len(SAFE_CONTRACT)
+
+
+def check_safe_upgrade(sd):
+    """全部完成 -> 把保险箱从 2 格升为 4 格(2×2)。幂等;返回提示或 ""。"""
+    if not safe_upgraded(sd):
+        return ""
+    if (sd.safe.w, sd.safe.h) == tuple(SAFE_UPGRADED):
+        return ""
+    new_safe, overflow = sd.safe.resized(SAFE_UPGRADED[0], SAFE_UPGRADED[1])
+    for it in overflow:
+        # 2×1 -> 2×2 是超集,理论上不会放不下;万一放不下退回仓库
+        if not sd.stash.add_item(it):
+            sd.safe = new_safe
+            return "★ 保险箱扩容完成,但有物品没能安置(仓库也满)"
+    sd.safe = new_safe
+    return "★ 保险承包商 40 项任务全部完成:保险箱已扩为 4 格(2×2,阵亡不丢)!"
 
 
 def reward_text(reward):
@@ -69,7 +99,7 @@ def grant(sd, reward):
 
 
 def claim(sd, task):
-    """领取教官任务奖励。返回 (成功, 提示)。"""
+    """领取任务奖励(教官/承包商)。返回 (成功, 提示)。"""
     state, p, need = task_state(sd, task)
     if state == "done":
         return False, f"「{task['name']}」已结算过了"
@@ -82,7 +112,9 @@ def claim(sd, task):
         sd.tasks[task["id"]] = p - need          # 可重复任务:扣掉已结算的部分
     else:
         sd.tasks_done.append(task["id"])
-    return True, f"「{task['name']}」奖励已发放:{reward_text(task['reward'])}"
+    msg = f"「{task['name']}」奖励已发放:{reward_text(task['reward'])}"
+    extra = check_safe_upgrade(sd)               # 承包商 40 项齐全 -> 保险箱扩容
+    return True, (msg + "  " + extra) if extra else msg
 
 
 # ---------- 部门交货 ----------

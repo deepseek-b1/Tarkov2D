@@ -5,7 +5,7 @@ import os
 import sys
 import time
 
-from settings import STASH_W, STASH_H, BAG_W, BAG_H
+from settings import STASH_W, STASH_H, BAG_W, BAG_H, SAFE_BASE
 from inventory import Container, Item
 
 
@@ -28,6 +28,8 @@ class SaveData:
     def __init__(self):
         self.stash = Container(STASH_W, STASH_H)
         self.bag = Container(BAG_W, BAG_H)   # 容量由装备的背包决定
+        # 保险箱:贴身安全格(阵亡不丢);默认 2 格,40 个承包商任务全完成升 4 格
+        self.safe = Container(SAFE_BASE[0], SAFE_BASE[1])
         self.weapon = None   # Item 或 None(出战武器槽)
         self.armor = None    # Item 或 None(出战护甲槽)
         self.helmet = None   # Item 或 None(出战头盔槽:夜视头盔)
@@ -88,7 +90,10 @@ class SaveData:
         return False
 
     def wipe_loadout(self):
-        """阵亡:丢失带入战局的所有装备(含背包,退回口袋容量)。"""
+        """阵亡:丢失带入战局的所有装备(含背包,退回口袋容量)。
+
+        注意:保险箱(self.safe)是贴身安全格,【故意不算】—— 阵亡不丢。
+        """
         self.weapon = None
         self.armor = None
         self.helmet = None
@@ -103,6 +108,9 @@ class SaveData:
             "bag": self.bag.serialize(),
             "bag_w": self.bag.w,
             "bag_h": self.bag.h,
+            "safe": self.safe.serialize(),
+            "safe_w": self.safe.w,
+            "safe_h": self.safe.h,
             "weapon": self.weapon.serialize() if self.weapon else None,
             "armor": self.armor.serialize() if self.armor else None,
             "helmet": self.helmet.serialize() if self.helmet else None,
@@ -137,6 +145,13 @@ class SaveData:
         except (TypeError, ValueError):
             bw, bh = 6, 4
         sd.bag = Container.deserialize(bw, bh, data.get("bag"), repair=True)
+        # 保险箱:旧档没有这个字段 -> 给一个空的 2 格保险箱,不影响老玩家
+        try:
+            sw = int(data.get("safe_w", SAFE_BASE[0]) or SAFE_BASE[0])
+            sh = int(data.get("safe_h", SAFE_BASE[1]) or SAFE_BASE[1])
+        except (TypeError, ValueError):
+            sw, sh = SAFE_BASE
+        sd.safe = Container.deserialize(sw, sh, data.get("safe"), repair=True)
         if data.get("weapon"):
             sd.weapon = Item.from_dict(data["weapon"])
         if data.get("armor"):
@@ -169,6 +184,9 @@ class SaveData:
                     if isinstance(v, (int, float))}
         done = data.get("tasks_done") or []
         sd.tasks_done = [str(t) for t in done]
+        # 承包商 40 项已完成但保险箱还是 2 格(旧档/异常)→ 自动升到 4 格
+        from quests import check_safe_upgrade
+        check_safe_upgrade(sd)
         story = data.get("story")
         sd.story = story if isinstance(story, dict) else None
         # 设置:键位覆盖 / 触屏布局 / 帧率 / FPS 显示 / 缩放滤镜(全部带校验)

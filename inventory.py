@@ -404,6 +404,26 @@ def try_move(src, placed, dst):
     return True
 
 
+def rotate_in_place(container, placed):
+    """在【原位】把物品横竖互换。返回:True=已转 / False=原位转不开 /
+    None=方形物品无需旋转。"""
+    it = placed.item
+    bw, bh = it.base_size()
+    if bw == bh:
+        return None
+    if placed not in container.items:
+        return False
+    # 先把它从容器里摘出来再判定:否则 fits 会把它自己占的格当成障碍
+    idx = container.items.index(placed)
+    container.items.pop(idx)
+    ok = container.fits(it, placed.x, placed.y, rot=(not it.rot))
+    container.items.insert(idx, placed)
+    if ok:
+        it.rot = not it.rot
+        return True
+    return False
+
+
 # ---------- 一键整理 ----------
 # 分区顺序:枪 / 甲 / 头盔 / 配件 / 背包 / 子弹 / 药 / 杂物 / 值钱货
 CATEGORY_ORDER = ("weapon", "armor", "helmet", "attach", "pack", "ammo", "med",

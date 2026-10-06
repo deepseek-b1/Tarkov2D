@@ -3,7 +3,7 @@
 import pygame
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.9.0"
+GAME_VERSION = "2.10.0"
 # 更新清单地址(可换成自建服务器 / GitHub raw;留空则只认 EXE 同目录的 version.json)
 UPDATE_MANIFEST_URL = "http://127.0.0.1:8765/version.json"
 UPDATE_TIMEOUT = 3   # 检查 / 下载超时(秒)
@@ -34,7 +34,7 @@ HEAL_TIME_PER_HP = 0.010     # 每点治疗量额外时间
 HEAL_TIME_MIN = 1.0
 HEAL_TIME_MAX = 3.0
 STASH_W, STASH_H = 10, 20    # 藏身处仓库(格子多了,藏身处用滚轮上下翻)
-STASH_VIEW_ROWS = 8          # 仓库面板一次能看到几行(其余靠滚轮)
+STASH_VIEW_ROWS = 7          # 仓库面板一次能看到几行(其余靠滚轮;底部留给保险箱条)
 BAG_W, BAG_H = 4, 2          # 无背包时的口袋容量(装备背包后按 grid 扩容)
 
 PLAYER = dict(hp=100, speed=235, walk=115, radius=12)
@@ -315,11 +315,16 @@ ITEMS.update({
     "solar": dict(name="太阳能板", cat="misc", w=3, h=2, color=(70, 96, 132), price=72000),
 })
 
-# 机密文件:孤品,仅在「强化封锁」的保险箱里固定刷出
+# 机密文件:孤品中的孤品,仅「强化封锁」每局 0.1% 概率刷 1 份在某个保险箱里
 CLASSIFIED = "doc"
 ITEMS[CLASSIFIED] = dict(name="机密文件", cat="misc", w=1, h=1,
                          color=(240, 232, 190), price=5000000)
-DOC_HARDENED_COUNT = 1   # 每局强化封锁刷几份机密文件(9=每个保险箱各一份)
+DOC_SPAWN_CHANCE = 0.001  # 每局(仅强化封锁)整体判定一次:命中才刷在随机保险箱
+
+# ---------- 保险箱(阵亡不丢的贴身安全格) ----------
+# 默认 2 格;40 个「保险承包商」任务全部完成 -> 升为 4 格(2×2)
+SAFE_BASE = (2, 1)
+SAFE_UPGRADED = (2, 2)
 
 
 def pack_grid(iid):
@@ -1217,7 +1222,8 @@ SUPPLY_COOLDOWN = 5.0        # 补给冷却(秒)
 SUPPLY_RANGE = 76            # 站多近才能补给
 
 # ---------- 任务系统(教官 / 医疗部门 / 后勤部门) ----------
-DEPTS = [("instructor", "教官"), ("medical", "医疗部门"), ("logistics", "后勤部门")]
+DEPTS = [("instructor", "教官"), ("medical", "医疗部门"),
+         ("logistics", "后勤部门"), ("contractor", "保险承包商")]
 # 教官的任务:kind 决定进度怎么涨(在 game.py 的战局结算里累计)
 # reward: rubles 给钱 / weapons 给枪 / attachments 给配件 / ammo 给子弹
 TASKS = [
@@ -1236,6 +1242,71 @@ TASKS = [
          reward=dict(rubles=120000, ammo=[("a545", 120), ("a12db", 40)])),
     dict(id="t7", name="长期合同", desc="每击杀 10 名拾荒者就能结一次账", kind="kills",
          need=10, reward=dict(rubles=25000), repeat=True),
+]
+# 保险承包商:40 个长线任务。全部完成后,保险箱从 2 格升为 4 格(2×2,阵亡不丢)
+# (id, 名字, 类型, 数量, 奖励卢布)
+_SAFE_CHAIN = [
+    ("sc1", "清理门户", "kills", 5, 8000),
+    ("sc2", "顺藤摸瓜", "extracts", 2, 10000),
+    ("sc3", "小有积蓄", "value", 80000, 12000),
+    ("sc4", "枪声渐密", "kills", 8, 14000),
+    ("sc5", "弹无虚发", "kills", 10, 16000),
+    ("sc6", "全身而退", "extracts", 3, 18000),
+    ("sc7", "满载而归", "value", 150000, 20000),
+    ("sc8", "硬碰硬", "kills", 12, 22000),
+    ("sc9", "深入虎穴", "kills", 15, 24000),
+    ("sc10", "路见不平", "hostage_win", 1, 30000),
+    ("sc11", "兵贵神速", "extracts", 5, 26000),
+    ("sc12", "盆满钵满", "value", 250000, 28000),
+    ("sc13", "百步穿杨", "kills", 18, 30000),
+    ("sc14", "血的教训", "kills", 20, 32000),
+    ("sc15", "险中求胜", "extracts", 6, 34000),
+    ("sc16", "战地医生", "hostage_win", 2, 40000),
+    ("sc17", "移山填海", "kills", 25, 36000),
+    ("sc18", "金玉满堂", "value", 400000, 38000),
+    ("sc19", "狭路相逢", "kills", 30, 42000),
+    ("sc20", "插翅难逃", "assault_win", 1, 50000),
+    ("sc21", "行军床", "extracts", 8, 44000),
+    ("sc22", "满载而返", "value", 600000, 46000),
+    ("sc23", "弹雨穿行", "kills", 35, 48000),
+    ("sc24", "一夫当关", "kills", 40, 52000),
+    ("sc25", "力挽狂澜", "hostage_win", 3, 60000),
+    ("sc26", "夜以继日", "kills", 45, 54000),
+    ("sc27", "富可敌国", "value", 800000, 58000),
+    ("sc28", "险象环生", "extracts", 10, 56000),
+    ("sc29", "尸山血海", "kills", 50, 62000),
+    ("sc30", "攻坚克难", "assault_win", 2, 70000),
+    ("sc31", "横扫千军", "kills", 55, 66000),
+    ("sc32", "腰缠万贯", "value", 1100000, 68000),
+    ("sc33", "十死一生", "extracts", 12, 72000),
+    ("sc34", "百战余生", "kills", 60, 74000),
+    ("sc35", "救死扶伤", "hostage_win", 4, 80000),
+    ("sc36", "摧枯拉朽", "kills", 70, 78000),
+    ("sc37", "富甲一方", "value", 1500000, 82000),
+    ("sc38", "浴血奋战", "kills", 80, 88000),
+    ("sc39", "最后的障碍", "assault_win", 3, 95000),
+    ("sc40", "承包商认证", "kills", 90, 120000),
+]
+
+
+def _safe_desc(kind, need):
+    if kind == "kills":
+        return f"累计击杀 {need} 名拾荒者"
+    if kind == "extracts":
+        return f"成功撤离 {need} 次"
+    if kind == "value":
+        return f"累计带回价值 {need // 10000} 万的物资"
+    if kind == "hostage_win":
+        return f"完成 {need} 次人质解救(救满 4 人并撤离)"
+    if kind == "assault_win":
+        return f"完成 {need} 次突袭(炸毁 3 座设施并撤离)"
+    return f"{kind} ×{need}"
+
+
+SAFE_CONTRACT = [
+    dict(id=tid, name=name, desc=_safe_desc(kind, need), kind=kind, need=need,
+         reward=dict(rubles=rw))
+    for tid, name, kind, need, rw in _SAFE_CHAIN
 ]
 # 医疗部门:把局内捡到的材料交上去换药品
 MED_BARTERS = [

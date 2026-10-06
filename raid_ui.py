@@ -122,7 +122,7 @@ def _hud_bg(w, h, rgba):
 
 
 # ---------- 布局(与 raid.py 交互命中区) ----------
-def inv_layout(bag_w=6, bag_h=4):
+def inv_layout(bag_w=6, bag_h=4, safe_w=2, safe_h=1):
     panel = pygame.Rect(W // 2 - 420, 120, 840, 470)
     cell = 44
     bag = (pygame.Rect(panel.right - 40 - bag_w * cell, panel.y + 80,
@@ -133,8 +133,12 @@ def inv_layout(bag_w=6, bag_h=4):
     close = pygame.Rect(panel.right - 50, panel.y + 16, 34, 34)
     merge = pygame.Rect(panel.x + 30, panel.bottom - 104, 168, 38)
     drop = pygame.Rect(panel.x + 208, panel.bottom - 104, 132, 38)
+    safe_mode = pygame.Rect(panel.x + 360, panel.bottom - 104, 150, 38)
+    safe = (pygame.Rect(panel.x + 520, panel.bottom - 110, safe_w * 28,
+                        safe_h * 28), 28)
     return dict(panel=panel, bag=bag, weapon=weapon, armor=armor, helmet=helmet,
-                close=close, merge=merge, drop=drop)
+                close=close, merge=merge, drop=drop,
+                safe=safe, safe_mode=safe_mode)
 
 
 def ask_layout():
@@ -145,12 +149,13 @@ def ask_layout():
     return dict(panel=panel, yes=yes, no=no)
 
 
-def loot_layout(cw, ch, bag_w=6, bag_h=4):
+def loot_layout(cw, ch, bag_w=6, bag_h=4, safe_w=2, safe_h=1):
     cell = 34
     cont_w, cont_h = cw * cell, ch * cell
     bag_wp, bag_hp = bag_w * cell, bag_h * cell
     panel_w = max(40 + cont_w + 60 + bag_wp + 40, 560)
-    panel = pygame.Rect(W // 2 - panel_w // 2, 140, panel_w, max(cont_h, bag_hp) + 150)
+    panel = pygame.Rect(W // 2 - panel_w // 2, 140, panel_w,
+                        max(cont_h, bag_hp) + 170)
     src = (pygame.Rect(panel.x + 40, panel.y + 90, cont_w, cont_h), cell)
     dst = (pygame.Rect(src[0].right + 60, panel.y + 90, bag_wp, bag_hp), cell)
     half = max(90, (cont_w - 8) // 2)
@@ -158,8 +163,10 @@ def loot_layout(cw, ch, bag_w=6, bag_h=4):
     takeall = pygame.Rect(src[0].x + half + 8, src[0].bottom + 14,
                           max(90, cont_w - half - 8), 36)
     close = pygame.Rect(panel.right - 50, panel.y + 16, 34, 34)
+    safe = (pygame.Rect(dst[0].right - safe_w * 28, dst[0].bottom + 12,
+                        safe_w * 28, safe_h * 28), 28)
     return dict(panel=panel, src=src, dst=dst, searchall=searchall,
-                takeall=takeall, close=close)
+                takeall=takeall, close=close, safe=safe)
 
 
 def pause_layout():
@@ -1057,7 +1064,7 @@ def _close_button(surface, rect):
 # ---------- 背包界面 ----------
 def _draw_inventory(raid, screen):
     p = raid.player
-    lay = inv_layout(p.bag.w, p.bag.h)
+    lay = inv_layout(p.bag.w, p.bag.h, p.safe.w, p.safe.h)
     uikit.draw_panel(screen, lay["panel"], "背包  (TAB 关闭)")
     _close_button(screen, lay["close"])
     mx, my = pygame.mouse.get_pos()
@@ -1101,22 +1108,37 @@ def _draw_inventory(raid, screen):
         tt = get_font(13, bold=True).render(
             f"治疗中 {int(ratio * 100)}%", True, (240, 240, 240))
         screen.blit(tt, tt.get_rect(center=bar.center))
-    # 整理弹药 / 丢弃模式
+    # 整理弹药 / 丢弃模式 / 保险箱存入
     draw_button(screen, lay["merge"], "整理弹药(叠至 120 发/组)",
                 hover=lay["merge"].collidepoint(mx, my), small=True)
     drop_on = getattr(raid, "drop_mode", False)
     draw_button(screen, lay["drop"],
                 "丢弃模式:开" if drop_on else "丢弃模式:关",
                 hover=lay["drop"].collidepoint(mx, my), small=True)
+    sm_on = getattr(raid, "safe_mode", False)
+    draw_button(screen, lay["safe_mode"],
+                "保险箱存入:开" if sm_on else "保险箱存入:关",
+                hover=lay["safe_mode"].collidepoint(mx, my), small=True)
+    # 保险箱网格(阵亡不丢)
+    safe_rect, safe_cell = lay["safe"]
+    draw_grid(screen, safe_rect.x, safe_rect.y, p.safe, safe_cell)
+    t = get_font(13, bold=True).render("保险箱", True,
+                                       COL["good"] if sm_on else COL["text_dim"])
+    screen.blit(t, (safe_rect.right + 8, safe_rect.y + 1))
+    t = get_font(12).render("阵亡不丢", True, COL["text_dim"])
+    screen.blit(t, (safe_rect.right + 8, safe_rect.y + 17))
     hint = ("丢弃模式已开:点物品/装备槽 = 丢在脚边" if drop_on else
+            "保险箱存入已开:点背包物品 = 存进保险箱" if sm_on else
             "左键:使用/装备   右键:丢弃   点装备槽:卸下")
-    if raid.touch_mode and not drop_on:
-        hint += "   手机:开「丢弃模式」再点物品"
+    if raid.touch_mode and not drop_on and not sm_on:
+        hint += "   手机:开「丢弃模式」再点物品 · 长按看详情"
     t = get_font(14).render(hint, True,
-                            COL["accent"] if drop_on else COL["text_dim"])
+                            COL["accent"] if (drop_on or sm_on) else COL["text_dim"])
     screen.blit(t, (lay["panel"].x + 30, lay["panel"].bottom - 34))
 
     hovered = grid_hit_px(p.bag, lay["bag"], (mx, my))
+    if hovered is None:
+        hovered = grid_hit_px(p.safe, lay["safe"], (mx, my))
     if hovered is None and lay["weapon"].collidepoint(mx, my) and p.weapon:
         draw_tooltip(screen, mx, my, p.weapon)
     elif hovered is None and lay["armor"].collidepoint(mx, my) and p.armor:
@@ -1125,6 +1147,8 @@ def _draw_inventory(raid, screen):
         draw_tooltip(screen, mx, my, p.helmet)
     if hovered is not None:
         draw_tooltip(screen, mx, my, hovered.item)
+    # 触屏长按信息面板(最上层)
+    uikit.draw_hold(screen, getattr(raid, "hold", None))
 
 
 def _draw_ask_merge(raid, screen):
@@ -1152,7 +1176,8 @@ def _draw_ask_merge(raid, screen):
 def _draw_loot_window(raid, screen):
     lc = raid.loot_target
     p = raid.player
-    lay = loot_layout(lc.container.w, lc.container.h, p.bag.w, p.bag.h)
+    lay = loot_layout(lc.container.w, lc.container.h, p.bag.w, p.bag.h,
+                      p.safe.w, p.safe.h)
     uikit.draw_panel(screen, lay["panel"], f"搜刮:{lc.name}  (E/ESC 关闭)")
     _close_button(screen, lay["close"])
     mx, my = pygame.mouse.get_pos()
@@ -1171,6 +1196,11 @@ def _draw_loot_window(raid, screen):
         screen.blit(q, q.get_rect(center=r.center))
     dst_rect, cell2 = lay["dst"]
     draw_grid(screen, dst_rect.x, dst_rect.y, p.bag, cell2, "你的背包")
+    # 保险箱(阵亡不丢):背包满时「拿走」会自动塞进来
+    srect, scell = lay["safe"]
+    draw_grid(screen, srect.x, srect.y, p.safe, scell)
+    t = get_font(13, bold=True).render("保险箱", True, COL["text_dim"])
+    screen.blit(t, (srect.right + 6, srect.y + 1))
 
     draw_button(screen, lay["searchall"], "全部搜出",
                 hover=lay["searchall"].collidepoint(mx, my), small=True)
@@ -1206,12 +1236,14 @@ def _draw_loot_window(raid, screen):
                                  f"1~2 秒/件)", True, COL["text_dim"])
         screen.blit(tq, (src_rect.x, src_rect.bottom + 12))
     hint = ("左键未知物品:搜索(1~2 秒)   左键已知物品:直接拿走   空手时武器/护甲会装备"
+            "   背包满时会自动塞进保险箱"
             if tk is None else "搜索中…走远或关窗会中断")
     t = get_font(14).render(hint, True, COL["text_dim"])
     screen.blit(t, (lay["panel"].x + 30, lay["panel"].bottom - 34))
 
     h1 = grid_hit_px(lc.container, lay["src"], (mx, my))
     h2 = grid_hit_px(p.bag, lay["dst"], (mx, my))
+    h3 = grid_hit_px(p.safe, lay["safe"], (mx, my))
     if h1 is not None:
         if raid.is_known(h1):
             draw_tooltip(screen, mx, my, h1.item)
@@ -1221,6 +1253,10 @@ def _draw_loot_window(raid, screen):
             screen.blit(tt, (mx + 14, my + 6))
     elif h2 is not None:
         draw_tooltip(screen, mx, my, h2.item)
+    elif h3 is not None:
+        draw_tooltip(screen, mx, my, h3.item)
+    # 触屏长按信息面板(最上层)
+    uikit.draw_hold(screen, getattr(raid, "hold", None))
 
 
 # ---------- 暂停 ----------

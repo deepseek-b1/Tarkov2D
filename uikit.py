@@ -115,6 +115,15 @@ def draw_item_icon(surface, item, x, y, cell=CELL):
             (cx, cy - 11), (cx + 9, cy - 5), (cx + 9, cy + 5),
             (cx, cy + 11), (cx - 9, cy + 5), (cx - 9, cy - 5)])
         pygame.draw.circle(surface, (26, 26, 30), (cx, cy), 4)
+    elif cat == "helmet":
+        # 头盔:圆顶 + 下沿 + 护颚
+        pygame.draw.arc(surface, (30, 30, 36),
+                        (inner.left + 2, inner.top + 2, inner.w - 4, inner.h),
+                        0.15, 3.0, 4)
+        pygame.draw.rect(surface, (30, 30, 36),
+                         (inner.left + 3, cy - 1, inner.w - 6, 6), border_radius=3)
+        pygame.draw.rect(surface, (30, 30, 36),
+                         (cx - 5, cy + 5, 10, 9), border_radius=2)
     else:  # valuable
         pygame.draw.polygon(surface, (255, 255, 255),
                             [(cx, cy - 11), (cx + 10, cy), (cx, cy + 11), (cx - 10, cy)])
@@ -240,7 +249,7 @@ def item_info_lines(item):
     elif item.cat == "misc":
         sub.append(f"杂物 · 价值 {fmt_rub(d['price'])}")
         if item.iid == "doc":
-            sub.append("★ 仅在「强化封锁」的保险箱中固定刷出")
+            sub.append("★ 仅「强化封锁」每局 0.1% 概率刷在保险箱(孤品)")
     elif item.cat == "med":
         sub.append(f"治疗 {d['heal']} HP")
     elif item.cat == "ammo":
@@ -270,3 +279,103 @@ def draw_tooltip(surface, mx, my, item):
         t = f.render(ln, True, COL["accent"] if i == 0 else COL["text"])
         surface.blit(t, (x + 10, yy))
         yy += f.size(ln)[1]
+
+
+# ---------- 触屏长按(显示物品详情;可附「旋转」按钮) ----------
+class HoldInfo:
+    """触屏长按提示:按住物品 0.45s 弹出信息面板;指头移动超过阈值即取消。
+
+    用法:按下时 press(pos),移动时 move(pos),抬起时 consume_release(),
+    每帧 update(dt, query)。query(pos) -> (item, rotate_cb) 或 None。
+    """
+    DELAY = 0.45
+    MOVE_TOL = 14
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.holding = False
+        self.t = 0.0
+        self.pos = None
+        self.fired = False
+        self.item = None
+        self.rotate_cb = None
+        self.lines = None
+        self.rect = None
+        self.rotate_rect = None
+
+    def press(self, pos):
+        self.reset()
+        self.holding = True
+        self.pos = tuple(pos)
+
+    def move(self, pos):
+        if (self.holding and self.pos is not None
+                and abs(pos[0] - self.pos[0]) + abs(pos[1] - self.pos[1])
+                > self.MOVE_TOL):
+            self.reset()      # 移动了:这是拖动/滑动,不算长按
+
+    def consume_release(self):
+        """抬起:返回 True = 普通点按(调用方需要重放这次点击)。"""
+        tap = self.holding and not self.fired and self.pos is not None
+        self.holding = False
+        return tap
+
+    def update(self, dt, query):
+        if not (self.holding and not self.fired):
+            return
+        self.t += dt
+        if self.t < self.DELAY:
+            return
+        got = query(self.pos) if query is not None else None
+        if got is None:
+            self.holding = False           # 没按在物品上:安静取消
+            return
+        self.fired = True
+        self.item, self.rotate_cb = got
+        self.lines = item_info_lines(self.item)
+        self.rect, self.rotate_rect = hold_layout(self.lines, self.pos,
+                                                  self.rotate_cb is not None)
+
+    def active(self):
+        return self.fired and self.rect is not None and self.item is not None
+
+    def hide(self):
+        self.reset()
+
+
+def hold_layout(lines, pos, has_rotate):
+    """长按信息面板布局:返回 (面板 Rect, 旋转按钮 Rect 或 None)。"""
+    from settings import W, H
+    f = get_font(15)
+    th = sum(f.size(ln)[1] for ln in lines) + 14
+    tw = max(f.size(ln)[0] for ln in lines) + 20
+    btn_h = 40 if has_rotate else 0
+    total_h = th + btn_h
+    x = max(8, min(pos[0] - tw // 2, W - tw - 8))
+    y = pos[1] - total_h - 18
+    if y < 8:
+        y = min(H - total_h - 8, pos[1] + 20)
+    rect = pygame.Rect(x, y, tw, total_h)
+    btn = pygame.Rect(x + 10, y + th + 4, tw - 20, 30) if has_rotate else None
+    return rect, btn
+
+
+def draw_hold(surface, hold):
+    """绘制长按信息面板(信息行 + 可选旋转按钮)。"""
+    if hold is None or not hold.active():
+        return
+    rect = hold.rect
+    s = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+    s.fill((14, 15, 18, 240))
+    surface.blit(s, rect)
+    pygame.draw.rect(surface, COL["accent"], rect, 2)
+    f = get_font(15)
+    yy = rect.y + 7
+    for i, ln in enumerate(hold.lines):
+        t = f.render(ln, True, COL["accent"] if i == 0 else COL["text"])
+        surface.blit(t, (rect.x + 10, yy))
+        yy += f.size(ln)[1]
+    if hold.rotate_rect is not None:
+        draw_button(surface, hold.rotate_rect, "旋转(横 / 竖互换)", small=True)

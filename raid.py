@@ -7,9 +7,10 @@ import pygame
 
 import audio
 import story as story_mod
+import uikit
 from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       INTERACT_DIST, ITEMS, LOOT, SCAV_DROPS, DIFFICULTIES,
-                      CLASSIFIED, DOC_HARDENED_COUNT, armor_allows,
+                      CLASSIFIED, DOC_SPAWN_CHANCE, armor_allows,
                       MAPS, BOSSES, GUARD_ARMOR_DROP, GUARD_ARMORS,
                       AUTHOR_BOSS, AUTHOR_MIN_DIFFICULTY, RPG_BLAST_RADIUS,
                       RPG_HALF_HP_ARMOR_LEVEL, TOUCH, MODES, MODE_MAP,
@@ -155,6 +156,7 @@ class Player:
         self.armor = sd.armor
         self.helmet = getattr(sd, "helmet", None)   # 夜视头盔(黑暗模式)
         self.bag = sd.bag
+        self.safe = sd.safe       # 保险箱:与存档共用引用,阵亡不丢
         self.aim = 0.0
         self.fire_cd = 0.0
         self.burst_left = 0       # 三连发剩余待发数(按 G 可切换射击模式)
@@ -358,21 +360,25 @@ class Raid:
         self.captive_state = None  # 俘虏:None 待决定 / "freed" 放走 / "dead" 被处决
         self.story_log = []       # 本次出击的剧情提示(结算页用)
         self.containers = list(self.map.loot)
-        # 强化封锁:机密文件固定刷在保险箱(先放入,保证有位置)
-        if self.diff_key == "hardened" and DOC_HARDENED_COUNT > 0:
+        # 强化封锁:机密文件是 0.1% 的孤品(每局判定一次),命中才刷在随机保险箱
+        doc_spawned = (self.diff_key == "hardened"
+                       and random.random() < DOC_SPAWN_CHANCE)
+        if doc_spawned:
             safes = [c for c in self.containers if c.kind == "val"]
-            random.shuffle(safes)
-            for lc in safes[:DOC_HARDENED_COUNT]:
-                lc.container.add_item(Item(CLASSIFIED))
+            if safes:
+                random.choice(safes).container.add_item(Item(CLASSIFIED))
+            else:
+                doc_spawned = False
+        self.doc_spawned = doc_spawned
         for lc in self.containers:
             self._gen_loot(lc)
 
         self.bullets = []
         self.particles = []
         self.toasts = []
-        if self.diff_key == "hardened" and DOC_HARDENED_COUNT > 0:
-            self.add_toast("强化封锁:机密文件已刷新,藏在保险箱之一",
-                           COL["accent"], 4.5)
+        if self.doc_spawned:
+            self.add_toast("天降鸿运:这局某个保险箱里藏了一份机密文件(价值 ¥500 万)!",
+                           COL["accent"], 5.0)
         if self.boss_cfg is not None:
             if self.mode == "assault":
                 self.add_toast(f"头目 {self.boss_cfg['name']} 在场 —— 击杀可爆 6 级甲与"
@@ -438,6 +444,8 @@ class Raid:
         self.paused = False
         self._panels_was_open = False   # 触屏:弹窗开合沿(清理按住状态用)
         self.drop_mode = False   # 背包「丢弃模式」:手机没有右键,开着时点物品即丢
+        self.safe_mode = False   # 保险箱存入模式:点背包物品 = 存进保险箱
+        self.hold = uikit.HoldInfo()   # 触屏长按详情面板
         self.take = None         # 搜刮读条:{lc, item, queue, t, need}
         self.heal_ch = None      # 打药读条:{placed, t, need}
         self.searched = set()    # 已经搜出身份的物品(id(Placed));没搜过的是"未知"
@@ -1329,6 +1337,14 @@ class Raid:
             audio.play("pickup")
             self.add_toast(f"拿走 {item.name}", COL["good"], 2.0)
             return True
+        # 背包满了?试试保险箱(剧情/突袭是系统配发装备,不允许往里塞)
+        if self.mode not in ("story", "assault") \
+                and try_move(lc.container, placed, p.safe):
+            self._log_gained(item)
+            audio.play("pickup")
+            self.add_toast(f"背包放不下:{item.name} 已塞进保险箱(阵亡不丢)",
+                           COL["accent"], 2.8)
+            return True
         self.add_toast("背包空间不足", COL["bad"], 3.0)
         return False
 
@@ -2121,6 +2137,8 @@ class Raid:
         self.inv_open = False
         self.loot_target = None
         self.paused = False
+        self.safe_mode = False
+        self.hold.hide()
         if kind == "extract":
             audio.play("extract")
         else:
@@ -2182,6 +2200,9 @@ class Raid:
             if panels_open and not self._panels_was_open:
                 self.touch.reset_hold()
             self._panels_was_open = panels_open
+        # 触屏长按(背包/搜刮面板):点按延迟到抬起;按住 0.45s 弹物品详情
+        events = self._filter_hold_events(events)
+        self.hold.update(dt, self._hold_query)
         pending_edge = False
         for ev in events:
             # 对白面板优先吃掉输入(读完台词 -> 选项 -> 关闭)
@@ -2482,11 +2503,12 @@ class Raid:
     def _handle_inv_click(self, ev):
         import raid_ui
         p = self.player
-        lay = raid_ui.inv_layout(p.bag.w, p.bag.h)
+        lay = raid_ui.inv_layout(p.bag.w, p.bag.h, p.safe.w, p.safe.h)
         pos = ev.pos
         if lay["close"].collidepoint(pos):
             self.inv_open = False
             self.drop_mode = False
+            self.safe_mode = False
             audio.play("click")
             return
         # 整理弹药按钮 -> 弹确认框询问
@@ -2501,6 +2523,32 @@ class Raid:
             self.add_toast("丢弃模式已开启:点物品/装备槽就丢在地上" if self.drop_mode
                            else "丢弃模式已关闭(恢复:点物品=使用/装备)",
                            COL["accent" if self.drop_mode else "text_dim"], 3.0)
+            return
+        # 保险箱存入开关(手机没有右键:开着时点背包物品 = 存进保险箱)
+        if lay["safe_mode"].collidepoint(pos):
+            if self.mode in ("story", "assault"):
+                self.add_toast("本模式装备为系统配发,保险箱只出不进", COL["bad"], 3.0)
+                return
+            self.safe_mode = not self.safe_mode
+            audio.play("click")
+            self.add_toast("保险箱存入已开启:点背包物品就存进保险箱(阵亡不丢)"
+                           if self.safe_mode else
+                           "保险箱存入已关闭(点保险箱里的物品可取回背包)",
+                           COL["accent" if self.safe_mode else "text_dim"], 3.0)
+            return
+        # 保险箱:点物品取回背包(丢弃模式下直接丢地上)
+        safe_pl = raid_ui.grid_hit_px(p.safe, lay["safe"], pos)
+        if safe_pl is not None:
+            if self.drop_mode:
+                if self.drop_to_ground(safe_pl.item):
+                    p.safe.remove_placed(safe_pl)
+                    audio.play("click")
+                    self.add_toast(f"丢弃 {safe_pl.item.name}", COL["text_dim"])
+            elif try_move(p.safe, safe_pl, p.bag):
+                audio.play("click")
+                self.add_toast(f"{safe_pl.item.name} 已从保险箱取回", COL["text_dim"])
+            else:
+                self.add_toast("背包空间不足", COL["bad"])
             return
         # 装备槽点击 = 卸下(丢弃模式下直接丢地上)
         if lay["weapon"].collidepoint(pos) and p.weapon is not None:
@@ -2571,7 +2619,18 @@ class Raid:
         if ev.button == 3 or self.drop_mode:
             self.drop_from_bag(placed)
         elif ev.button == 1:
-            if placed.item.cat == "med":
+            if self.safe_mode:
+                if self.mode in ("story", "assault"):
+                    self.add_toast("本模式装备为系统配发,保险箱只出不进",
+                                   COL["bad"], 3.0)
+                elif try_move(p.bag, placed, p.safe):
+                    audio.play("click")
+                    self.add_toast(f"{placed.item.name} 已存进保险箱(阵亡不丢)",
+                                   COL["good"], 2.6)
+                else:
+                    self.add_toast("保险箱放不下(40 个承包商任务可扩到 4 格)",
+                                   COL["bad"], 3.0)
+            elif placed.item.cat == "med":
                 self.start_heal(placed)      # 打药要读条
             elif placed.item.cat in ("weapon", "armor", "helmet", "attach"):
                 self.equip_from_bag(placed)
@@ -2584,7 +2643,7 @@ class Raid:
         p = self.player          # 必须在两个分支前绑定:点背包侧也要用
         lay = raid_ui.loot_layout(self.loot_target.container.w,
                                   self.loot_target.container.h,
-                                  p.bag.w, p.bag.h)
+                                  p.bag.w, p.bag.h, p.safe.w, p.safe.h)
         lc = self.loot_target
         pos = ev.pos
         if ev.button != 1:
@@ -2614,6 +2673,14 @@ class Raid:
             else:
                 self.start_take(lc, [placed])    # 未知 = 先搜(读条后才知道是什么)
             return
+        safe_pl = raid_ui.grid_hit_px(p.safe, lay["safe"], pos)
+        if safe_pl is not None:
+            if try_move(p.safe, safe_pl, p.bag):
+                audio.play("click")
+                self.add_toast(f"{safe_pl.item.name} 已从保险箱取回", COL["text_dim"])
+            else:
+                self.add_toast("背包空间不足", COL["bad"])
+            return
         placed = raid_ui.grid_hit_px(p.bag, lay["dst"], pos)
         if placed is not None:
             if getattr(self, "drop_mode", False):
@@ -2626,12 +2693,99 @@ class Raid:
             else:
                 self.add_toast("放不进去", COL["bad"])
 
+    # ---- 触屏长按(背包/搜刮面板):点按延迟到抬起 + 详情面板 ----
+    def _filter_hold_events(self, events):
+        """触屏长按事件过滤。非触屏或没有面板打开时原样返回。"""
+        active = (self.touch_mode and (self.inv_open or self.loot_target is not None)
+                  and not (self.ask_merge or self.paused))
+        if not active:
+            self.hold.hide()
+            return events
+        out = []
+        for ev in events:
+            if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                if self.hold.active():
+                    # 面板已弹出:点旋转按钮 = 旋转;点别处 = 关闭(都吞掉)
+                    if (self.hold.rotate_rect is not None
+                            and self.hold.rotate_rect.collidepoint(ev.pos)):
+                        self._hold_rotate()
+                    self.hold.hide()
+                    continue
+                self.hold.press(ev.pos)
+                continue
+            if ev.type == pygame.MOUSEMOTION:
+                self.hold.move(ev.pos)
+                out.append(ev)
+                continue
+            if ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
+                if self.hold.consume_release():
+                    # 普通点按:重放成一次按下(原逻辑照常)
+                    out.append(pygame.event.Event(pygame.MOUSEBUTTONDOWN,
+                                                  pos=ev.pos, button=1))
+                else:
+                    out.append(ev)
+                continue
+            out.append(ev)
+        return out
+
+    def _hold_rotate(self):
+        from inventory import rotate_in_place
+        cb = self.hold.rotate_cb
+        if cb is None:
+            return
+        container, placed = cb
+        if placed not in container.items:
+            return
+        res = rotate_in_place(container, placed)
+        if res is None:
+            self.add_toast(f"{placed.item.name} 是方形,不用旋转", COL["text_dim"], 2.0)
+        elif res:
+            audio.play("click")
+            self.add_toast(f"已调整 {placed.item.name} 的摆放方向(横 / 竖)",
+                           COL["text_dim"], 2.2)
+        else:
+            self.add_toast("原位转不开,先给它周围腾点地方", COL["bad"], 2.4)
+
+    def _hold_query(self, pos):
+        """长按落点查询:返回 (item, (container, placed)) / (item, None) / None。"""
+        import raid_ui
+        p = self.player
+        if self.inv_open:
+            lay = raid_ui.inv_layout(p.bag.w, p.bag.h, p.safe.w, p.safe.h)
+            pl = raid_ui.grid_hit_px(p.bag, lay["bag"], pos)
+            if pl is not None:
+                return pl.item, (p.bag, pl)
+            pl = raid_ui.grid_hit_px(p.safe, lay["safe"], pos)
+            if pl is not None:
+                return pl.item, (p.safe, pl)
+            for key in ("weapon", "armor", "helmet"):
+                if lay[key].collidepoint(pos):
+                    it = getattr(p, key)
+                    if it is not None:
+                        return it, None
+            return None
+        if self.loot_target is not None:
+            lc = self.loot_target
+            lay = raid_ui.loot_layout(lc.container.w, lc.container.h,
+                                      p.bag.w, p.bag.h, p.safe.w, p.safe.h)
+            pl = raid_ui.grid_hit_px(lc.container, lay["src"], pos)
+            if pl is not None:
+                if not self.is_known(pl):
+                    return None            # 未知物品:长按不泄底
+                return pl.item, None
+            pl = raid_ui.grid_hit_px(p.bag, lay["dst"], pos)
+            if pl is not None:
+                return pl.item, (p.bag, pl)
+            pl = raid_ui.grid_hit_px(p.safe, lay["safe"], pos)
+            if pl is not None:
+                return pl.item, (p.safe, pl)
+        return None
+
     def _log_gained(self, item):
         if item.is_stackable() and item.count <= 0:
             return
         self.loot_log.append(dict(id=id(item), name=item.name, count=item.count,
                                   value=item.total_price()))
-
     def _unlog_gained(self, item):
         """物品放回箱子/丢弃时,从搜刮记录中移除对应条目。"""
         iid = id(item)
