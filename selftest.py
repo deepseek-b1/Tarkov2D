@@ -4325,10 +4325,16 @@ def run():
         h._click(h.coop_rect.center)
         assert g.save.coop is False
         h._click(h.coop_rect.center)
-        # 换个模式就点不动(只对搜打撤生效)
+        # 换个模式就点不动(只对搜打撤/夜战生效)
         g.save.mode = "hostage"
         h._click(h.coop_rect.center)
         assert g.save.coop is True      # 保持原值
+        g.save.mode = "raid"
+        # 夜战也能开双人
+        g.save.coop = False
+        g.save.mode = "night"
+        h._click(h.coop_rect.center)
+        assert g.save.coop is True, "夜战也该允许双人合作"
         g.save.mode = "raid"
         # 手机模式不给开(要键盘)
         g.save.coop = False
@@ -4593,6 +4599,43 @@ def run():
         assert g.raid.coop is False and g.raid.player2 is None
         g.to_hideout()
         g.save.touch = False
+        # 13) 夜战 + 双人:两人都拿系统的满配枪(都带强光探照灯),光照是并集
+        from settings import weapon_beam, helmet_nvg, COOP_MODES, MODE_DIFF
+        assert "night" in COOP_MODES and "raid" in COOP_MODES
+        g.save.coop = True
+        g.save.mode = "night"
+        g.start_raid()
+        r = g.raid
+        assert r.coop and r.dark and r.player2 is not None
+        assert r.diff_key == MODE_DIFF["night"], r.diff_key
+        for q in r.players():
+            assert q.weapon is not None
+            assert weapon_beam(q.weapon) is not None \
+                or helmet_nvg(q.helmet) is not None, "夜战双人必须每人都有光源"
+        r.refresh_fog(force=True)
+        # 光照形状:两位玩家各自的脚边微光/光锥都进了列表
+        assert len(r.light_shapes) >= 4, len(r.light_shapes)
+        assert r.fog_polygon is None, "夜战不用 360° 视野多边形"
+        g.draw(screen)                 # 夜战双人画面(暗层 + 两人的光锥)
+        # 只有站在某人的光里才算"看得见":把敌人放进 P2 的灯锥方向
+        import math as _m
+        s = r.scavs[0]
+        r.scavs = [s]
+        beam = weapon_beam(r.player2.weapon)
+        assert beam is not None
+        rng = beam[0] * 0.6
+        s.x = r.player2.x + _m.cos(r.player2.aim) * rng
+        s.y = r.player2.y + _m.sin(r.player2.aim) * rng
+        assert r.in_light(s.x, s.y, r.player2), "P2 灯锥里的点该算亮"
+        r.refresh_fog(force=True)
+        assert id(s) in r.sight_vis2 or id(s) in r.sight_vis
+        assert id(s) in r.fog_vis, "亮区里的敌人应该可见(双人光照并集)"
+        for _ in range(30):
+            r.update(1 / 60, [])
+        assert not r.over
+        g.draw(screen)
+        g.to_hideout()
+        g.save.mode = "raid"
         pygame.display.flip()
 
     check("账号-名字+密码多档登录/老存档并入/登录界面", t_accounts)

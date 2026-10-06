@@ -898,20 +898,28 @@ def _draw_hud(raid, screen):
                                        COL["bad"] if tl < 60 else COL["text"])
     screen.blit(t, t.get_rect(center=(W // 2, 18)))
 
-    # 黑暗行动:当前光源状态(没带光源就红字提醒)
+    # 黑暗行动:当前光源状态(没带光源就红字提醒;双人时两人各报一份)
     if getattr(raid, "dark", False) and not raid.over:
-        beam = weapon_beam(getattr(p, "weapon", None))
-        nvg = helmet_nvg(getattr(p, "helmet", None))
-        parts = []
-        if beam:
-            parts.append(f"枪灯 {int(beam[0])}")
-        if nvg:
-            parts.append(f"夜视 {int(nvg[0])}")
-        txt = "黑暗行动 · 光源:" + ("＋".join(parts) if parts else "无")
-        if not parts:
-            txt += "(只看得见脚边)"
-        t = get_font(17, bold=True).render(
-            txt, True, COL["good"] if parts else COL["bad"])
+        def _ltxt(q):
+            beam = weapon_beam(getattr(q, "weapon", None))
+            nvg = helmet_nvg(getattr(q, "helmet", None))
+            parts = []
+            if beam:
+                parts.append(f"枪灯 {int(beam[0])}")
+            if nvg:
+                parts.append(f"夜视 {int(nvg[0])}")
+            return "＋".join(parts)
+
+        mine = _ltxt(p)
+        if getattr(raid, "coop", False) and raid.player2 is not None:
+            other = _ltxt(raid.player2)
+            txt = (f"黑暗行动 · 光源 P1:{mine or '无'} / P2:{other or '无'}")
+            ok = bool(mine and other)
+        else:
+            txt = "黑暗行动 · 光源:" + (mine or "无(只看得见脚边)")
+            ok = bool(mine)
+        t = get_font(17, bold=True).render(txt, True,
+                                           COL["good"] if ok else COL["bad"])
         bg = _hud_bg(t.get_width() + 20, 32, (10, 12, 14, 175))
         screen.blit(bg, (20, 16))
         screen.blit(t, (30, 22))
@@ -993,6 +1001,13 @@ def _draw_hud(raid, screen):
         elif q.weapon is not None:
             wtxt = (f"{q.weapon.name}  {q.weapon.state.get('mag', 0)}"
                     f" / {q.reserve_count()}")
+            if getattr(raid, "dark", False):
+                bm = weapon_beam(q.weapon)
+                nv = helmet_nvg(getattr(q, "helmet", None))
+                if bm:
+                    wtxt += f" · 枪灯 {int(bm[0])}"
+                elif nv:
+                    wtxt += f" · 夜视 {int(nv[0])}"
         else:
             wtxt = "未携带武器"
         hint = coop_mod.key_hint(short=True)

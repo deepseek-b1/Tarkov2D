@@ -38,7 +38,7 @@ from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       fire_mode_name, BURST_COUNT,
                       FOG_MOVE_STEP, FOG_VIS_REFRESH, FOG_VIS_RADIUS,
                       MOVE_AIM_MUL, MOVE_RELOAD_MUL,
-                      COOP,
+                      COOP, COOP_MODES,
                       fmt_rub, get_font)
 import bindings
 from inventory import Item, try_move
@@ -292,8 +292,8 @@ class Raid:
         self.player = Player(game.save)
         self.player.x, self.player.y = self.map.spawn
         # ---- 双人合作:第二位玩家(键盘操作,装备由系统配发,见 coop.py) ----
-        self.coop = (bool(getattr(game.save, "coop", False)) and self.mode == "raid"
-                     and not self.touch_mode)
+        self.coop = (bool(getattr(game.save, "coop", False))
+                     and self.mode in COOP_MODES and not self.touch_mode)
         self.player2 = None
         self.p2_kit = None
         self.p2_revive_used = False     # P2 的 6 级甲自救(每局一次)
@@ -418,24 +418,35 @@ class Raid:
                            COL["accent"], 5.0)
         if self.mode == "night":
             from settings import weapon_beam as _beam, helmet_nvg as _nvg
-            light = _beam(getattr(self.player, "weapon", None))
-            helmet = _nvg(getattr(self.player, "helmet", None))
-            if light is None and helmet is None:
+
+            def _light_of(q):
+                src = []
+                helmet = _nvg(getattr(q, "helmet", None))
+                light = _beam(getattr(q, "weapon", None))
+                if helmet is not None:
+                    src.append(f"夜视 {int(helmet[0])}")
+                if light is not None:
+                    src.append(f"枪灯 {int(light[0])}")
+                return src
+
+            mine = _light_of(self.player)
+            if self.coop:
+                # 双人:两人各拿系统的满配枪(都带强光探照灯),谁没灯单独提醒
+                other = _light_of(self.player2) if self.player2 is not None else []
+                self.add_toast("黑暗行动 · 光源 P1:" + ("+".join(mine) or "无")
+                               + " / P2:" + ("+".join(other) or "无"),
+                               COL["good"] if (mine and other) else COL["bad"], 6.0)
+            elif not mine:
                 self.add_toast("黑暗行动:你身上没有任何光源 —— 只看得到脚边一小圈!",
                                COL["bad"], 6.5)
                 self.add_toast("去交易所买「战术手电」(装到枪上)或「夜视头盔」再来",
                                COL["accent"], 6.5)
             else:
-                src = []
-                if helmet is not None:
-                    src.append(f"夜视头盔(半径 {int(helmet[0])})")
-                if light is not None:
-                    src.append(f"枪灯(射程 {int(light[0])} · ±{int(light[1])}°)")
-                self.add_toast("黑暗行动 · 光源:" + " + ".join(src), COL["good"], 5.5)
+                self.add_toast("黑暗行动 · 光源:" + " + ".join(mine), COL["good"], 5.5)
             self.add_toast("只有亮区里的敌人才看得见(也才会被自动瞄准);敌人可不受你的灯光限制",
                            COL["accent"], 6.0)
         if self.coop:
-            self.add_toast("双人合作:配发装备 · 战利品撤离时并进仓库 · "
+            self.add_toast("双人合作:配发装备 · 各自撤离(谁先撤谁那份先进仓库)· "
                            "P2 靠近箱子按交互自动搜刮", COL["good"], 9.0)
         if self.mode == "assault":
             self.add_toast(f"任务:给 {len(self.objectives)} 座指挥设施安 C4"

@@ -19,7 +19,7 @@ from settings import (W, H, COL, fmt_rub, get_font, DIFF_ORDER, DIFFICULTIES,
                       MODE_DIFF, DEPTS, TASKS, SAFE_CONTRACT,
                       MYSTERY_STARS, MYSTERY_KITS,
                       armor_allows, MAPS, MAP_ORDER, MODES, MODE_ORDER, MODE_MAP,
-                      weapon_class, WEAPON_CLASS_COL)
+                      weapon_class, WEAPON_CLASS_COL, COOP_MODES)
 from inventory import Item, Placed, organize, try_move
 import accounts
 import coop as coop_mod
@@ -75,7 +75,7 @@ class Hideout:
                 sp.x + 18 + col * 100, sp.y + 62 + row * 34, 92, 30))
         self.mode_rects = [pygame.Rect(sp.x + 18 + i * 58, sp.y + 172, 55, 30)
                            for i in range(len(MODE_ORDER))]
-        # 双人合作开关(同一台电脑两人玩;只在搜打撤模式生效,见 coop.py)
+        # 双人合作开关(同一台电脑两人玩;搜打撤 / 夜战都能开,见 coop.py)
         self.coop_rect = pygame.Rect(sp.x + 220, sp.y + 146, 92, 26)
         self.diff_rects = [pygame.Rect(sp.x + 18 + i * 100, sp.y + 248, 92, 30)
                            for i in range(3)]
@@ -1212,14 +1212,15 @@ class Hideout:
                          COL["accent"], ttl=3.2)
                 return
 
-        # 双人合作开关(同一台电脑两人玩;P2 用键盘,见 coop.py)
+        # 双人合作开关(同一台电脑两人玩;搜打撤 / 夜战都能开,见 coop.py)
         if self.coop_rect.collidepoint(pos):
             if sd.touch:
                 self.say("双人合作要键盘:P2 用方向键操作 —— "
                          "先把「手机模式」关掉", COL["bad"], 3.6)
                 return
-            if sd.mode != "raid":
-                self.say("双人合作只在「搜打撤」模式生效(先切回搜打撤)", COL["bad"], 3.4)
+            if sd.mode not in COOP_MODES:
+                self.say("双人合作只在「搜打撤」和「夜战」模式生效(先切过去)",
+                         COL["bad"], 3.4)
                 return
             sd.coop = not sd.coop
             save_mod.save_data(sd)
@@ -1803,7 +1804,7 @@ class Hideout:
             f"出击 {st['raids']} 次    撤离 {st['extracts']} 次",
             f"阵亡 {st['deaths']} 次    击杀 {st['kills']} 人",
             f"余额 {fmt_rub(sd.rubles)}    搜刮 {fmt_rub(st['value'])}",
-            ("★ 双人合作已开:P2 用方向键 + 右Shift(见玩法简介)"
+            ("★ 双人合作已开:搜打撤 / 夜战生效(P2 方向键 + 右Shift)"
              if coop_on else ""),
             f"{move_txt} · 左键射击 · 右键架枪",
             f"弹匣空自动换弹 · {hr} 打药 · {kl} 搜刮/救人",

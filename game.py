@@ -11,7 +11,7 @@ import save as save_mod
 import story as story_mod
 import raid_ui
 from hideout import Hideout
-from settings import W, H
+from settings import W, H, COOP_MODES
 
 
 def synth_mouse_events(events):
@@ -124,9 +124,9 @@ class Game:
         return getattr(self.save, "mode", "raid") == "story"
 
     def is_coop(self):
-        """双人合作(同一台电脑两人玩):只对搜打撤模式生效,手机模式不行(要键盘)。"""
+        """双人合作(同一台电脑两人玩):搜打撤 / 夜战都能开,手机模式不行(要键盘)。"""
         return (bool(getattr(self.save, "coop", False))
-                and getattr(self.save, "mode", "raid") == "raid"
+                and getattr(self.save, "mode", "raid") in COOP_MODES
                 and not getattr(self.save, "touch", False))
 
     def raid_finished(self, result):

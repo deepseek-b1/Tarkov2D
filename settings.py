@@ -3,7 +3,7 @@
 import pygame
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.12.2"
+GAME_VERSION = "2.12.3"
 # 更新清单地址(可换成自建服务器 / GitHub raw;留空则只认 EXE 同目录的 version.json)
 UPDATE_MANIFEST_URL = "http://127.0.0.1:8765/version.json"
 UPDATE_TIMEOUT = 3   # 检查 / 下载超时(秒)
@@ -1237,6 +1237,8 @@ COOP = dict(
         heal=(pygame.K_KP1, pygame.K_COMMA),
     ),
 )
+# 能开双人合作的模式(夜战也支持:两位玩家都拿系统配发装备,枪上都带强光探照灯)
+COOP_MODES = ("raid", "night")
 
 # ---------- 剧情模式《灰区二日》 ----------
 # 独立模式:固定强度,两天 × 四时段,每个时段出击一次
