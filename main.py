@@ -79,6 +79,17 @@ async def run_game():
     screen = pygame.display.set_mode((W, H), flags)
     pygame.display.set_caption("Tarkov2D — 类塔科夫 2D 搜打撤")
 
+    # 字体预热:pygame 每建一个 Font 都要把字体文件重新解析一遍,而游戏用到
+    # 15 种字号 × 常规/粗体。不预热的话这些开销会落在"第一次用到该字号"的那
+    # 一帧上(进战局第一帧、以及打到一半某个新字号第一次出现时),每次重启
+    # 进程都要重来 —— 表现就是"更新完之后莫名其妙掉帧"。
+    # 字体已经裁剪过(tools/build_font_subset.py),现在全部预热只要几十毫秒。
+    try:
+        import settings as _settings
+        _settings.warm_fonts()
+    except Exception:
+        pass
+
     # 双保险:解除窗口 IME 上下文 + 关闭文本输入(仅 Windows)
     if sys.platform == "win32":
         try:

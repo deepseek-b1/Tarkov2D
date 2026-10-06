@@ -23,6 +23,10 @@ _INF = float("inf")
 _RAY_DIRS = {}
 _RAY_SETUP = {}
 
+# 预渲染好的整张地图表面:map_key -> Surface(只读共享,见 GameMap.prerender)
+_PRERENDER_CACHE = {}
+_PRERENDER_MAX = 3
+
 
 def _ray_dirs(n):
     """按角度预生成射线方向:每帧 140 次 cos/sin 是白花的。"""
@@ -422,6 +426,16 @@ class GameMap:
 
     # ---- 预渲染整张地图表面 ----
     def prerender(self):
+        """把整张地图画进一张表面(结果只跟地图静态布局有关,可以跨战局复用)。
+
+        原来每次进战局都要重画一遍,实测 ~150 ms —— 那是进战局那一帧里除字体
+        之外最大的一笔。地图布局是静态的(瓦片、容器位置、撤离区都在 maps.py 里
+        写死),所以按 map_key 缓存;整张 1920×1408 约 10 MB,最多留 3 张。
+        这张表面全工程只被 blit,没有原地修改,共享是安全的。
+        """
+        cached = _PRERENDER_CACHE.get(self.map_key)
+        if cached is not None:
+            return cached
         surf = pygame.Surface((self.px_w, self.px_h))
         rnd = random.Random(7)
         for ty in range(self.mh):
@@ -490,4 +504,7 @@ class GameMap:
             if f:
                 t = f.render(name, True, COL["extract"])
                 surf.blit(t, t.get_rect(center=(r.centerx, r.y - 10)))
+        _PRERENDER_CACHE[self.map_key] = surf
+        while len(_PRERENDER_CACHE) > _PRERENDER_MAX:
+            _PRERENDER_CACHE.pop(next(iter(_PRERENDER_CACHE)))
         return surf

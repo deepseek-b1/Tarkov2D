@@ -183,6 +183,25 @@ def get_font(size, bold=False):
         _font_cache[key] = f
     return _font_cache[key]
 
+
+# 游戏用到的全部字号(见 tools/build_font_subset.py 的说明)
+FONT_SIZES = (12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 24, 30, 32, 34, 42)
+# 只有这些字号会以「运行时决定的 bold」被调用,所以两种粗细都可能用到
+FONT_SIZES_BOTH = (12, 13, 14, 15, 16, 17, 19, 20)
+
+
+def warm_fonts():
+    """把所有会用到的字体提前建好(启动时调一次)。
+
+    pygame 每建一个 Font 都要重新解析字体文件;不预热的话这些开销会落在
+    「第一次用到该字号」的那一帧上。字体裁剪过之后这里只要几十毫秒。
+    """
+    for size in FONT_SIZES:
+        get_font(size, bold=True)
+    for size in FONT_SIZES_BOTH:
+        get_font(size, bold=False)
+
+
 def fmt_rub(n):
     return f"¥{int(n):,}"
 
