@@ -491,12 +491,23 @@ def draw_raid(raid, screen):
         t = get_font(12, bold=True).render("人质" if not h.rescued else "已解救", True, col)
         screen.blit(t, t.get_rect(center=(x, y - h.r - 12)))
 
-    # 粒子
-    for pt in raid.particles:
-        a = pt["ttl"] / pt["max_ttl"]
-        rad = int(pt["size"] * a + 1)
-        s = _particle_sprite(pt["color"], rad, int(255 * a))
-        screen.blit(s, (pt["x"] + ox - rad - 1, pt["y"] + oy - rad - 1))
+    # 粒子:整批交给 Surface.blits() 一次贴完。
+    # 原来每颗一次 screen.blit(...) —— 一场交火里每帧 180+ 颗,就是 180+ 次
+    # Python→C 调用;blits() 让 C 循环跑完整批,顺带把屏幕外的裁掉
+    # (爆炸大半发生在视野外,原来也照样逐颗 blit)。
+    if raid.particles:
+        batch = []
+        add = batch.append
+        for pt in raid.particles:
+            a = pt["ttl"] / pt["max_ttl"]
+            rad = int(pt["size"] * a + 1)
+            sx = pt["x"] + ox - rad - 1
+            sy = pt["y"] + oy - rad - 1
+            if sx < -8.0 or sy < -8.0 or sx > W + 8.0 or sy > H + 8.0:
+                continue
+            add((_particle_sprite(pt["color"], rad, int(255 * a)), (sx, sy)))
+        if batch:
+            screen.blits(batch, 0)
 
     # 玩家
     px, py = p.x + ox, p.y + oy
@@ -1000,14 +1011,14 @@ def _draw_reinf_line(raid, screen, x, y):
         else:
             rows.append((f"敌方检修队在场({len(raid.hq_team)} 人)— 去查通讯站",
                          (255, 170, 120)))
-    w = max(f.size(txt)[0] for txt, _c in rows) + 20
+    # 面板宽度直接量渲染结果的宽度:Font.size() 要把整串字重新过一遍字形
+    # (实测约 0.7ms/次,这里每帧 2~5 次),而 render() 本来就有缓存。
+    rendered = [(f.render(txt, True, col), col) for txt, col in rows]
+    w = max(t.get_width() for t, _c in rendered) + 20
     h = 22 * len(rows) + 8
-    bg = pygame.Surface((w, h), pygame.SRCALPHA)
-    bg.fill((10, 12, 14, 175))
-    screen.blit(bg, (x, y))
+    screen.blit(_hud_bg(w, h, (10, 12, 14, 175)), (x, y))
     yy = y + 4
-    for txt, col in rows:
-        t = f.render(txt, True, col)
+    for t, col in rendered:
         screen.blit(t, (x + 10, yy))
         yy += 22
     return h

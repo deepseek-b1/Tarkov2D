@@ -5,6 +5,14 @@ import random
 
 from settings import SCAVS, TILE, SCAV_LOD_DIST, REPAIR_RANGE
 
+_LOD2 = float(SCAV_LOD_DIST) * SCAV_LOD_DIST
+
+# 选目标(到玩家 + 到每个队友各一次可见性判定)是 AI 里较贵的一步,而目标身份
+# 在 0.1 秒里几乎不会变。按 raid.now 错峰重算:120fps 下就是每 12 帧算一次,
+# 目标判定便宜了一个数量级,而「发现玩家」最多晚 0.1~0.2 秒(比人的反应还快)。
+# 不用更长:再长会让守军隔着刚出现的墙继续射击,手感上看得出来。
+THINK_INTERVAL = 0.10
+
 
 class Scav:
     def __init__(self, kind, x, y, mod=None, custom=None, tag=None):
@@ -48,6 +56,12 @@ class Scav:
         self.burn_t = 0.0        # 燃烧剩余时间(龙息弹)
         self.burn_dps = 0.0
         self.repair_target = None  # 被派去修的设施(突袭模式:通讯站被打坏要修)
+        # 目标缓存:当前目标 + 是否看得见 + 下次重算时刻(raid.now 时间轴)
+        self.tgt = None
+        self.tgt_see = False
+        self.tgt_t = -1.0
+        self.think = random.uniform(0.0, THINK_INTERVAL)   # 错峰相位
+        self.view2 = float(d["view"]) * d["view"]
 
     @property
     def pos(self):
@@ -58,27 +72,36 @@ class Scav:
         """听到枪声等噪音。"""
         if self.state == "chase":
             return
-        if math.hypot(pos[0] - self.x, pos[1] - self.y) <= radius:
+        dx = pos[0] - self.x
+        dy = pos[1] - self.y
+        if dx * dx + dy * dy <= radius * radius:
             self.alert = pos
             self.state = "search"
             self.search_t = 0.0
             self.path = []
 
-    def sees_player(self, raid, target=None):
-        """目标是否在视野内且视线通畅。target 已算过时直接传入,避免重复选目标。
+    def threat(self, raid):
+        """当前目标 + 是否看得见(带缓存,见 THINK_INTERVAL)。"""
+        if self.tgt is None or raid.now >= self.tgt_t:
+            self.tgt, self.tgt_see = raid.threat_for(self)
+            self.tgt_t = raid.now + THINK_INTERVAL + self.think
+        return self.tgt, self.tgt_see
 
-        目标是玩家时读 raid.sight_vis 缓存(refresh_fog 算好的对称视线,
-        半径大于任何视距),不再每帧每敌人打一条 DDA 射线。
-        注意用 sight_vis 而不是 fog_vis:夜战里 fog_vis 只包含玩家光源内的
-        敌人(表示玩家能不能看见他),跟敌人能不能看见玩家无关。
+    def sees_player(self, raid, target=None):
+        """目标是否在视野内且视线通畅。
+
+        不传 target 时直接用 threat() 缓存的结果 —— 原来这一步会把
+        threat_for() 刚做过的距离与可见性判定整个再做一遍。
         """
-        p = raid.threat_for(self) if target is None else target
-        dist = math.hypot(p.x - self.x, p.y - self.y)
-        if dist > self.d["view"]:
+        if target is None:
+            return self.threat(raid)[1]
+        dx = target.x - self.x
+        dy = target.y - self.y
+        if dx * dx + dy * dy > self.view2:
             return False
-        if p is raid.player:
+        if target is raid.player:
             return id(self) in raid.sight_vis
-        return raid.map.los_clear(self.x, self.y, p.x, p.y)
+        return raid.map.los_clear(self.x, self.y, target.x, target.y)
 
     # ---- 移动 ----
     def _follow_path(self, raid, dt, speed):
@@ -91,10 +114,11 @@ class Scav:
         gx = tx * TILE + TILE // 2
         gy = ty * TILE + TILE // 2
         dx, dy = gx - self.x, gy - self.y
-        dist = math.hypot(dx, dy)
-        if dist < 6:
+        d2 = dx * dx + dy * dy
+        if d2 < 36.0:
             self.path_i += 1
             return True
+        dist = math.sqrt(d2)
         step = speed * dt
         nx = self.x + dx / dist * step
         ny = self.y + dy / dist * step
@@ -121,8 +145,6 @@ class Scav:
 
     # ---- 主逻辑 ----
     def update(self, raid, dt):
-        p = raid.threat_for(self)      # 目标可能是玩家,也可能是暴露的队友
-        dist = math.hypot(p.x - self.x, p.y - self.y)
         self.hit_flash = max(0.0, self.hit_flash - dt)
         self.repath_t -= dt
         # 被派去修设施:先跑过去站住(回血由 Raid._assign_repair 结算)
@@ -147,17 +169,25 @@ class Scav:
                 self.facing = math.atan2(st.y - self.y, st.x - self.x)
                 return
         # AI 降级:离玩家很远的守军不必每帧算视线/寻路(玩家在迷雾里也看不到),
-        # 50 人大本营要靠这个把帧率稳住
-        self.path_interval = 0.6 if dist <= SCAV_LOD_DIST else 1.6
-        far = dist > SCAV_LOD_DIST
-        if far and self.state != "chase":
+        # 50 人大本营要靠这个把帧率稳住。
+        # 关键顺序:先用「到玩家的距离」判降级,再选目标 —— 选目标要对每个队友
+        # 做一次判定,原来放在最前面,于是远端守军白烧这份钱。
+        pl = raid.player
+        dpx = pl.x - self.x
+        dpy = pl.y - self.y
+        d2p = dpx * dpx + dpy * dpy
+        self.path_interval = 0.6 if d2p <= _LOD2 else 1.6
+        if d2p > _LOD2 and self.state != "chase":
             if self.state == "idle":
                 self.wander_t -= dt
                 if self.wander_t <= 0:
                     self.wander_t = random.uniform(1.5, 4.0)
             self._follow_path(raid, dt, self.d["speed"] * 0.45)
             return
-        see = self.sees_player(raid, p)
+        p, see = self.threat(raid)     # 目标可能是玩家,也可能是暴露的队友
+        dx = p.x - self.x
+        dy = p.y - self.y
+        dist = math.sqrt(dx * dx + dy * dy)
         self.shoot_t -= dt
 
         if see:

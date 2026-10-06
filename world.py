@@ -21,6 +21,7 @@ _SPECIAL = ("S", "1", "2", "3", "4", "5", "6", "7",
 
 _INF = float("inf")
 _RAY_DIRS = {}
+_RAY_SETUP = {}
 
 
 def _ray_dirs(n):
@@ -31,6 +32,38 @@ def _ray_dirs(n):
         dirs = tuple((math.cos(i * step), math.sin(i * step)) for i in range(n))
         _RAY_DIRS[n] = dirs
     return dirs
+
+
+def _ray_setup(n):
+    """射线方向 + 与起点无关的那部分 DDA 增量。
+
+    `tdx = TILE/dx` 只跟方向有关、跟玩家站在哪一格无关,所以随方向一起缓存;
+    这样每条射线只需 2 次除法(算 tmax),省掉 2 次除法和 4 个分支。
+    """
+    s = _RAY_SETUP.get(n)
+    if s is None:
+        tile = TILE
+        out = []
+        step = math.tau / n
+        for i in range(n):
+            dx = math.cos(i * step)
+            dy = math.sin(i * step)
+            if dx > 0.0:
+                sx, tdx = 1, tile / dx
+            elif dx < 0.0:
+                sx, tdx = -1, -tile / dx
+            else:
+                sx, tdx = 0, _INF
+            if dy > 0.0:
+                sy, tdy = 1, tile / dy
+            elif dy < 0.0:
+                sy, tdy = -1, -tile / dy
+            else:
+                sy, tdy = 0, _INF
+            out.append((dx, dy, sx, tdx, sy, tdy))
+        s = tuple(out)
+        _RAY_SETUP[n] = s
+    return s
 
 
 
@@ -100,6 +133,34 @@ class GameMap:
             self.tiles.append(trow)
             self.solid.append(srow)
             self.block_sight.append(brow)
+
+        # ---- 视线用的「带边框」位图 ----
+        # DDA 内层每步都要做 4 次边界比较(越界=挡视线)。补一圈实心边框后,
+        # 越界自然等价于「挡住」,内层只剩一次 list 取值。
+        # 边框 1 格就够:DDA 一旦踏出真实地图就踩到边框并立即停下。
+        pad = [True] * (self.mw + 2)
+        bs_pad = [pad]
+        for brow in self.block_sight:
+            bs_pad.append([True] + brow + [True])
+        bs_pad.append(pad)
+        self.bs_pad = bs_pad
+
+        # ---- 视线遮挡的二维前缀和 ----
+        # occ[y][x] = 行 [0,y) × 列 [0,x) 里的遮挡格数。一条线段盖住的格矩形里
+        # 一个遮挡都没有 => 这条线必定通,不必跑 DDA。开阔地和街道上的大多数
+        # 视线查询都命中这条快路。
+        occ = [[0] * (self.mw + 1)]
+        for ty in range(self.mh):
+            srow = self.block_sight[ty]
+            prev = occ[ty]
+            cur = [0] * (self.mw + 1)
+            acc = 0
+            for tx in range(self.mw):
+                if srow[tx]:
+                    acc += 1
+                cur[tx + 1] = prev[tx + 1] + acc
+            occ.append(cur)
+        self.occ = occ
 
         for ty, row in enumerate(rows):
             for tx, ch in enumerate(row):
@@ -181,17 +242,50 @@ class GameMap:
     def los_clear(self, x1, y1, x2, y2):
         """两点间是否无遮挡:沿格子 DDA 推进,不重不漏。
 
-        原来是每 10px 采样一次,既慢(每条线几十次浮点除法)又会漏掉细墙;
-        DDA 只走实际跨越的格子,且每步一次比较一次加法。
+        三级判定:
+          1. 两点基本重合 -> 直接通;
+          2. 线段覆盖的格矩形里没有任何遮挡格(二维前缀和,4 次取值)-> 直接通;
+          3. 否则跑逐格 DDA,内层靠带边框位图省掉越界判断。
         """
-        if abs(x2 - x1) < 1.0 and abs(y2 - y1) < 1.0:
-            return True
-        tile = TILE
-        bs = self.block_sight
-        tx = int(x1 // tile)
-        ty = int(y1 // tile)
         dx = x2 - x1
         dy = y2 - y1
+        if -1.0 < dx < 1.0 and -1.0 < dy < 1.0:
+            return True
+        tile = TILE
+        tx = int(x1 // tile)
+        ty = int(y1 // tile)
+        if tx < 0 or ty < 0 or tx >= self.mw or ty >= self.mh:
+            return False
+        ex = int(x2 // tile)
+        ey = int(y2 // tile)
+        if 0 <= ex < self.mw and 0 <= ey < self.mh:
+            # 线段经过的格子 = [起点格 .. 终点格](格号沿线单调),再沿前进方向
+            # 多算一格:终点正好压在格线上时,DDA 会在 t=1.0 处再跨一格并检查它。
+            if dx > 0.0:
+                x0 = tx
+                x1t = ex + 1
+            elif dx < 0.0:
+                x0 = ex - 1
+                x1t = tx
+            else:
+                x0 = x1t = tx
+            if dy > 0.0:
+                y0 = ty
+                y1t = ey + 1
+            elif dy < 0.0:
+                y0 = ey - 1
+                y1t = ty
+            else:
+                y0 = y1t = ty
+            # 扩张后越出地图就不能走快路:地图外一律算遮挡
+            if x0 >= 0 and y0 >= 0 and x1t < self.mw and y1t < self.mh:
+                occ = self.occ
+                if (occ[y1t + 1][x1t + 1] - occ[y0][x1t + 1]
+                        - occ[y1t + 1][x0] + occ[y0][x0]) == 0:
+                    return True
+        bs = self.bs_pad
+        px = tx + 1
+        py = ty + 1
         if dx > 0.0:
             step_x = 1
             tmax_x = ((tx + 1) * tile - x1) / dx
@@ -220,14 +314,14 @@ class GameMap:
             if tmax_x < tmax_y:
                 if tmax_x > 1.0:
                     return True
-                tx += step_x
+                px += step_x
                 tmax_x += tdx
             else:
                 if tmax_y > 1.0:
                     return True
-                ty += step_y
+                py += step_y
                 tmax_y += tdy
-            if tx < 0 or ty < 0 or tx >= self.mw or ty >= self.mh or bs[ty][tx]:
+            if bs[py][px]:
                 return False
 
     def visibility_polygon(self, x, y, radius, n=140):
@@ -235,58 +329,50 @@ class GameMap:
 
         逐格 DDA 推进,而不是每 12px 采样一次:
           * 步数从固定的 radius/12(560 → 47 步)降到实际跨越的格数(约 25 步);
-          * 每步只有一次比较 + 一次加法,原来是 2 次乘法、2 次浮点除法和 2 次取整;
-          * 命中墙时取「进入墙格」的精确距离,迷雾边缘正好压在墙面上,不再渗进墙里。
-        方向向量按 n 缓存,省掉每帧 140 次 cos/sin。
+          * 命中墙时取「进入墙格」的精确距离,迷雾边缘正好压在墙面上,不再渗进墙里;
+          * 方向向量与 tdx/tdy 按 n 缓存,省掉每帧 140 次 cos/sin 与 280 次除法;
+          * 越界判断交给带边框位图,内层每步只剩 1 次比较 + 1 次加法 + 1 次取值。
         """
         tile = TILE
-        bs = self.block_sight
+        bs = self.bs_pad
         tx0 = int(x // tile)
         ty0 = int(y // tile)
+        if tx0 < 0 or ty0 < 0 or tx0 >= self.mw or ty0 >= self.mh:
+            return []
+        px0 = tx0 + 1
+        py0 = ty0 + 1
         pts = []
         append = pts.append
-        for dx, dy in _ray_dirs(n):
-            if dx > 0.0:
-                step_x = 1
+        for dx, dy, step_x, tdx, step_y, tdy in _ray_setup(n):
+            if step_x > 0:
                 tmax_x = ((tx0 + 1) * tile - x) / dx
-                tdx = tile / dx
-            elif dx < 0.0:
-                step_x = -1
+            elif step_x < 0:
                 tmax_x = (tx0 * tile - x) / dx
-                tdx = -tile / dx
             else:
-                step_x = 0
                 tmax_x = _INF
-                tdx = _INF
-            if dy > 0.0:
-                step_y = 1
+            if step_y > 0:
                 tmax_y = ((ty0 + 1) * tile - y) / dy
-                tdy = tile / dy
-            elif dy < 0.0:
-                step_y = -1
+            elif step_y < 0:
                 tmax_y = (ty0 * tile - y) / dy
-                tdy = -tile / dy
             else:
-                step_y = 0
                 tmax_y = _INF
-                tdy = _INF
-            tx = tx0
-            ty = ty0
+            px = px0
+            py = py0
             d = radius
             while True:
                 if tmax_x < tmax_y:
                     if tmax_x >= radius:
                         break
                     hit_t = tmax_x
-                    tx += step_x
+                    px += step_x
                     tmax_x += tdx
                 else:
                     if tmax_y >= radius:
                         break
                     hit_t = tmax_y
-                    ty += step_y
+                    py += step_y
                     tmax_y += tdy
-                if tx < 0 or ty < 0 or tx >= self.mw or ty >= self.mh or bs[ty][tx]:
+                if bs[py][px]:
                     d = hit_t
                     break
             append((x + dx * d, y + dy * d))

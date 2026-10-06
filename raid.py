@@ -472,6 +472,9 @@ class Raid:
         self.sight_vis = set()      # 敌人里「能看见玩家」的那些(离得近有视线)
         self.fog_aim = 0.0
         self.refresh_fog(force=True)
+        # AI 共用的单调时钟:各单位「选目标」按它错峰重算(见 enemy.THINK_INTERVAL)
+        self.now = 0.0
+        self._aim_t = -1.0          # 辅助瞄准的下次重算时刻
 
     # ---------- 黑暗模式:光照形状 ----------
     def night_light(self):
@@ -1038,27 +1041,33 @@ class Raid:
     def threat_for(self, scav):
         """拾荒者的当前目标:优先玩家;玩家不可见而被队友看得见时打队友。
 
-        玩家可见性读 fog_vis 缓存(refresh_fog 算好的对称视线),
+        返回 (目标, 是否看得见)。原来拆成 threat_for + sees_player 两步,而
+        sees_player 会把这里的距离与可见性判定整个再做一遍 —— 一次算完返回。
+        距离比较全部走平方,省掉 50 个守军每帧上百次 math.hypot。
+
+        玩家可见性读 fog 缓存(refresh_fog 算好的对称视线),
         不再对每个敌人每帧打一条 DDA 射线。
         """
         p = self.player
-        if math.hypot(p.x - scav.x, p.y - scav.y) <= scav.d["view"] \
-                and id(scav) in self.sight_vis:
-            return p
-        best, bd = None, scav.d["view"]
+        view2 = scav.view2
+        dx = p.x - scav.x
+        dy = p.y - scav.y
+        if dx * dx + dy * dy <= view2 and id(scav) in self.sight_vis:
+            return p, True
+        best, bd2 = None, view2
+        los = self.map.los_clear
+        sx, sy = scav.x, scav.y
         for a in self.allies:
-            if getattr(a, "downed", False):
+            if a.downed:
                 continue
-            dx = a.x - scav.x
-            if dx > bd or dx < -bd:
-                continue
-            dy = a.y - scav.y
-            if dy > bd or dy < -bd:
-                continue
-            d = math.hypot(dx, dy)
-            if d < bd and self.map.los_clear(scav.x, scav.y, a.x, a.y):
-                best, bd = a, d
-        return best if best is not None else p
+            dx = a.x - sx
+            dy = a.y - sy
+            d2 = dx * dx + dy * dy
+            if d2 < bd2 and los(sx, sy, a.x, a.y):
+                best, bd2 = a, d2
+        if best is not None:
+            return best, True
+        return p, False
 
     def explode(self, x, y, dmg, owner, src=None, blast_mul=1.0, radius=None,
                 friendly=False, struct_dmg=None):
@@ -1094,31 +1103,42 @@ class Raid:
 
     def _update_bullets(self, dt):
         alive = []
+        scavs = self.scavs
+        # 空间占位表:每颗子弹每小步都要跟全部守军比一次距离(50 人 = 50 次),
+        # 而子弹绝大多数时候周围一个敌人都没有。按 64px 分格记下「哪些格子里
+        # 有人」,先花 9 次字典查询确认邻域是空的就直接跳过,命中判定仍走原来
+        # 的完整循环(语义不变,连击杀时的列表增删行为都保持一致)。
+        cells = set()
+        for s in scavs:
+            cells.add((int(s.x) >> 6, int(s.y) >> 6))
+        cells_get = cells.__contains__
         for b in self.bullets:
             # 分小步采样,防止低帧率下 55px/步 穿墙/穿人
-            total = math.hypot(b["dx"], b["dy"]) * dt
-            n = max(1, int(total / 14) + 1)
+            bdx = b["dx"]
+            bdy = b["dy"]
+            n = max(1, int(math.sqrt(bdx * bdx + bdy * bdy) * dt / 14) + 1)
             sdt = dt / n
             dead = False
             is_rpg = b.get("rpg", False)
             for _ in range(n):
-                b["x"] += b["dx"] * sdt
-                b["y"] += b["dy"] * sdt
+                bx = b["x"] + bdx * sdt
+                by = b["y"] + bdy * sdt
+                b["x"] = bx
+                b["y"] = by
                 b["ttl"] -= sdt
                 if b["ttl"] <= 0:
                     if is_rpg:
-                        self.explode(b["x"], b["y"], b["dmg"], b["owner"],
+                        self.explode(bx, by, b["dmg"], b["owner"],
                                      src=b.get("src"),
                                      blast_mul=b.get("blast", 1.0))
                     dead = True
                     break
-                tx, ty = int(b["x"] // TILE), int(b["y"] // TILE)
-                if self.map.tile_solid(tx, ty):
+                if self.map.tile_solid(int(bx // TILE), int(by // TILE)):
                     if is_rpg:
-                        self.explode(b["x"], b["y"], b["dmg"], b["owner"],
+                        self.explode(bx, by, b["dmg"], b["owner"],
                                      src=b.get("src"))
                     else:
-                        self.add_particles(b["x"], b["y"], 3, (200, 200, 160), speed=60)
+                        self.add_particles(bx, by, 3, (200, 200, 160), speed=60)
                     dead = True
                     break
                 # 设施也能被枪弹啃(效率很低,想拆还是得靠 C4)
@@ -1129,9 +1149,14 @@ class Raid:
                         own = (b["owner"] in ("player", "ally")) == (st.side == "ally")
                         if own:
                             continue
-                        if math.hypot(st.x - b["x"], st.y - b["y"]) < st.r:
+                        dx = st.x - bx
+                        dy = st.y - by
+                        lim = st.r
+                        if dx > lim or dx < -lim or dy > lim or dy < -lim:
+                            continue
+                        if dx * dx + dy * dy < lim * lim:
                             st.damage(STRUCT_BULLET_DMG + b["dmg"] * STRUCT_BULLET_MUL)
-                            self.add_particles(b["x"], b["y"], 3, (210, 200, 150))
+                            self.add_particles(bx, by, 3, (210, 200, 150))
                             if st.destroyed:
                                 self.add_toast(f"{st.name} 被摧毁!", COL["accent"], 3.4)
                             dead = True
@@ -1140,44 +1165,83 @@ class Raid:
                         break
                 if is_rpg:
                     # 火箭弹:碰到人/被挡就引爆,溅射范围内都吃伤害(不必精确瞄准)
-                    for s in list(self.scavs):
-                        if math.hypot(s.x - b["x"], s.y - b["y"]) < s.r + 3:
-                            self.explode(b["x"], b["y"], b["dmg"], b["owner"],
-                                         src=b.get("src"))
-                            dead = True
-                            break
+                    cx = int(bx) >> 6
+                    cy = int(by) >> 6
+                    if (cells_get((cx, cy)) or cells_get((cx - 1, cy))
+                            or cells_get((cx + 1, cy)) or cells_get((cx, cy - 1))
+                            or cells_get((cx, cy + 1)) or cells_get((cx - 1, cy - 1))
+                            or cells_get((cx + 1, cy - 1)) or cells_get((cx - 1, cy + 1))
+                            or cells_get((cx + 1, cy + 1))):
+                        for s in list(scavs):
+                            dx = s.x - bx
+                            dy = s.y - by
+                            lim = s.r + 3
+                            if dx > lim or dx < -lim or dy > lim or dy < -lim:
+                                continue
+                            if dx * dx + dy * dy < lim * lim:
+                                self.explode(bx, by, b["dmg"], b["owner"],
+                                             src=b.get("src"))
+                                dead = True
+                                break
                     if dead:
                         break
                     p0 = self.player
-                    if math.hypot(p0.x - b["x"], p0.y - b["y"]) < PLAYER["radius"] + 2:
-                        self.explode(b["x"], b["y"], b["dmg"], b["owner"],
+                    dx = p0.x - bx
+                    dy = p0.y - by
+                    lim = PLAYER["radius"] + 2
+                    if (dx < lim and dx > -lim and dy < lim and dy > -lim
+                            and dx * dx + dy * dy < lim * lim):
+                        self.explode(bx, by, b["dmg"], b["owner"],
                                      src=b.get("src"))
                         dead = True
                         break
                     continue
                 if b["owner"] in ("player", "ally"):
-                    for s in self.scavs:
-                        if math.hypot(s.x - b["x"], s.y - b["y"]) < s.r + 3:
-                            s.damage(b["dmg"])
-                            if b.get("burn"):
-                                s.burn_t = 1.5
-                                s.burn_dps = b["burn"]
-                            audio.play("hit")
-                            self.add_particles(b["x"], b["y"], 4, (190, 40, 40))
-                            if s.dead:
-                                self.kill_scav(s)
-                            dead = True
-                            break
+                    # 先看邻域里有没有人,再逐个做轴向粗筛 + 平方距离
+                    # (命中半径只有 15px,原来是每颗子弹每小步 50 次 hypot)
+                    cx = int(bx) >> 6
+                    cy = int(by) >> 6
+                    if (cells_get((cx, cy)) or cells_get((cx - 1, cy))
+                            or cells_get((cx + 1, cy)) or cells_get((cx, cy - 1))
+                            or cells_get((cx, cy + 1)) or cells_get((cx - 1, cy - 1))
+                            or cells_get((cx + 1, cy - 1)) or cells_get((cx - 1, cy + 1))
+                            or cells_get((cx + 1, cy + 1))):
+                        for s in scavs:
+                            dx = s.x - bx
+                            dy = s.y - by
+                            lim = s.r + 3
+                            if dx > lim or dx < -lim or dy > lim or dy < -lim:
+                                continue
+                            if dx * dx + dy * dy < lim * lim:
+                                s.damage(b["dmg"])
+                                if b.get("burn"):
+                                    s.burn_t = 1.5
+                                    s.burn_dps = b["burn"]
+                                audio.play("hit")
+                                self.add_particles(bx, by, 4, (190, 40, 40))
+                                if s.dead:
+                                    self.kill_scav(s)
+                                dead = True
+                                break
                 else:
                     p = self.player
-                    if math.hypot(p.x - b["x"], p.y - b["y"]) < PLAYER["radius"] + 2:
+                    dx = p.x - bx
+                    dy = p.y - by
+                    lim = PLAYER["radius"] + 2
+                    if (dx < lim and dx > -lim and dy < lim and dy > -lim
+                            and dx * dx + dy * dy < lim * lim):
                         p.take_damage(b["dmg"], self)
                         dead = True
                     else:
                         for a in self.allies:
                             if a.downed:
                                 continue
-                            if math.hypot(a.x - b["x"], a.y - b["y"]) < a.r + 2:
+                            dx = a.x - bx
+                            dy = a.y - by
+                            lim = a.r + 2
+                            if dx > lim or dx < -lim or dy > lim or dy < -lim:
+                                continue
+                            if dx * dx + dy * dy < lim * lim:
                                 a.take_damage(b["dmg"], self)
                                 dead = True
                                 break
@@ -1237,21 +1301,33 @@ class Raid:
         audio.play("heal")
         self.add_toast(f"治疗 +{healed}", COL["good"])
 
-    def _aim_assist_target(self):
+    def _aim_assist_target(self, staggered=False):
         """辅助瞄准(手机):视野内最近的可见敌人。
 
         黑暗模式下只锁「亮区里」的敌人 —— 看不见的目标不该被自动瞄准,
         否则手电/夜视就没有意义了。
+
+        staggered=True 时按 raid.now 缓存 0.08 秒(主循环每帧都调它,而锁定
+        目标在 0.08 秒里不会变)。直接调用(自检/外部)一律现算,保证语义不变。
         """
+        if staggered and self.now < self._aim_t:
+            return self.aim_locked
+        if staggered:
+            self._aim_t = self.now + 0.08
         p = self.player
+        px, py = p.x, p.y
         vis = self.fog_vis
-        best, bd = None, TOUCH["aim_assist_range"]
+        dark = self.dark
+        best, bd2 = None, float(TOUCH["aim_assist_range"]) ** 2
+        los = self.map.los_clear
         for s in self.scavs:
-            if self.dark and id(s) not in vis:
+            if dark and id(s) not in vis:
                 continue
-            d = math.hypot(s.x - p.x, s.y - p.y)
-            if d < bd and self.map.los_clear(p.x, p.y, s.x, s.y):
-                best, bd = s, d
+            dx = s.x - px
+            dy = s.y - py
+            d2 = dx * dx + dy * dy
+            if d2 < bd2 and los(px, py, s.x, s.y):
+                best, bd2 = s, d2
         return best
 
     def quick_heal(self):
@@ -2181,6 +2257,7 @@ class Raid:
     def update(self, dt, events):
         p = self.player
         self._click_cd = max(0.0, self._click_cd - dt)
+        self.now += dt                 # AI 错峰用的单调时钟
 
         # 结算页:任意键/任意触摸返回藏身处
         if self.over:
@@ -2341,7 +2418,7 @@ class Raid:
 
         # 瞄准:电脑用鼠标;手机自动锁敌(视野内最近的敌人,不用手动瞄准)
         if self.touch_mode:
-            self.aim_locked = self._aim_assist_target()
+            self.aim_locked = self._aim_assist_target(True)
             if self.aim_locked is not None:
                 p.aim = math.atan2(self.aim_locked.y - p.y, self.aim_locked.x - p.x)
             elif moving:

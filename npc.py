@@ -1,8 +1,16 @@
 # -*- coding: utf-8 -*-
 """人质模式的两类己方 NPC:队友(Ally)与人质(Hostage)。"""
 import math
+import random
 
 from settings import ALLY_HP, ALLY_RANGE, REPAIR_RANGE, TILE
+
+# 队友选目标不必每帧做(见 Ally.nearest_enemy);0.12s 兼顾了跟枪手感与开销
+THINK_INTERVAL = 0.12
+
+
+def _first(t):
+    return t[0]
 
 
 class Walker:
@@ -60,20 +68,42 @@ class Ally(Walker):
         self.fire_cd = 0.0
         self.name = "队友"
         self.repair_target = None   # 被派去修的设施(突袭模式)
+        # 目标缓存(见 nearest_enemy)
+        self.tgt = None
+        self.tgt_ok = False         # 「已算过」而不是「算到了目标」
+        self.tgt_t = -1.0
+        self.think = random.uniform(0.0, THINK_INTERVAL)
 
     def nearest_enemy(self, raid):
-        """最近的可见敌人。先按距离粗筛再算视线(大本营 50 名守军时省很多)。"""
+        """最近的可见敌人(带缓存)。
+
+        原来每个队友每帧扫一遍 50 个守军(math.hypot + 排序),再对最近的 8 个
+        各打一条视线 —— 10 个队友就是 500 次 hypot 和最多 80 条视线。目标在
+        0.2 秒里不会变,所以按 raid.now 错峰重算(用平方距离,省掉 hypot)。
+        """
+        if self.tgt_ok and raid.now < self.tgt_t:
+            return self.tgt
+        self.tgt_t = raid.now + THINK_INTERVAL + self.think
+        self.tgt_ok = True          # 「这帧没找到敌人」也要缓存,否则会每帧重扫
+        r2 = float(ALLY_RANGE) * ALLY_RANGE
+        sx, sy = self.x, self.y
         cands = []
         for s in raid.scavs:
-            d = math.hypot(s.x - self.x, s.y - self.y)
-            if d < ALLY_RANGE:
-                cands.append((d, s))
+            dx = s.x - sx
+            dy = s.y - sy
+            d2 = dx * dx + dy * dy
+            if d2 < r2:
+                cands.append((d2, s))
         if not cands:
+            self.tgt = None
             return None
-        cands.sort(key=lambda t: t[0])
-        for _d, s in cands[:8]:
-            if raid.map.los_clear(self.x, self.y, s.x, s.y):
+        cands.sort(key=_first)
+        los = raid.map.los_clear
+        for _d2, s in cands[:8]:
+            if los(sx, sy, s.x, s.y):
+                self.tgt = s
                 return s
+        self.tgt = None
         return None
 
     def update(self, raid, dt):
@@ -98,18 +128,20 @@ class Ally(Walker):
         tgt = self.nearest_enemy(raid)
         if tgt is not None:
             self.aim = math.atan2(tgt.y - self.y, tgt.x - self.x)
-            d = math.hypot(tgt.x - self.x, tgt.y - self.y)
+            dx = tgt.x - self.x
+            dy = tgt.y - self.y
             if self.fire_cd <= 0:
                 self.fire_cd = 0.16
                 raid.spawn_ally_bullet(self.x, self.y, self.aim)
-            if d > 240:               # 拉近到有效射程
+            if dx * dx + dy * dy > 240 * 240:     # 拉近到有效射程
                 self._repath(raid, tgt.x, tgt.y)
                 self._follow(raid, dt, 150)
             else:
                 self.path = []
         else:
-            d = math.hypot(p.x - self.x, p.y - self.y)
-            if d > 140:               # 跟上玩家
+            dx = p.x - self.x
+            dy = p.y - self.y
+            if dx * dx + dy * dy > 140 * 140:     # 跟上玩家
                 self._repath(raid, p.x, p.y)
                 self._follow(raid, dt, 190)
             else:
