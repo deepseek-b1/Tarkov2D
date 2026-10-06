@@ -324,6 +324,207 @@ def run():
         g.draw(screen)                       # 藏身处(战绩变化后)
         pygame.display.flip()
 
+    def t_player_art():
+        """玩家立绘:三视图素材必须存在且能加载,四个朝向都要画得出来。
+
+        打包(EXE/APK)漏带 art/ 时这里会直接失败 —— 这是有意的:
+        没图会静默退回圆点,只有这条用例能拦住"发布出去才发现没带图"。
+        """
+        from settings import W, H
+        import raid_ui
+
+        frames = raid_ui._player_art_frames()
+        for key in ("front", "back", "side", "side_r"):
+            s = frames.get(key)
+            assert s is not None, f"缺少玩家立绘 {key}(art/player_*.png 没找到?)"
+            assert s.get_height() == raid_ui.PLAYER_SPRITE_H, "立绘高度未按设定缩放"
+        # 四向映射:右 = 左侧镜像、下 = 正面、上 = 背面
+        assert raid_ui._player_facing(0.0) == "side_r"
+        assert raid_ui._player_facing(math.pi) == "side"
+        assert raid_ui._player_facing(math.pi / 2) == "front"
+        assert raid_ui._player_facing(-math.pi / 2) == "back"
+        # 真画一遍:四个朝向都不能抛异常(素材缺失时走圆点回退分支)
+        from game import Game
+        screen = pygame.display.set_mode((W, H))
+        g = Game()
+        g.start_raid()
+        for a in (0.0, math.pi / 2, math.pi, -math.pi / 2):
+            g.raid.player.aim = a
+            g.draw(screen)      # 不能 g.shutdown():那会 pygame.quit() 掉后面的用例
+
+    def t_mystery():
+        """礼品-神秘人:10 星收集清单、每轮刷新、交货换 6 套全装包、机密文件与开包。"""
+        from game import Game
+        from inventory import Container, Placed
+        import mystery as my
+        from settings import (MYSTERY_STARS, MYSTERY_KITS, MYSTERY_KIT_COUNT,
+                              MYSTERY_KINDS, MYSTERY_POOL, MYSTERY_DOC_CHANCE,
+                              KIT_CONTENTS, DOC_SPAWN_CHANCE, DEPTS,
+                              weapon_slots, weapon_capacity, W as SW, H as SH)
+
+        # 1) 结构:10 星 / 6 套包 / 每个包的内容都合法 / 机密文件概率与强化封锁一致
+        assert MYSTERY_STARS == 10, MYSTERY_STARS
+        assert MYSTERY_KIT_COUNT == 6 and len(MYSTERY_KITS) == 6, MYSTERY_KITS
+        assert ("gift", "礼品") in DEPTS, DEPTS
+        assert MYSTERY_DOC_CHANCE == DOC_SPAWN_CHANCE, \
+            "送机密文件的概率必须和强化封锁爆率一样"
+        for iid, weight, span in MYSTERY_POOL:
+            assert iid in ITEMS and weight > 0 and span[0] > 0 and span[0] <= span[1], \
+                (iid, weight, span)
+        for kid in MYSTERY_KITS:
+            assert ITEMS[kid]["cat"] == "kit", kid
+            cfg = KIT_CONTENTS[kid]
+            assert ITEMS[cfg["weapon"]]["cat"] == "weapon", kid
+            for key, want in (("armor", 6), ("helmet", 6)):
+                d = ITEMS[cfg[key]]
+                assert d["level"] == want, f"{kid} 要配 {want} 级{key}"
+            assert ITEMS[cfg["pack"]]["cat"] == "pack", kid
+            for iid, n in cfg["ammo"]:
+                assert ITEMS[iid]["cat"] == "ammo" and n > 0, (kid, iid)
+            for iid, n in cfg["meds"]:
+                assert ITEMS[iid]["cat"] == "med" and n > 0, (kid, iid)
+            items = my.kit_items(kid)
+            assert len(items) >= 6, (kid, len(items))
+            gun = items[0]
+            assert gun.cat == "weapon"
+            for slot in (gun.state.get("attach") or {}):
+                assert slot in weapon_slots(cfg["weapon"]), (kid, slot)
+            assert gun.state["mag"] == weapon_capacity(gun), "配件扩容后要装满"
+
+        # 2) roll:清单合法 + 每轮重抽(回合递增)
+        g = Game()
+        g.save = save_mod.reset_data()
+        sd = g.save
+        for _ in range(40):
+            my.roll(sd)
+            need = my.need_list(sd)
+            assert MYSTERY_KINDS[0] <= len(need) <= MYSTERY_KINDS[1], need
+            assert len({iid for iid, _ in need}) == len(need), "清单不该有重复物品"
+            span = {iid: (lo, hi) for iid, _w, (lo, hi) in MYSTERY_POOL}
+            for iid, n in need:
+                assert iid in span, iid
+                assert span[iid][0] <= n <= span[iid][1], (iid, n)
+        r0 = my.round_no(sd)
+        # 每次"启动游戏"都会重抽:存盘后再开一个 Game,回合必须 +1
+        save_mod.save_data(sd)
+        g_new = Game()
+        assert my.round_no(g_new.save) == r0 + 1, "启动游戏要刷新清单"
+        assert not my.claimed(g_new.save), "新的一轮要能再交"
+        assert my.need_list(g_new.save), "新的一轮必须给出清单"
+
+        # 3) 交货:材料不够不能交;仓库+背包都算数;交货后扣材料 + 发 6 套全装包
+        g2 = Game()
+        g2.save = save_mod.reset_data()
+        sd = g2.save
+        sd.stash.clear()
+        sd.bag.clear()
+        my.roll(sd)
+        sd.mystery["need"] = [["bandage", 3], ["gold", 2]]
+        sd.mystery["claimed"] = False
+        sd.mystery["doc"] = False
+        ok, msg = my.turn_in(sd)
+        assert not ok and "还缺" in msg, msg
+        sd.stash.add_item(Item("bandage", count=2))
+        assert not my.ready(sd) and not my.turn_in(sd)[0]
+        # 补在背包里的也算(清单看的是仓库+背包)
+        sd.bag.add_item(Item("bandage", count=4))
+        sd.bag.add_item(Item("gold", count=2))
+        assert my.ready(sd), my.missing(sd)
+        assert my.prepared_count(sd) == (2, 2)
+        ok, msg = my.turn_in(sd)
+        assert ok, msg
+        assert my.claimed(sd)
+        left = sum(p.item.count for p in sd.bag.items if p.item.iid == "bandage")
+        assert left == 3, left          # 背包 4 发里扣走 1 发(仓库那 2 发先扣)
+        assert not any(p.item.iid == "gold" for p in sd.stash.items + sd.bag.items)
+        kits = [p.item.iid for p in sd.stash.items if p.item.cat == "kit"]
+        assert sorted(kits) == sorted(MYSTERY_KITS), kits
+        assert "全装包" in msg and "机密文件" not in msg, msg
+        ok, msg = my.turn_in(sd)                   # 一轮只能交一次
+        assert not ok and "已经交过" in msg, msg
+
+        # 4) 机密文件:概率与强化封锁一致,中奖时跟全装包一起给
+        sd.stash.clear()
+        my.roll(sd)
+        sd.mystery["need"] = [["bandage", 1]]
+        sd.mystery["doc"] = True
+        sd.stash.add_item(Item("bandage", count=1))
+        ok, msg = my.turn_in(sd)
+        assert ok and "机密文件" in msg, msg
+        assert any(p.item.iid == "doc" for p in sd.stash.items), "中奖要真的给文件"
+
+        # 5) 仓库放不下时:整体拒绝,材料一个都不能少(先克隆试算的规矩)
+        sd.stash.clear()
+        my.roll(sd)
+        sd.mystery["need"] = [["bandage", 2]]
+        sd.mystery["claimed"] = False
+        sd.mystery["doc"] = False
+        sd.bag.clear()
+        sd.bag.add_item(Item("bandage", count=2))
+        while sd.stash.add_item(Item("gold")):
+            pass
+        ok, msg = my.turn_in(sd)
+        assert not ok and "放不下" in msg, msg
+        assert sum(p.item.count for p in sd.bag.items if p.item.iid == "bandage") == 2, \
+            "放不下时不能扣材料"
+        assert not my.claimed(sd)
+
+        # 6) 开包:展开成一整套(武器满配件 + 甲/头盔/背包/弹/药);放不下就整包不动
+        sd.stash.clear()
+        sd.stash.add_item(Item("kit_assault"))
+        pl = sd.stash.items[0]
+        ok, msg = my.open_kit(sd.stash, pl)
+        assert ok, msg
+        cats = sorted(p.item.cat for p in sd.stash.items)
+        for want in ("weapon", "armor", "helmet", "pack", "ammo", "med"):
+            assert want in cats, (want, cats)
+        assert not any(p.item.cat == "kit" for p in sd.stash.items), "包要消失"
+        small = Container(3, 2)
+        small.add_item(Item("kit_hk"))
+        before = [(p.item.iid, p.x, p.y) for p in small.items]
+        ok, msg = my.open_kit(small, small.items[0])
+        assert not ok and "空间" in msg, msg
+        assert [(p.item.iid, p.x, p.y) for p in small.items] == before, "开失败不能动包"
+
+        # 7) 藏身处:右键开包(电脑) + 长按面板按钮开包(手机) + 礼品页交付按钮
+        h = g2.hideout
+        h.show_intro = False
+        sd.touch = True
+        sd.stash.clear()
+        sd.stash.add_item(Item("kit_ak"))
+        pos = (h.stash_grid[0] + 5, h.stash_grid[1] + 5)
+        h._right_click(pos)                        # 电脑右键 = 打开
+        assert not any(p.item.cat == "kit" for p in sd.stash.items), h.msg
+        assert "打开" in h.msg, h.msg
+        sd.stash.clear()
+        sd.stash.add_item(Item("kit_close"))
+        h.hold.reset()
+        h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN,
+                                             pos=pos, button=1)])
+        for _ in range(40):
+            h.update(1 / 60, [])
+        assert h.hold.active() and h.hold.btn_label == "打开全装包", h.hold.btn_label
+        scr = pygame.display.set_mode((SW, SH))
+        h.draw(scr)                                # 面板(含动作按钮)要能画
+        h._hold_action()
+        assert not any(p.item.cat == "kit" for p in sd.stash.items), "长按按钮要能开包"
+        sd.touch = False
+        # 礼品页:标签页 + 交付按钮走真实点击
+        sd.stash.clear()
+        sd.mystery["need"] = [["bandage", 2]]
+        sd.mystery["claimed"] = False
+        sd.mystery["doc"] = False
+        sd.stash.add_item(Item("bandage", count=2))
+        h.view = "task"
+        h.task_dept = "gift"
+        h.draw(scr)
+        h._task_click(h.gift_btn.center)
+        assert any(p.item.cat == "kit" for p in sd.stash.items), h.msg
+        assert "全装包" in h.msg, h.msg
+        assert my.claimed(sd)
+        h.draw(scr)                                # 交付后的页面也要能画
+        h.view = "stash"
+
     check("容器-基础放置", t_container)
     check("容器-弹药堆叠", t_stacking)
     check("容器-自动旋转", t_rotate)
@@ -336,6 +537,7 @@ def run():
     check("战局-全流程模拟(索敌/射击/击杀/医疗/搜刮/装填/撤离)", t_raid)
     check("战局-阵亡清空带入装备", t_death_wipe)
     check("渲染-藏身处与战局全部界面", t_render_all_screens)
+    check("渲染-玩家立绘三视图与四向", t_player_art)
     check("难度-三档强度与存档", t_difficulty)
 
     def t_bugfixes():
@@ -2507,9 +2709,9 @@ def run():
         g5.hideout.stash_scroll = g5.hideout.stash_max_scroll()
         g5.draw(screen)
         g5.hideout.view = "task"
-        for dept in ("instructor", "medical", "logistics"):
+        for dept in ("instructor", "medical", "logistics", "gift"):
             g5.hideout.task_dept = dept
-            g5.draw(screen)                   # 任务中心三个部门
+            g5.draw(screen)                   # 任务中心各部门(含礼品页)
         g5.hideout.view = "trade"
         g5.draw(screen)                       # 交易所(仓库滚动)
         g5.hideout.view = "stash"
@@ -3983,6 +4185,7 @@ def run():
         assert not r5.over
 
     check("保险箱-40任务解锁/长按详情/横竖旋转", t_safe_hold_rotate)
+    check("礼品-神秘人10星收集/每轮刷新/全装包/机密文件", t_mystery)
 
     ok = all(r[1] for r in results)
     report = ["Tarkov2D selftest " + ("PASS" if ok else "FAIL"), ""]

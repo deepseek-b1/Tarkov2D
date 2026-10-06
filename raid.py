@@ -2782,10 +2782,10 @@ class Raid:
         for ev in events:
             if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 if self.hold.active():
-                    # 面板已弹出:点旋转按钮 = 旋转;点别处 = 关闭(都吞掉)
-                    if (self.hold.rotate_rect is not None
-                            and self.hold.rotate_rect.collidepoint(ev.pos)):
-                        self._hold_rotate()
+                    # 面板已弹出:点动作按钮 = 执行(战局里只有"旋转");点别处 = 关闭
+                    if (self.hold.action_rect is not None
+                            and self.hold.action_rect.collidepoint(ev.pos)):
+                        self._hold_action()
                     self.hold.hide()
                     continue
                 self.hold.press(ev.pos)
@@ -2805,13 +2805,13 @@ class Raid:
             out.append(ev)
         return out
 
-    def _hold_rotate(self):
+    def _hold_action(self):
         from inventory import rotate_in_place
-        cb = self.hold.rotate_cb
+        cb = self.hold.action_cb
         if cb is None:
             return
         container, placed = cb
-        if placed not in container.items:
+        if placed is None or placed not in container.items:
             return
         res = rotate_in_place(container, placed)
         if res is None:

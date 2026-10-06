@@ -39,8 +39,11 @@ def main():
     print(f"[1/4] 版本号 -> {version}")
 
     print("[2/4] PyInstaller 打包中…(约 1 分钟)")
+    # 必须带 --add-data "art;art":玩家立绘等图片资源不在包里就会退回圆点绘制
+    # (分隔符 Windows 是 ';'、Linux/macOS 是 ':',所以用 os.pathsep)
     rc = subprocess.call([sys.executable, "-m", "PyInstaller", "--onefile",
-                          "--noconsole", "--clean", "--name", "Tarkov2D", "main.py"],
+                          "--noconsole", "--clean", "--name", "Tarkov2D",
+                          "--add-data", f"art{os.pathsep}art", "main.py"],
                          cwd=ROOT)
     if rc != 0:
         print("打包失败")

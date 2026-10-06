@@ -5,6 +5,7 @@ import pygame
 import assault
 import audio
 import bindings
+import mystery
 import quests
 import save as save_mod
 import story as story_mod
@@ -47,6 +48,8 @@ class Game:
     def __init__(self, screen=None):
         self.screen = screen
         self.save = save_mod.load_data()
+        # 礼品:神秘人每次"登录游戏"换一份收集清单(顺便掷一次机密文件)
+        mystery.roll(self.save)
         self.phase = "hideout"
         self.hideout = Hideout(self)
         self.raid = None

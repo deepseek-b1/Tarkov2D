@@ -32,3 +32,9 @@ bin/
 # 本地自检输出
 diag_result.txt
 selftest_report.txt
+
+# 立绘工具生成的预览图(可再生,不进包也不入库)
+art/_*.png
+
+# 命令行产物(EXE --version 会写一个)
+version_info.txt

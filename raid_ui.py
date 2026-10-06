@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """战局渲染:世界+战争迷雾+HUD+背包/搜刮/暂停/结算界面。"""
 import math
+import os
 
 import pygame
 
@@ -17,6 +18,78 @@ from uikit import CELL, draw_grid, draw_item_icon, draw_tooltip, draw_button, dr
 
 # 全屏叠加层缓存:每帧新建 Surface 太贵(1280×720 SRCALPHA),复用一个
 _overlay_cache = {}
+
+
+# ---------- 玩家立绘 ----------
+# art/player_front|side|back.png 由 tools/make_player_art.py 从角色设定图生成。
+# 按瞄准方向用四个朝向绘制,右侧直接用左侧镜像。素材缺失(例如打包时忘了带
+# art/)就自动退回原来的圆点绘制,所以任何平台上都不会因为没图而崩。
+PLAYER_SPRITE_H = 42        # 立绘绘制高度(像素;宽度约等于碰撞圆直径)
+PLAYER_SPRITE_FOOT = 16     # 立绘底边相对玩家坐标的偏移(越大越靠下)
+_player_art = {}
+
+
+def _player_art_frames():
+    """懒加载并缩放的玩家立绘 {朝向: Surface};加载不了就是空 dict。"""
+    if _player_art:
+        return _player_art
+    _player_art["_done"] = True          # 只尝试一次(失败也不每帧重试)
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = None
+    for sub in (os.path.join(here, "art"), os.path.join(here, "..", "art")):
+        if os.path.isfile(os.path.join(sub, "player_front.png")):
+            root = sub
+            break
+    if root is None:
+        return _player_art
+    for key, name in (("front", "player_front"), ("back", "player_back"),
+                      ("side", "player_side")):
+        try:
+            s = pygame.image.load(os.path.join(root, name + ".png"))
+            s = s.convert_alpha()
+        except Exception:
+            continue
+        k = PLAYER_SPRITE_H / float(s.get_height())
+        s = pygame.transform.smoothscale(
+            s, (max(1, int(round(s.get_width() * k))), PLAYER_SPRITE_H))
+        _player_art[key] = s
+        if key == "side":
+            _player_art["side_r"] = pygame.transform.flip(s, True, False)
+    return _player_art
+
+
+def _player_facing(aim):
+    """按瞄准角选朝向:屏幕上 y 向下,所以 dy>0 是"面朝镜头"(正面)。"""
+    dx = math.cos(aim)
+    dy = math.sin(aim)
+    if abs(dx) >= abs(dy):
+        return "side_r" if dx > 0 else "side"
+    return "front" if dy > 0 else "back"
+
+
+def _draw_player(screen, p, px, py):
+    """画玩家:立绘(四向)优先,没素材时退回原来的圆点。"""
+    spr = _player_art_frames().get(_player_facing(p.aim))
+    gun_len = 26 if p.weapon else 0
+    if spr is None:
+        if p.weapon:
+            pygame.draw.line(screen, (235, 235, 240), (px, py),
+                             (px + math.cos(p.aim) * gun_len,
+                              py + math.sin(p.aim) * gun_len), 4)
+        pygame.draw.circle(screen, COL["player"], (int(px), int(py)), PLAYER["radius"])
+        pygame.draw.circle(screen, (20, 26, 34), (int(px), int(py)), PLAYER["radius"], 3)
+    else:
+        rect = spr.get_rect()
+        rect.midbottom = (int(round(px)), int(round(py + PLAYER_SPRITE_FOOT)))
+        screen.blit(spr, rect)
+        if p.weapon:      # 枪画在立绘之上,不然看不出枪口指向
+            pygame.draw.line(screen, (235, 235, 240),
+                             (px, py - 8),
+                             (px + math.cos(p.aim) * gun_len,
+                              py - 8 + math.sin(p.aim) * gun_len), 4)
+    if p.hurt_flash > 0:
+        pygame.draw.circle(screen, (255, 60, 50), (int(px), int(py)),
+                           PLAYER["radius"] + 6, 2)
 
 
 def _overlay(key, size, color):
@@ -511,16 +584,7 @@ def draw_raid(raid, screen):
 
     # 玩家
     px, py = p.x + ox, p.y + oy
-    gun_len = 26 if p.weapon else 0
-    if p.weapon:
-        pygame.draw.line(screen, (235, 235, 240),
-                         (px, py),
-                         (px + math.cos(p.aim) * gun_len, py + math.sin(p.aim) * gun_len), 4)
-    pygame.draw.circle(screen, COL["player"], (int(px), int(py)), PLAYER["radius"])
-    pygame.draw.circle(screen, (20, 26, 34), (int(px), int(py)), PLAYER["radius"], 3)
-    if p.hurt_flash > 0:
-        pygame.draw.circle(screen, (255, 60, 50), (int(px), int(py)),
-                           PLAYER["radius"] + 6, 2)
+    _draw_player(screen, p, px, py)
 
     # 战争迷雾 / 夜战光照(乘性压暗,见文件头的 _mask_surface 说明)。
     # 缓存表面只在 fog_version 变化(移动/转头)时"填充 + 打洞",

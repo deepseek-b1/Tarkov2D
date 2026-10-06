@@ -3,7 +3,7 @@
 import pygame
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.10.0"
+GAME_VERSION = "2.11.0"
 # 更新清单地址(可换成自建服务器 / GitHub raw;留空则只认 EXE 同目录的 version.json)
 UPDATE_MANIFEST_URL = "http://127.0.0.1:8765/version.json"
 UPDATE_TIMEOUT = 3   # 检查 / 下载超时(秒)
@@ -1223,7 +1223,8 @@ SUPPLY_RANGE = 76            # 站多近才能补给
 
 # ---------- 任务系统(教官 / 医疗部门 / 后勤部门) ----------
 DEPTS = [("instructor", "教官"), ("medical", "医疗部门"),
-         ("logistics", "后勤部门"), ("contractor", "保险承包商")]
+         ("logistics", "后勤部门"), ("contractor", "保险承包商"),
+         ("gift", "礼品")]
 # 教官的任务:kind 决定进度怎么涨(在 game.py 的战局结算里累计)
 # reward: rubles 给钱 / weapons 给枪 / attachments 给配件 / ammo 给子弹
 TASKS = [
@@ -1336,6 +1337,78 @@ LOG_BARTERS = [
          need=[("oscilloscope", 1), ("gpu", 1)], out=[("pack_xl", 1)]),
 ]
 DEPARTMENT_BARTERS = {"medical": MED_BARTERS, "logistics": LOG_BARTERS}
+
+# ---------- 礼品:神秘人的长线收集任务 + 全装包 ----------
+# 神秘人每次启动游戏换一份"要收集的东西"清单(10 星难度,一大堆东西),
+# 仓库+背包里凑齐交给他,换 6 套「全装包」;每轮还会掷一次"额外送你一张机密文件",
+# 概率与强化封锁刷机密文件完全一致(见 MYSTERY_DOC_CHANCE)。
+MYSTERY_STARS = 10                       # 任务难度:10 星
+MYSTERY_KINDS = (9, 13)                  # 清单里有几种东西
+MYSTERY_KIT_COUNT = 6                    # 一次给几套全装包
+MYSTERY_DOC_CHANCE = DOC_SPAWN_CHANCE    # 额外送机密文件的概率(= 强化封锁爆率)
+# 收集池:(物品 id, 权重, 数量范围);杂物为主,掺一些值钱货/弹药/配件/药
+MYSTERY_POOL = [
+    ("coffee", 10, (6, 12)), ("lighter", 10, (6, 12)), ("screwdriver", 10, (6, 12)),
+    ("tape", 10, (6, 12)), ("screws", 9, (6, 12)), ("plug", 9, (5, 10)),
+    ("flashlight", 8, (4, 8)), ("wire", 8, (4, 8)), ("hose", 7, (4, 8)),
+    ("wrench", 7, (4, 8)), ("relay", 6, (3, 6)), ("shampoo", 6, (3, 6)),
+    ("canteen", 6, (3, 6)), ("calculator", 6, (3, 6)), ("clock", 5, (3, 6)),
+    ("battery", 5, (2, 5)), ("filter", 4, (2, 4)), ("fuelcan", 3, (1, 3)),
+    ("oscilloscope", 3, (1, 3)), ("motor", 3, (1, 3)), ("solar", 2, (1, 2)),
+    ("gpu", 2, (1, 2)), ("gold", 4, (2, 5)), ("cpu", 3, (1, 3)),
+    ("medkit", 5, (2, 5)), ("painkiller", 5, (3, 6)), ("surgery", 3, (1, 2)),
+    ("a545", 5, (60, 120)), ("a556", 5, (60, 120)), ("a762", 4, (60, 120)),
+    ("mag_ext", 3, (1, 2)), ("grip_vert", 3, (1, 2)), ("laser_tac", 3, (1, 2)),
+    ("stock_tac", 3, (1, 2)),
+]
+# 6 套全装包:每套 = 满配武器 + 6 级甲 + 6 级头盔 + 背包 + 弹药 + 药
+# (武器配置是设计定死的,不是随机:突击手 ×3 / 精准射手 / 机枪手 / 近战)
+MYSTERY_KITS = ["kit_assault", "kit_hk", "kit_ak", "kit_marksman",
+                "kit_machine", "kit_close"]
+KIT_CONTENTS = {
+    "kit_assault": dict(
+        weapon="m4a1", armor="bt201", helmet="h_6bnt", pack="pack_xl",
+        attach={"mag": "mag_drum_big", "grip": "grip_ang", "laser": "laser_ir",
+                "stock": "stock_heavy"},
+        ammo=[("a556", 180)], meds=[("surgery", 1), ("medkit", 2)]),
+    "kit_hk": dict(
+        weapon="hk416", armor="kn_composite", helmet="h_as200", pack="pack_xl",
+        attach={"mag": "mag_drum", "grip": "grip_vert", "laser": "laser_tac",
+                "stock": "stock_tac"},
+        ammo=[("a556", 180)], meds=[("surgery", 1), ("medkit", 2)]),
+    "kit_ak": dict(
+        weapon="ak12", armor="al_commander", helmet="h_hg84", pack="pack_xl",
+        attach={"mag": "mag_drum_big", "grip": "grip_ang", "laser": "laser_ir",
+                "stock": "stock_heavy"},
+        ammo=[("a545", 180)], meds=[("surgery", 1), ("medkit", 2)]),
+    "kit_marksman": dict(
+        weapon="m110", armor="al_tactical", helmet="h_ind70", pack="pack_large",
+        attach={"mag": "mag_ext", "grip": "grip_vert", "laser": "laser_tac"},
+        ammo=[("a762x51", 120)], meds=[("surgery", 1), ("medkit", 1)]),
+    "kit_machine": dict(
+        weapon="pkp", armor="marshal", helmet="h_6bnt", pack="pack_xl",
+        attach={"mag": "mag_drum"},
+        ammo=[("a54r", 200)], meds=[("surgery", 1), ("medkit", 2)]),
+    "kit_close": dict(
+        weapon="asval", armor="avs", helmet="h_6bnt", pack="pack_mid",
+        attach={"mag": "mag_drum", "laser": "laser_ir", "stock": "stock_tac"},
+        ammo=[("a939", 160)], meds=[("surgery", 1), ("ai2", 1)]),
+}
+# 全装包本身是个 2×2 的物品:电脑右键 / 手机长按面板点「打开」才展开成一套装备
+ITEMS.update({
+    "kit_assault": dict(name="全装包 · 突击手(M4A1)", cat="kit", w=2, h=2,
+                        color=(92, 126, 200), price=980000),
+    "kit_hk": dict(name="全装包 · 尖兵(HK416)", cat="kit", w=2, h=2,
+                   color=(118, 122, 132), price=880000),
+    "kit_ak": dict(name="全装包 · 突击手(AK-12)", cat="kit", w=2, h=2,
+                   color=(150, 118, 76), price=890000),
+    "kit_marksman": dict(name="全装包 · 精准射手(M110)", cat="kit", w=2, h=2,
+                         color=(120, 140, 96), price=760000),
+    "kit_machine": dict(name="全装包 · 机枪手(PKP)", cat="kit", w=2, h=2,
+                        color=(168, 96, 88), price=1100000),
+    "kit_close": dict(name="全装包 · 近战突入(AS VAL)", cat="kit", w=2, h=2,
+                      color=(104, 104, 150), price=900000),
+})
 
 # ---------- 手机(触屏)模式 ----------
 TOUCH = dict(

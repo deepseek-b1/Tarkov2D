@@ -43,6 +43,7 @@ class SaveData:
         self.stats = {"raids": 0, "extracts": 0, "deaths": 0, "kills": 0, "value": 0}
         self.tasks = {}        # 教官任务进度:{task_id: 已累计数量}
         self.tasks_done = []   # 已领取的一次性任务 id(可重复任务不记这里)
+        self.mystery = None    # 礼品-神秘人:本轮的收集清单/回合/机密文件(mystery.py)
         self.story = None      # 剧情模式《灰区二日》进度(story.py 维护)
         # ---- 设置(bindings.py / touch.py / main.py 用) ----
         self.bindings = {}        # 键位覆盖:{action: [键码]}(只记玩家改过的)
@@ -124,6 +125,7 @@ class SaveData:
             "stats": dict(self.stats),
             "tasks": dict(self.tasks),
             "tasks_done": list(self.tasks_done),
+            "mystery": self.mystery,
             "story": self.story,
             "bindings": dict(self.bindings),
             "touch_layout": {k: list(v) for k, v in self.touch_layout.items()},
@@ -187,6 +189,9 @@ class SaveData:
         # 承包商 40 项已完成但保险箱还是 2 格(旧档/异常)→ 自动升到 4 格
         from quests import check_safe_upgrade
         check_safe_upgrade(sd)
+        mystery = data.get("mystery")
+        # 清单条目在 mystery.need_list() 里还会再过一遍校验,这里只认 dict
+        sd.mystery = mystery if isinstance(mystery, dict) else None
         story = data.get("story")
         sd.story = story if isinstance(story, dict) else None
         # 设置:键位覆盖 / 触屏布局 / 帧率 / FPS 显示 / 缩放滤镜(全部带校验)

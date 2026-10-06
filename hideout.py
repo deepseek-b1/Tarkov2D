@@ -8,6 +8,7 @@ import pygame
 import audio
 import bindings
 import intro
+import mystery
 import quests
 import save as save_mod
 import touch as touch_mod
@@ -16,6 +17,7 @@ from settings import (W, H, COL, fmt_rub, get_font, DIFF_ORDER, DIFFICULTIES,
                       ITEMS, TRADE_GOODS, TRADE_TABS, TRADE_PAGE_H, FPS_CAP_CHOICES,
                       trade_buy_price, trade_sell_price, STASH_VIEW_ROWS,
                       MODE_DIFF, DEPTS, TASKS, SAFE_CONTRACT,
+                      MYSTERY_STARS, MYSTERY_KITS,
                       armor_allows, MAPS, MAP_ORDER, MODES, MODE_ORDER, MODE_MAP,
                       weapon_class, WEAPON_CLASS_COL)
 from inventory import Item, Placed, organize, try_move
@@ -84,15 +86,17 @@ class Hideout:
         self.safe_toggle = pygame.Rect(262, 484, 158, 30)
         # 触屏长按(显示物品详情;普通点按延迟到抬起判定)
         self.hold = uikit.HoldInfo()
-        # 任务中心:四个部门(教官 / 医疗 / 后勤 / 保险承包商)
+        # 任务中心:五个部门(教官 / 医疗 / 后勤 / 保险承包商 / 礼品)
         self.task_dept = "instructor"
         self.task_scroll = 0.0
-        self.task_tab_rects = [pygame.Rect(548 + i * 176, 132, 168, 32)
+        self.task_tab_rects = [pygame.Rect(544 + i * 140, 132, 134, 32)
                                for i in range(len(DEPTS))]
         self.task_view_top = 186
         self.task_view_bottom = 600
         self.task_row_h = 56
         self.task_close = pygame.Rect(1140, 76, 100, 36)
+        # 礼品页:神秘人的收集清单 + 交付按钮
+        self.gift_btn = pygame.Rect(560, 578, 660, 44)
         # 交易所:仓库网格 66,150 / 分区标签 / 商品行(双列可滚动) / 返回按钮
         self.trade_stash_grid = (66, 150)
         self.trade_stash_view_h = 9 * 40      # 交易所左侧仓库可见高度(其余滚轮翻)
@@ -746,24 +750,23 @@ class Hideout:
         return True, f"{it.name} 已展开"
 
     def _right_click(self, pos):
-        """仓库/背包/保险箱里右键:背包类 = 卷起/展开;其他物品 = 原位横竖旋转。"""
+        """仓库/背包/保险箱里右键:背包 = 卷起/展开;全装包 = 打开;其他 = 横竖旋转。"""
         sd = self.game.save
         if self.lay["stash_panel"].collidepoint(pos):
             placed = self.stash_hit(pos)
             if placed is not None:
-                if placed.item.cat == "pack":
-                    ok, msg = self._toggle_roll(sd.stash, placed)
-                    if msg:
-                        save_mod.save_data(sd)
-                        audio.play("click")
-                        self.say(msg, COL["good"] if ok else COL["bad"], 3.0)
+                if placed.item.cat in ("pack", "kit"):
+                    self._use_placed(sd.stash, placed)
                 else:
                     self._rotate_placed(sd.stash, placed)
             return
         if self.safe_rect().collidepoint(pos):
             placed = self._safe_at(pos)
             if placed is not None:
-                self._rotate_placed(sd.safe, placed)
+                if placed.item.cat == "kit":
+                    self._use_placed(sd.safe, placed)
+                else:
+                    self._rotate_placed(sd.safe, placed)
             return
         if self.bag_rect().collidepoint(pos):
             cell = self.bag_cell()
@@ -772,14 +775,22 @@ class Hideout:
             gy = int((pos[1] - brect.y) // cell)
             placed = sd.bag.at(gx, gy)
             if placed is not None:
-                if placed.item.cat == "pack":
-                    ok, msg = self._toggle_roll(sd.bag, placed)
-                    if msg:
-                        save_mod.save_data(sd)
-                        audio.play("click")
-                        self.say(msg, COL["good"] if ok else COL["bad"], 3.0)
+                if placed.item.cat in ("pack", "kit"):
+                    self._use_placed(sd.bag, placed)
                 else:
                     self._rotate_placed(sd.bag, placed)
+
+    def _use_placed(self, container, placed):
+        """背包类 = 卷起/展开;全装包 = 打开成一套装备。都会落盘并给提示。"""
+        it = placed.item
+        if it.cat == "kit":
+            ok, msg = mystery.open_kit(container, placed)
+        else:
+            ok, msg = self._toggle_roll(container, placed)
+        if msg:
+            save_mod.save_data(self.game.save)
+            audio.play("click")
+            self.say(msg, COL["good"] if ok else COL["bad"], 3.4)
 
     # ---- 保险箱(阵亡不丢) ----
     def safe_rect(self):
@@ -812,10 +823,10 @@ class Hideout:
         for ev in events:
             if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 if self.hold.active():
-                    # 面板已弹出:点旋转按钮 = 旋转;点别处 = 关闭(都吞掉)
-                    if (self.hold.rotate_rect is not None
-                            and self.hold.rotate_rect.collidepoint(ev.pos)):
-                        self._hold_rotate()
+                    # 面板已弹出:点动作按钮 = 执行;点别处 = 关闭(都吞掉)
+                    if (self.hold.action_rect is not None
+                            and self.hold.action_rect.collidepoint(ev.pos)):
+                        self._hold_action()
                     self.hold.hide()
                     continue
                 if self.view == "trade" and self.trade_slider is not None:
@@ -841,14 +852,18 @@ class Hideout:
         self.hold.update(dt, self._hold_query)
         return out
 
-    def _hold_rotate(self):
-        cb = self.hold.rotate_cb
+    def _hold_action(self):
+        """长按面板上的动作按钮:全装包 = 打开;背包 = 卷起/展开;其他 = 旋转。"""
+        cb = self.hold.action_cb
         if cb is None:
             return
         container, placed = cb
-        if placed not in container.items:
+        if placed is None or placed not in container.items:
             return
-        self._rotate_placed(container, placed)
+        if placed.item.cat in ("pack", "kit"):
+            self._use_placed(container, placed)
+        else:
+            self._rotate_placed(container, placed)
 
     def _hold_query(self, pos):
         """长按落点查询:返回 (item, (container, placed)) 或 None。"""
@@ -888,14 +903,26 @@ class Hideout:
 
     # ---- 任务中心 ----
     def task_entries(self):
-        """当前部门的条目列表。"""
+        """当前部门的条目列表(礼品页是自定义版面,不走这里的行列表)。"""
         if self.task_dept == "instructor":
             return [(t, quests.task_state(self.game.save, t)) for t in TASKS]
         if self.task_dept == "contractor":
             return [(t, quests.task_state(self.game.save, t))
                     for t in SAFE_CONTRACT]
+        if self.task_dept == "gift":
+            return []
         return [(e, ("doing" if not quests.can_barter(self.game.save, e) else "ready"),
                  None, None) for e in quests.barter_list(self.task_dept)]
+
+    # ---- 礼品页:神秘人的收集清单 ----
+    def _gift_click(self, pos):
+        """礼品页只有一个交互:点交付按钮把清单交给神秘人。"""
+        if not self.gift_btn.collidepoint(pos):
+            return
+        sd = self.game.save
+        ok, msg = mystery.turn_in(sd)
+        save_mod.save_data(sd)
+        self.say(msg, COL["good"] if ok else COL["bad"], 4.0)
 
     def task_rows(self):
         entries = self.task_entries()
@@ -923,6 +950,9 @@ class Hideout:
                 self.task_dept = key
                 self.task_scroll = 0.0
                 return
+        if self.task_dept == "gift":
+            self._gift_click(pos)
+            return
         entries, per = self.task_rows()
         for i, entry in enumerate(entries):
             if not self.task_row_rect(i).collidepoint(pos):
@@ -1733,6 +1763,8 @@ class Hideout:
                     lay["trade"].collidepoint(mx, my), small=True)
         ready_n = sum(1 for t in TASKS
                       if quests.task_state(sd, t)[0] == "ready")
+        if mystery.ready(sd):          # 神秘人的货也算"有东西可交"
+            ready_n += 1
         draw_button(screen, lay["tasks"],
                     "任务" + (f"({ready_n})" if ready_n else ""),
                     lay["tasks"].collidepoint(mx, my), small=True)
@@ -1846,7 +1878,7 @@ class Hideout:
         screen.blit(bal, (W - bal.get_width() - 30, 36))
 
         uikit.draw_panel(screen, self.lay["trade_goods"],
-                         "部门 — 教官/承包商发任务,医疗/后勤用局内材料换东西")
+                         "部门 — 教官/承包商发任务,医疗/后勤/礼品用材料交货换东西")
         # 部门标签
         for i, (key, label) in enumerate(DEPTS):
             r = self.task_tab_rects[i]
@@ -1861,9 +1893,14 @@ class Hideout:
                 label = f"{label}(可领 {ready})" if ready else label
             elif key == "contractor":
                 label = f"{label} {quests.safe_done_count(sd)}/{len(SAFE_CONTRACT)}"
+            elif key == "gift":
+                label = f"{label} ★{MYSTERY_STARS}"
             ft = get_font(16, bold=True).render(
                 label, True, COL["accent"] if sel else COL["text"])
             screen.blit(ft, ft.get_rect(center=r.center))
+        if self.task_dept == "gift":
+            self._draw_gift(screen, mx, my)
+            return
         hint = ("左键:领取奖励 · 全部 40 项完成解锁 4 格保险箱"
                 if self.task_dept == "contractor"
                 else "左键:领取奖励" if self.task_dept == "instructor"
@@ -1917,6 +1954,81 @@ class Hideout:
         screen.blit(t, (530, self.task_view_bottom + 10))
         draw_button(screen, self.task_close, "返回",
                     self.task_close.collidepoint(mx, my), small=True)
+
+    def _draw_gift(self, screen, mx, my):
+        """礼品页:神秘人的收集清单(10 星)+ 交付按钮。"""
+        sd = self.game.save
+        pan = self.lay["trade_goods"]
+        need = mystery.need_list(sd)
+        miss = mystery.missing(sd)
+        ok_n, total = mystery.prepared_count(sd)
+        done = mystery.claimed(sd)
+
+        t = get_font(19, bold=True).render("神秘人 —— 长线收集委托", True, COL["accent"])
+        screen.blit(t, (pan.x + 16, 184))
+        st = get_font(15, bold=True).render("难度 " + "★" * MYSTERY_STARS
+                                            + f"({MYSTERY_STARS} 星)", True, (240, 200, 90))
+        screen.blit(st, (pan.x + 24 + t.get_width(), 188))
+        t = get_font(13).render(
+            f"第 {mystery.round_no(sd)} 轮 · 他每次启动游戏都换一批货"
+            "(清单看的是仓库+背包里有没有,刷新不会让你白攒)", True, COL["text_dim"])
+        screen.blit(t, (pan.x + 16, 212))
+        t = get_font(13).render(
+            f"交货可得:{mystery.reward_text()}(每包一整套满配装备)"
+            " · 极小概率额外塞你一张机密文件(概率与强化封锁爆率相同)",
+            True, COL["good"])
+        screen.blit(t, (pan.x + 16, 232))
+
+        # 清单:两列摆放(每列最多 7 行)
+        col_w, row_h = 344, 30
+        for i, (iid, n) in enumerate(need):
+            cx = pan.x + 16 + (i % 2) * (col_w + 10)
+            cy = 266 + (i // 2) * row_h
+            have = quests.have_count(sd, iid)
+            good = have >= n
+            nm = ITEMS[iid]["name"]
+            t = get_font(15).render(nm, True, COL["text"] if good else COL["text_dim"])
+            screen.blit(t, (cx, cy))
+            t2 = get_font(15, bold=True).render(
+                f"{min(have, n)}/{n}", True, COL["good"] if good else COL["bad"])
+            screen.blit(t2, (cx + col_w - 20 - t2.get_width(), cy))
+            pygame.draw.rect(screen,
+                             COL["good"] if good else COL["border"],
+                             (cx - 10, cy + 7, 5, 5), border_radius=2)
+
+        if not need:
+            t = get_font(16).render("他还没给你清单(重开一次游戏就会刷新)",
+                                    True, COL["bad"])
+            screen.blit(t, (pan.x + 16, 266))
+        state_txt = ("本轮已交付 —— 下次启动游戏他会给你新的清单(全装包在仓库里)"
+                     if done else
+                     (f"还差 {len(miss)} 种材料" if miss else "清单齐了,可以交货"))
+        state_col = COL["text_dim"] if done else (COL["bad"] if miss else COL["good"])
+        t = get_font(15, bold=True).render(
+            f"已备齐 {ok_n}/{total} 种 · {state_txt}", True, state_col)
+        screen.blit(t, (pan.x + 16, 494))
+
+        # 6 套全装包分别是哪 6 套
+        names = [ITEMS[k]["name"].replace("全装包 · ", "") for k in MYSTERY_KITS]
+        rows = [f"{mystery.reward_text()}:", " / ".join(names[:3]),
+                " / ".join(names[3:])]
+        yy = 520
+        for i, ln in enumerate(rows):
+            t = get_font(13, bold=(i == 0)).render(ln, True,
+                                                   COL["text"] if i == 0 else COL["text_dim"])
+            screen.blit(t, (pan.x + 16, yy))
+            yy += 18
+
+        ready = mystery.ready(sd)
+        label = ("这一轮已经交过了" if done else
+                 (f"交付(还差 {len(miss)} 种)" if miss
+                  else f"全部交给他 —— 换 {mystery.reward_text()}"))
+        draw_button(screen, self.gift_btn, label,
+                    self.gift_btn.collidepoint(mx, my), enabled=ready)
+        t = get_font(13).render(
+            "全装包是 2×2 物品:电脑右键 / 手机长按面板点「打开」→ 展开成一整套装备",
+            True, COL["text_dim"])
+        screen.blit(t, (pan.x + 16, pan.bottom - 26))
 
     # ---------- 交易所渲染 ----------
     def _draw_trade(self, screen):

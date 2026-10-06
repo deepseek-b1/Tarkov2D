@@ -103,6 +103,17 @@ def draw_item_icon(surface, item, x, y, cell=CELL):
                         (cx - 10, inner.top + 2, 20, 20), 0.3, 2.9, 3)
         pygame.draw.line(surface, (28, 28, 32), (inner.left + 3, cy + 4),
                          (inner.right - 3, cy + 4), 2)
+    elif cat == "kit":
+        # 全装包:礼盒 + 十字丝带 + 蝴蝶结
+        pygame.draw.rect(surface, (30, 30, 36),
+                         (inner.left + 3, inner.top + 6, inner.w - 6, inner.h - 9),
+                         border_radius=3)
+        pygame.draw.line(surface, (250, 240, 210), (cx, inner.top + 6),
+                         (cx, inner.bottom - 3), 3)
+        pygame.draw.line(surface, (250, 240, 210), (inner.left + 3, cy + 1),
+                         (inner.right - 3, cy + 1), 3)
+        pygame.draw.circle(surface, (250, 240, 210), (cx - 4, inner.top + 4), 3)
+        pygame.draw.circle(surface, (250, 240, 210), (cx + 4, inner.top + 4), 3)
     elif cat == "attach":
         # 配件:导轨 + 镜筒
         pygame.draw.rect(surface, (30, 30, 34),
@@ -246,6 +257,12 @@ def item_info_lines(item):
         else:
             rw, rh = item.roll_size()
             sub.append(f"右键卷起:占格 {d['w']}×{d['h']} → {rw}×{rh}")
+    elif item.cat == "kit":
+        import mystery      # 局部导入:uikit 是被最多模块引用的底层件,别拖出环
+        sub.append(f"打开后得到:{mystery.kit_summary(item.iid)}")
+        sub.append(f"一整套 {len(mystery.kit_items(item.iid))} 件:"
+                   "满配武器 + 6 级甲/头盔 + 背包 + 弹药 + 药")
+        sub.append("★ 电脑右键 / 手机长按后点「打开」")
     elif item.cat == "misc":
         sub.append(f"杂物 · 价值 {fmt_rub(d['price'])}")
         if item.iid == "doc":
@@ -286,7 +303,8 @@ class HoldInfo:
     """触屏长按提示:按住物品 0.45s 弹出信息面板;指头移动超过阈值即取消。
 
     用法:按下时 press(pos),移动时 move(pos),抬起时 consume_release(),
-    每帧 update(dt, query)。query(pos) -> (item, rotate_cb) 或 None。
+    每帧 update(dt, query)。query(pos) -> (item, action_cb) 或 None。
+    面板下方按钮的文案按物品类型变(旋转 / 卷起展开 / 打开全装包)。
     """
     DELAY = 0.45
     MOVE_TOL = 14
@@ -300,10 +318,11 @@ class HoldInfo:
         self.pos = None
         self.fired = False
         self.item = None
-        self.rotate_cb = None
+        self.action_cb = None
+        self.btn_label = None
         self.lines = None
         self.rect = None
-        self.rotate_rect = None
+        self.action_rect = None
 
     def press(self, pos):
         self.reset()
@@ -333,10 +352,11 @@ class HoldInfo:
             self.holding = False           # 没按在物品上:安静取消
             return
         self.fired = True
-        self.item, self.rotate_cb = got
+        self.item, self.action_cb = got
+        self.btn_label = hold_button_label(self.item)
         self.lines = item_info_lines(self.item)
-        self.rect, self.rotate_rect = hold_layout(self.lines, self.pos,
-                                                  self.rotate_cb is not None)
+        self.rect, self.action_rect = hold_layout(self.lines, self.pos,
+                                                  self.btn_label is not None)
 
     def active(self):
         return self.fired and self.rect is not None and self.item is not None
@@ -345,25 +365,36 @@ class HoldInfo:
         self.reset()
 
 
-def hold_layout(lines, pos, has_rotate):
-    """长按信息面板布局:返回 (面板 Rect, 旋转按钮 Rect 或 None)。"""
+def hold_button_label(item):
+    """长按面板下方按钮的文案(None = 这个物品没有额外动作)。"""
+    if item is None:
+        return None
+    if item.cat == "kit":
+        return "打开全装包"
+    if item.cat == "pack":
+        return "卷起 / 展开"
+    return "旋转(横 / 竖互换)"
+
+
+def hold_layout(lines, pos, has_action):
+    """长按信息面板布局:返回 (面板 Rect, 动作按钮 Rect 或 None)。"""
     from settings import W, H
     f = get_font(15)
     th = sum(f.size(ln)[1] for ln in lines) + 14
     tw = max(f.size(ln)[0] for ln in lines) + 20
-    btn_h = 40 if has_rotate else 0
+    btn_h = 40 if has_action else 0
     total_h = th + btn_h
     x = max(8, min(pos[0] - tw // 2, W - tw - 8))
     y = pos[1] - total_h - 18
     if y < 8:
         y = min(H - total_h - 8, pos[1] + 20)
     rect = pygame.Rect(x, y, tw, total_h)
-    btn = pygame.Rect(x + 10, y + th + 4, tw - 20, 30) if has_rotate else None
+    btn = pygame.Rect(x + 10, y + th + 4, tw - 20, 30) if has_action else None
     return rect, btn
 
 
 def draw_hold(surface, hold):
-    """绘制长按信息面板(信息行 + 可选旋转按钮)。"""
+    """绘制长按信息面板(信息行 + 可选动作按钮)。"""
     if hold is None or not hold.active():
         return
     rect = hold.rect
@@ -377,5 +408,5 @@ def draw_hold(surface, hold):
         t = f.render(ln, True, COL["accent"] if i == 0 else COL["text"])
         surface.blit(t, (rect.x + 10, yy))
         yy += f.size(ln)[1]
-    if hold.rotate_rect is not None:
-        draw_button(surface, hold.rotate_rect, "旋转(横 / 竖互换)", small=True)
+    if hold.action_rect is not None:
+        draw_button(surface, hold.action_rect, hold.btn_label or "确定", small=True)

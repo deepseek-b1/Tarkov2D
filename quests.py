@@ -145,8 +145,8 @@ def out_text(entry):
     return " + ".join(f"{ITEMS[iid]['name']}×{n}" for iid, n in entry["out"])
 
 
-def _consume(container, iid, n):
-    """从容器里扣掉 n 个某物品,返回实际扣掉的数量。"""
+def consume(container, iid, n):
+    """从容器里扣掉 n 个某物品,返回实际扣掉的数量(交货类操作共用)。"""
     left = n
     for pl in list(container.items):
         if left <= 0:
@@ -182,8 +182,8 @@ def barter(sd, entry):
         outs.append(iid)
     # 再从仓库/背包扣材料
     for iid, n in entry["need"]:
-        left = n - _consume(stash, iid, n)
+        left = n - consume(stash, iid, n)
         if left > 0:
-            _consume(bag, iid, left)
+            consume(bag, iid, left)
     sd.stash, sd.bag = stash, bag
     return True, f"交货完成:交出 {need_text(entry)},拿到 {out_text(entry)}"
