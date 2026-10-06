@@ -4307,7 +4307,7 @@ def run():
     def t_coop():
         """双人合作:同一台电脑两人玩(P2 键盘 + 自动瞄准 + 自动搜刮)。"""
         from game import Game
-        from settings import W as SW, H as SH, COOP, PLAYER
+        from settings import W as SW, H as SH, COOP, PLAYER, EXTRACT_TIME
         import coop as coop_mod
         import raid as raid_mod
         screen = pygame.display.set_mode((SW, SH))
@@ -4354,7 +4354,7 @@ def run():
         d = math.hypot(p2.x - r.player.x, p2.y - r.player.y)
         assert 20 < d < 260, f"P2 应该出生在 P1 旁边:{d}"
         assert r.players() == (r.player, r.player2)
-        assert len(r.alive_players()) == 2
+        assert len(r.active_players()) == 2
         assert "P2" in coop_mod.key_hint() and "自动瞄准" in coop_mod.key_hint()
         assert "↑" in coop_mod.key_hint(short=True)
         assert coop_mod.key_hint() is coop_mod.key_hint(), "提示串要缓存(HUD 每帧用)"
@@ -4389,11 +4389,12 @@ def run():
         s.x, s.y = 1350.0, 1000.0
         tgt, see = r.threat_for(s)
         assert tgt is r.player and see, (tgt, see)   # 50 < 350 -> 改打 P1
-        # 全倒下时不该崩
-        r.player.dead = True
-        r.player2.dead = True
+        # 全倒下时不该崩(倒下的人 dead + out 都置位,和 player_down 一致)
+        r.player.dead = r.player.out = True
+        r.player2.dead = r.player2.out = True
         assert r.seek_player(0, 0) is r.player
         r.player.dead = r.player2.dead = False
+        r.player.out = r.player2.out = False
         # 几何可见性:真的用视线判定 P2
         found = False
         for ox, oy in ((80, 0), (-80, 0), (0, 80), (0, -80),
@@ -4486,7 +4487,8 @@ def run():
         assert r.result["coop"] and r.result["p2_dead"]
         g.draw(screen)                 # 阵亡结算页(双人)
         g.to_hideout()
-        # 9) 撤离结算:两人背包里的战利品并进仓库,配发装备回收
+        # 9) 各自撤离:P1 先撤(战利品立刻进仓库、人退出战场),P2 继续打;
+        #    P2 再撤才结算 —— 两人不是一起被带走
         g.save = save_mod.reset_data()
         g.save.seen_intro = True
         g.save.mode = "raid"
@@ -4501,13 +4503,52 @@ def run():
             it = Item("gold")
             bag.add_item(it)
             r._log_gained(it)
-        r.player2.armor = None
-        r.player2.take_damage(9999, r)          # P2 倒下,P1 撤离
+        zone = r.map.extracts[0][1]
+        # P1 走进撤离点站 3 秒
+        r.player.x, r.player.y = zone.centerx, zone.centery
+        for _ in range(int(60 * (EXTRACT_TIME + 0.6))):
+            r.update(1 / 60, [])
+            if r.player.extracted or r.over:
+                break
+        assert r.player.extracted, "P1 站满撤离点就该撤出去"
+        assert not r.over, "P1 撤了,P2 还在场上 —— 不能一起结算"
+        assert r.player.out and not r.player2.out
+        assert r.active_players() == (r.player2,)
+        assert len(r.fog_polys) == 1, "视野多边形只该有还在场上的那位的"
+        assert g.save.stash.item_count() == stash0 + 1, "P1 那份该立刻进仓库"
+        assert r.result is None
+        # 撤出去的 P1 不吃伤害、不再被敌人选为目标、按键也不再生效
+        hp0 = r.player.hp
+        r.player.take_damage(9999, r)
+        assert r.player.hp == hp0, "撤出去的人不该再吃伤害"
         assert not r.over
-        r.finish("extract")
-        assert r.result["kind"] == "extract"
-        assert r.result["banked"] == 2, r.result
-        assert g.save.stash.item_count() == stash0 + 2, "战利品要并进仓库"
+        # P2 继续搜刮:战利品还能进他的背包
+        lc2 = next(c for c in r.containers
+                   if c.kind in ("crate", "val", "med", "gun"))
+        lc2.container.items = []
+        it2 = Item("btc")
+        lc2.container.add_item(it2)
+        p2x = r.player2
+        p2x.x, p2x.y = lc2.rect.centerx, lc2.rect.centery
+        p2x.bag.clear()
+        r.p2_interact()
+        assert r.p2_take is not None, "P1 走了不影响 P2 自动搜刮"
+        for _ in range(60 * 30):
+            r.update(1 / 60, [])
+            if r.p2_take is None or r.over:
+                break
+        assert not lc2.container.items and p2x.bag.item_count() >= 1
+        # P2 也撤:这时候才结算,两人各自的结果都记在 result 里
+        r.player2.x, r.player2.y = zone.centerx, zone.centery
+        for _ in range(int(60 * (EXTRACT_TIME + 0.6))):
+            r.update(1 / 60, [])
+            if r.over:
+                break
+        assert r.over and r.result["kind"] == "extract", r.result
+        assert r.result["coop"]
+        assert dict(r.result["coop_status"]) == {"P1": "extract", "P2": "extract"}, \
+            r.result["coop_status"]
+        assert g.save.stash.item_count() >= stash0 + 2, "两人的战利品都要并进仓库"
         assert r.result["gained"] > 0
         assert int(g.save.stats["value"]) == before_value + r.result["gained"], \
             "撤离收益要记进统计(搜刮价值)"

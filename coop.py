@@ -82,39 +82,32 @@ def bag_value(kit):
     return kit.bag.total_value() if kit is not None else 0
 
 
-def bank_loot(sd, raid):
-    """撤离结算:把「这局捡到的」战利品并进仓库(配发的枪/甲/弹药不带走)。
+def bank_player(sd, raid, p):
+    """把某位玩家这一局捡到的战利品并进仓库(配发装备不带走)。
 
-    用 raid.loot_log(拾取时记 id,放回/丢弃会撤销)来过滤,免得每次撤离都把
-    系统配发的弹药药品一起存进仓库。P1 的背包就是 sd.bag,P2 用自己的 P2Kit;
-    在局内捡到并当场换上的枪/甲/头盔也算战利品。返回 (进仓库件数, 放不下件数)。
+    用 raid.loot_log(拾取时记 id,放回/丢弃会撤销)过滤,免得把系统配发的
+    弹药药品也一起存进仓库;局内捡到并当场换上的枪/甲/头盔也算战利品。
+    双人合作是**各自撤离**:谁撤出去就立刻结算他这一份(另一个继续打)。
+    返回 (进仓库件数, 放不下件数)。
     """
     ids = {e.get("id") for e in getattr(raid, "loot_log", ())}
     kept = lost = 0
-    holders = [sd.bag]
-    p2 = getattr(raid, "player2", None)
-    if p2 is not None:
-        holders.append(p2.bag)
-    for bag in holders:
-        for placed in list(bag.items):
-            if id(placed.item) not in ids:
-                continue
-            if sd.stash.add_item(placed.item):
-                bag.remove_placed(placed)
-                kept += 1
-            else:
-                lost += 1
-    # 局内捡到并换上的装备(不装在背包里,直接算战利品)
-    for p in (raid.player, p2):
-        if p is None:
+    for placed in list(p.bag.items):
+        if id(placed.item) not in ids:
             continue
-        for slot in ("weapon", "armor", "helmet"):
-            it = getattr(p, slot, None)
-            if it is None or id(it) not in ids:
-                continue
-            if sd.stash.add_item(it):
-                kept += 1
-            else:
-                lost += 1
-            setattr(p, slot, None)
+        if sd.stash.add_item(placed.item):
+            p.bag.remove_placed(placed)
+            kept += 1
+        else:
+            lost += 1
+    # 局内捡到并换上的装备(不在背包里,直接算战利品)
+    for slot in ("weapon", "armor", "helmet"):
+        it = getattr(p, slot, None)
+        if it is None or id(it) not in ids:
+            continue
+        if sd.stash.add_item(it):
+            kept += 1
+        else:
+            lost += 1
+        setattr(p, slot, None)
     return kept, lost

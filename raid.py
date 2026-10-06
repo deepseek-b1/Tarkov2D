@@ -166,6 +166,9 @@ class Player:
         self.reloading = False
         self.hurt_flash = 0.0
         self.dead = False         # 双人合作:倒下的玩家不再操作/不再被瞄准
+        self.extracted = False    # 已经撤出战场(双人合作:另一个还能继续打)
+        self.out = False          # 已离场(阵亡或已撤离)—— 操作/AI/伤害一律忽略
+        self.extract_gain = None  # 撤离那一刻的净收益(结算用)
 
     def fire_mode(self):
         """当前武器的射击模式(semi/burst/auto)。"""
@@ -177,7 +180,7 @@ class Player:
         return cycle_fire_mode(self.weapon)
 
     def take_damage(self, dmg, raid, rpg=False):
-        if self.dead:      # 双人合作里已经倒下的不再吃伤害
+        if self.out:       # 双人合作里已经倒下 / 已经撤离的不再吃伤害
             return
         if rpg:
             # 火箭弹:穿 6 级甲只掉一半血;<6 级甲直接阵亡
@@ -477,6 +480,8 @@ class Raid:
         self.over = False
         self.result = None
         self.extract_t = 0.0
+        self.banked = 0          # 双人合作:已进仓库的战利品件数(各自撤离时累加)
+        self.bank_lost = 0       # 仓库塞不下、只能丢掉的件数
         self.fire_edge = False
         self.braced = False       # 长按右键架枪(提升精度)
         self.ask_merge = False   # "整理弹药"确认框
@@ -493,6 +498,7 @@ class Raid:
         self.fog2_py = -1e9
         self.fog2_aim = 0.0
         self.fog_t = 0.0
+        self.fog_dirty = True      # 有人倒下/撤离 -> 视野多边形要重算
         self.fog_version = 0
         self._fog_drawn_ver = -1
         self.sight_vis2 = set()     # 能看见 P2 的敌人(双人合作)
@@ -533,8 +539,13 @@ class Raid:
                 return cx, cy
         return bx, by
 
-    def alive_players(self):
-        return tuple(p for p in self.players() if not p.dead)
+    def active_players(self):
+        """还在场上的人(没倒下、也没撤出去)。
+
+        双人合作是**各自撤离**:P1 撤出去以后 P2 还要继续打,所以"撤离"和
+        "阵亡"一样要从场上剔掉 —— 镜头、视野、敌人选目标、子弹判定都用它。
+        """
+        return tuple(p for p in self.players() if not p.out)
 
     def p_is_p2(self, p):
         return self.player2 is not None and p is self.player2
@@ -542,10 +553,15 @@ class Raid:
     def player_name(self, p):
         return "P2" if self.p_is_p2(p) else "P1"
 
+    def p_start_value(self, p):
+        """该玩家进局时的装备总值(净收益快照基准)。"""
+        return self.p2_start_value if self.p_is_p2(p) else self.start_value
+
     def nearest_player_d2(self, x, y):
         """(x, y) 到最近玩家的距离²(守军 AI 的远景降级判定用)。"""
+        pool = self.active_players() or self.players()
         best = 1e18
-        for p in self.players():
+        for p in pool:
             dx = p.x - x
             dy = p.y - y
             d2 = dx * dx + dy * dy
@@ -554,18 +570,18 @@ class Raid:
         return best
 
     def seek_player(self, x, y):
-        """离 (x, y) 最近的活着的玩家(全倒下时给 P1)。"""
-        alive = self.alive_players()
-        if not alive:
+        """离 (x, y) 最近的还在场上的玩家(都没了就给 P1)。"""
+        pool = self.active_players()
+        if not pool:
             return self.player
-        return min(alive, key=lambda q: (q.x - x) ** 2 + (q.y - y) ** 2)
+        return min(pool, key=lambda q: (q.x - x) ** 2 + (q.y - y) ** 2)
 
     def cam_anchor(self):
-        """镜头跟随的锚点位置(双人 = 还活着的玩家的中点)。"""
+        """镜头跟随的锚点位置(双人 = 还在场上的玩家的中点)。"""
         if self.coop:
-            alive = self.alive_players() or (self.player,)
-            return (sum(q.x for q in alive) / len(alive),
-                    sum(q.y for q in alive) / len(alive))
+            pool = self.active_players() or self.players()
+            return (sum(q.x for q in pool) / len(pool),
+                    sum(q.y for q in pool) / len(pool))
         return self.player.x, self.player.y
 
     def can_revive(self, p):
@@ -581,14 +597,54 @@ class Raid:
             self.revive_used = True
 
     def player_down(self, p):
-        """玩家倒下:单人 = 直接结算;双人 = 只要还有一个活着就继续打。"""
+        """玩家倒下:单人 = 直接结算;双人 = 只要还有人在场上就继续打。"""
         p.dead = True
+        p.out = True
         p.hp = 0
-        if self.coop and self.alive_players():
+        self.fog_dirty = True
+        if self.coop and self.active_players():
             self.add_toast(f"{self.player_name(p)} 倒下了 —— 另一个人还在场上,"
                            "活下去把他那一份也带出去!", COL["bad"], 5.5)
             return
-        self.finish("death")
+        self._finish_when_cleared()
+
+    def player_extracted(self, p):
+        """一位玩家完成撤离:他这一份战利品立刻进仓库,人退出战场。
+
+        双人合作是各自撤离 —— 剩下的队友还能继续搜刮/战斗(不会一起被带走),
+        等两个人都撤离或倒下之后再统一结算。
+        """
+        p.extracted = True
+        p.out = True
+        self.fog_dirty = True
+        if p.extract_gain is None:
+            p.extract_gain = max(0, int(self._loadout_value(p)
+                                        - self.p_start_value(p)))
+        audio.play("extract")
+        if not self.coop:
+            # 单人:照旧只提示一声,战利品跟着装备一起带走(见 game.raid_finished)
+            self.add_toast("撤离成功!", COL["good"])
+            self.finish("extract")
+            return
+        kept, lost = coop_mod.bank_player(self.game.save, self, p)
+        self.banked += kept
+        self.bank_lost += lost
+        others = self.active_players()
+        msg = f"{self.player_name(p)} 撤离成功!战利品已进仓库({kept} 件)"
+        if others:
+            msg += f" —— {self.player_name(others[0])} 继续行动,按自己的节奏撤离"
+        self.add_toast(msg, COL["good"], 6.5)
+        if not others:
+            self._finish_when_cleared()
+
+    def _finish_when_cleared(self):
+        """场上没人了:只要有人撤出去过,这一局就算撤离成功(倒下那位丢装备)。"""
+        if self.over:
+            return
+        if any(q.extracted for q in self.players()):
+            self.finish("extract")
+        else:
+            self.finish("death")
 
     # ---------- 按键(双人时 P1 要让出 P2 独占的键) ----------
     def _p1_keys(self, action):
@@ -709,7 +765,7 @@ class Raid:
         """
         p = self.player
         p2 = self.player2
-        p2_alive = p2 is not None and not p2.dead
+        p2_alive = p2 is not None and not p2.out
         if force:
             do_poly = True
         else:
@@ -725,20 +781,21 @@ class Raid:
                         (p2.aim - self.fog2_aim + math.pi) % math.tau - math.pi) > 0.05
                 # 夜里 fog_polygon 恒为 None(不用 360° 视野多边形),
                 # 所以"首次"要用 light_shapes 判断 —— 否则每帧都会重建光照层
-                do_poly = moved or turned or not self.light_shapes
+                do_poly = moved or turned or self.fog_dirty or not self.light_shapes
             else:
-                do_poly = moved or not self.fog_polys
+                do_poly = moved or self.fog_dirty or not self.fog_polys
             if not do_poly and self.fog_t < FOG_VIS_REFRESH:
                 return
         if do_poly:
+            self.fog_dirty = False
             self.fog_polys = []
             self.light_shapes = []
             if self.dark:
-                for q in self.alive_players():
+                for q in self.active_players():
                     self.light_shapes.extend(self.night_light(q))
                 self.fog_polygon = None      # 夜里不用 360° 视野多边形
             else:
-                for q in self.alive_players():
+                for q in self.active_players():
                     self.fog_polys.append(
                         self.map.visibility_polygon(q.x, q.y, 560))
                 self.fog_polygon = self.fog_polys[0] if self.fog_polys else None
@@ -755,7 +812,7 @@ class Raid:
         los = self.map.los_clear
         dark = self.dark
         for i, q in enumerate(self.players()):
-            if q.dead:
+            if q.out:
                 continue
             qx, qy = q.x, q.y
             mine_sight = sight2 if i else sight
@@ -1287,7 +1344,7 @@ class Raid:
         view2 = scav.view2
         best, bd2 = None, view2
         for q in self.players():
-            if q.dead:
+            if q.out:
                 continue
             dx = q.x - scav.x
             dy = q.y - scav.y
@@ -1335,7 +1392,7 @@ class Raid:
                                       dmg if struct_dmg is None else struct_dmg,
                                       owner=owner)
         for q in self.players():
-            if q.dead:
+            if q.out:
                 continue
             if math.hypot(q.x - x, q.y - y) <= rad:
                 if friendly:
@@ -1432,7 +1489,7 @@ class Raid:
                     p0 = self.player
                     lim = PLAYER["radius"] + 2
                     for q in self.players():
-                        if q.dead:
+                        if q.out:
                             continue
                         dx = q.x - bx
                         dy = q.y - by
@@ -1475,7 +1532,7 @@ class Raid:
                 else:
                     lim = PLAYER["radius"] + 2
                     for q in self.players():
-                        if q.dead:
+                        if q.out:
                             continue
                         dx = q.x - bx
                         dy = q.y - by
@@ -2456,12 +2513,17 @@ class Raid:
         else:
             audio.play("death")
         # 用"撤离时装备总值 - 进局时装备总值"快照计算净收益,事件式记账
-        # 会在放回物品/部分堆叠转移时失真
-        gained = max(0, int(self._loadout_value() - self.start_value))
+        # 会在放回物品/部分堆叠转移时失真。
+        # 双人合作:各自撤离,谁撤出去就算谁的净收益(撤离那一刻已经存过一份)
         if self.coop and self.player2 is not None:
-            # 双人合作:P2 背包里的战利品也是这局的收益
-            gained += max(0, int(self._loadout_value(self.player2)
-                                 - self.p2_start_value))
+            gained = sum(max(0, int(q.extract_gain or 0))
+                         for q in self.players() if q.extracted)
+            for q in self.players():
+                if not q.out:      # 还在场上的(理论上不会),按现值算
+                    gained += max(0, int(self._loadout_value(q)
+                                         - self.p_start_value(q)))
+        else:
+            gained = max(0, int(self._loadout_value() - self.start_value))
         rescued = sum(1 for h in self.hostages if h.rescued)
         objs_done = sum(1 for o in self.objectives if o.destroyed)
         if self.mode == "hostage":
@@ -2470,12 +2532,24 @@ class Raid:
             mission = self.objectives_done()
         else:
             mission = True
+        # 双人合作:每人各自的结局(撤离 / 阵亡 / 没撤出来),结算页照这个显示
+        coop_status = []
+        if self.coop:
+            for q in self.players():
+                if q.extracted:
+                    coop_status.append((self.player_name(q), "extract"))
+                elif q.dead:
+                    coop_status.append((self.player_name(q), "dead"))
+                else:
+                    coop_status.append((self.player_name(q), "mia"))
         self.result = dict(kind=kind, kills=self.kills, gained=gained,
                            n=len(self.loot_log), time=RAID_TIME - self.time_left,
                            entries=self.loot_log,
                            mode=self.mode, rescued=rescued,
                            hostages=len(self.hostages),
                            coop=self.coop,
+                           coop_status=coop_status,
+                           banked=self.banked, bank_lost=self.bank_lost,
                            p2_dead=(self.player2 is not None and self.player2.dead),
                            objectives=len(self.objectives),
                            objectives_done=objs_done,
@@ -2575,6 +2649,9 @@ class Raid:
                         self.paused = True
                 elif self.paused:
                     continue   # 暂停中其余按键不生效,防止"暂停+背包"死状态
+                elif p.out:
+                    # 双人合作里 P1 已经倒下/撤离:只能看,不能操作(ESC 仍可用)
+                    continue
                 elif bindings.key_matches(ev.key, sd, "bag"):
                     self.loot_target = None
                     self.ask_merge = False
@@ -2635,8 +2712,8 @@ class Raid:
         if self.touch_mode:
             vx, vy = self.touch.move_axis()
             walking = False
-        elif p.dead:
-            vx, vy, walking = 0.0, 0.0, False      # 双人合作:P1 倒下后只操作 P2
+        elif p.out:
+            vx, vy, walking = 0.0, 0.0, False      # 双人合作:P1 倒下/已撤离后只操作 P2
         else:
             vx = float(self.key_down(keys, p, "right")
                        - self.key_down(keys, p, "left"))
@@ -2670,7 +2747,7 @@ class Raid:
                 p.aim = math.atan2(self.aim_locked.y - p.y, self.aim_locked.x - p.x)
             elif moving:
                 p.aim = math.atan2(vy, vx)
-        elif p.dead:
+        elif p.out:
             self.aim_locked = None
         else:
             self.aim_locked = None
@@ -2719,7 +2796,7 @@ class Raid:
             self.braced = bool(pygame.mouse.get_pressed()[2])   # 右键=架枪
         world_active = not (self.inv_open or self.loot_target is not None
                             or self.dialogue is not None)
-        if world_active and not p.dead:
+        if world_active and not p.out:
             self.try_fire(held)
         self.fire_edge = False
         # 双人合作:P2 移动/自动瞄准/开火(键盘)
@@ -2731,17 +2808,19 @@ class Raid:
         if self.coop and self.player2 is not None:
             self._update_weapon_timers(self.player2, dt)
 
-        # 撤离引导(双人合作:两位玩家各自累积,任意一人站满就带队撤离)
-        self.extract_t, ready = self._extract_tick(p, self.extract_t, dt,
-                                                   moving=moving)
-        if self.coop and self.player2 is not None and not self.player2.dead:
+        # 撤离引导(双人合作:**各自撤离** —— 谁站满谁走,队友还能继续打)
+        if not p.out:
+            self.extract_t, ready = self._extract_tick(p, self.extract_t, dt,
+                                                       moving=moving)
+            if ready:
+                self.player_extracted(p)
+        p2 = self.player2
+        if p2 is not None and not p2.out:
             self.p2_extract_t, ready2 = self._extract_tick(
-                self.player2, self.p2_extract_t, dt)
-        else:
-            ready2 = False
-        if ready or ready2:
-            self.add_toast("撤离成功!", COL["good"])
-            self.finish("extract")
+                p2, self.p2_extract_t, dt)
+            if ready2:
+                self.player_extracted(p2)
+        if self.over:
             return
 
         # 迷雾/可见性缓存刷新(敌人 AI 的 threat_for/sees_player 都读它)
@@ -2754,7 +2833,7 @@ class Raid:
         self.frame += 1
         camx, camy = self.cam
         reach = 0.0
-        for q in self.players():
+        for q in (self.active_players() or self.players()):
             pxs = q.x - camx
             pys = q.y - camy
             wx = W - pxs
@@ -2826,7 +2905,7 @@ class Raid:
     def _update_p2(self, dt, keys):
         """P2:方向键移动 + 自动瞄准最近可见敌人 + 动作键(全程不用鼠标)。"""
         p2 = self.player2
-        if p2 is None or p2.dead or self.over:
+        if p2 is None or p2.out or self.over:
             return
         # 移动(换弹时减速;重武器换弹不能动)
         vx = float(self.key_down(keys, p2, "right")
@@ -2857,7 +2936,7 @@ class Raid:
 
     def _p2_key(self, key):
         """P2 按下的动作键(不认识的键直接忽略)。"""
-        if self.player2 is None or self.player2.dead:
+        if self.player2 is None or self.player2.out:
             return
         k = COOP["keys"]
         if key in k["fire"]:
@@ -2936,7 +3015,7 @@ class Raid:
         if tk is None or self.over:
             return
         p2 = self.player2
-        if p2 is None or p2.dead:
+        if p2 is None or p2.out:
             self.p2_take = None
             return
         lc = tk["lc"]
@@ -2970,7 +3049,7 @@ class Raid:
     def p2_quick_heal(self):
         """P2 打药:直接用手上最合适的那件(双人里 P2 不开背包,所以不读条)。"""
         p2 = self.player2
-        if p2 is None or p2.dead:
+        if p2 is None or p2.out:
             return
         if p2.hp >= p2.max_hp:
             self.add_toast("P2:生命值已满", COL["text_dim"], 1.8)

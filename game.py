@@ -5,7 +5,6 @@ import pygame
 import assault
 import audio
 import bindings
-import coop as coop_mod
 import mystery
 import quests
 import save as save_mod
@@ -154,14 +153,16 @@ class Game:
                 result["banked"] = kept
                 result["bank_lost"] = lost
             if coop_run:
-                kept, lost = coop_mod.bank_loot(sd, self.raid)
-                result["banked"] = kept
-                result["bank_lost"] = lost
+                # 战利品在「各自撤离」那一刻就已经进仓库了(见 raid.player_extracted),
+                # 这里只记收益;谁背包丢了看结算页的每人结果
                 sd.stats["value"] += result["gained"]
-        else:
+        elif not coop_run:
             sd.stats["deaths"] += 1
-            if not assault_run and not story_run and not coop_run:
+            if not assault_run and not story_run:
                 sd.wipe_loadout()
+        if coop_run and self.raid is not None:
+            # 双人合作按人数记阵亡(有人撤出去过这局算 extract,倒下的单独累加)
+            sd.stats["deaths"] += sum(1 for q in self.raid.players() if q.dead)
         if assault_run or coop_run:
             assault.restore(sd, self.assault_snap)
             self.assault_snap = None

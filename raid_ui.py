@@ -600,8 +600,8 @@ def draw_raid(raid, screen):
                              (lx + dx * rr, ly + dy * rr),
                              (lx + dx * (rr + 7), ly + dy * (rr + 7)), 2)
 
-    # 撤离引导进度
-    if raid.extract_t > 0:
+    # 撤离引导进度(已经撤出去/倒下的 P1 不用再画)
+    if raid.extract_t > 0 and not p.out:
         ratio = min(1.0, raid.extract_t / EXTRACT_TIME)
         bw = 90
         bx = px - bw / 2
@@ -639,7 +639,7 @@ def draw_raid(raid, screen):
         screen.blit(t, t.get_rect(center=(px, by - 12)))
 
     # 双人合作:P2 的撤离/自动搜刮进度条(条在 P2 头顶)
-    if p2 is not None and not p2.dead:
+    if p2 is not None and not p2.out:
         p2x, p2y = p2.x + ox, p2.y + oy
         if getattr(raid, "p2_extract_t", 0.0) > 0:
             _bar(screen, p2x, p2y - 34,
@@ -773,7 +773,7 @@ def dialogue_layout(raid):
 
 
 def _edge_arrow(screen, raid, name, r, ox, oy):
-    # 以镜头锚点为基准(双人合作 = 还活着的玩家的中点),和镜头保持一致
+    # 以镜头锚点为基准(双人合作 = 还在场上的玩家的中点),和镜头保持一致
     ax_w, ay_w = raid.cam_anchor()
     sx, sy = r.centerx - raid.cam[0], r.centery - raid.cam[1]
     dist = math.hypot(r.centerx - ax_w, r.centery - ay_w)
@@ -807,61 +807,78 @@ def _edge_arrow(screen, raid, name, r, ox, oy):
 
 def _draw_hud(raid, screen):
     p = raid.player
-    # HP
-    hp_r = pygame.Rect(24, H - 66, 260, 22)
-    pygame.draw.rect(screen, COL["hp_bg"], hp_r, border_radius=4)
-    pygame.draw.rect(screen, COL["hp"], (hp_r.x, hp_r.y,
-                                         hp_r.w * p.hp / p.max_hp, hp_r.h), border_radius=4)
-    pygame.draw.rect(screen, COL["border"], hp_r, 2, border_radius=4)
-    f = get_font(15, bold=True)
-    t = f.render(f"HP {int(p.hp)}/{p.max_hp}", True, (255, 255, 255))
-    screen.blit(t, t.get_rect(center=hp_r.center))
-    if p.armor is not None:
-        ad = p.armor.def_
-        txt = f"护甲:{p.armor.name}"
-        if ad.get("level"):
-            txt += f"  Lv{ad['level']}"
-        txt += f"  -{int(ad['reduce'] * 100)}%"
-        if ad.get("revive"):
-            txt += "  自救:已用" if raid.revive_used else "  自救:可用"
-        col = COL["text_dim"] if not (ad.get("revive") and not raid.revive_used) \
-            else COL["good"]
-        t = get_font(13).render(txt, True, col)
-        screen.blit(t, (26, H - 40))
-    # 快捷打药提示(血量过半以下且有医疗品时显示;键名跟玩家改键走)
-    if p.hp < p.max_hp * 0.5 and any(pl.item.cat == "med" for pl in p.bag.items):
-        t = get_font(14, bold=True).render(
-            "按 %s 打药(读条 1~3 秒)" % bindings.label_for(raid.game.save, "heal"),
-            True, COL["good"])
-        screen.blit(t, (26, H - 92))
+    # 双人合作里 P1 已经撤离/倒下:底部这些是自己的旧状态,换成"观战中"提示
+    watcher = getattr(raid, "coop", False) and p.out and not raid.over
+    if watcher:
+        txt = ("P1 已撤离 · 观战中(战利品已进仓库)" if p.extracted
+               else "P1 已阵亡 · 观战中(把 P2 带出去就能保住这局搜到的)")
+        t = get_font(18, bold=True).render(
+            txt, True, COL["good"] if p.extracted else COL["bad"])
+        bg = _hud_bg(t.get_width() + 20, 32, (10, 12, 14, 180))
+        screen.blit(bg, (24, H - 72))
+        screen.blit(t, (34, H - 66))
+    else:
+        # HP
+        hp_r = pygame.Rect(24, H - 66, 260, 22)
+        pygame.draw.rect(screen, COL["hp_bg"], hp_r, border_radius=4)
+        pygame.draw.rect(screen, COL["hp"], (hp_r.x, hp_r.y,
+                                             hp_r.w * p.hp / p.max_hp, hp_r.h),
+                         border_radius=4)
+        pygame.draw.rect(screen, COL["border"], hp_r, 2, border_radius=4)
+        f = get_font(15, bold=True)
+        t = f.render(f"HP {int(p.hp)}/{p.max_hp}", True, (255, 255, 255))
+        screen.blit(t, t.get_rect(center=hp_r.center))
+        if p.armor is not None:
+            ad = p.armor.def_
+            txt = f"护甲:{p.armor.name}"
+            if ad.get("level"):
+                txt += f"  Lv{ad['level']}"
+            txt += f"  -{int(ad['reduce'] * 100)}%"
+            if ad.get("revive"):
+                txt += "  自救:已用" if raid.revive_used else "  自救:可用"
+            col = COL["text_dim"] if not (ad.get("revive")
+                                          and not raid.revive_used) else COL["good"]
+            t = get_font(13).render(txt, True, col)
+            screen.blit(t, (26, H - 40))
+        # 快捷打药提示(血量过半以下且有医疗品时显示;键名跟玩家改键走)
+        if p.hp < p.max_hp * 0.5 \
+                and any(pl.item.cat == "med" for pl in p.bag.items):
+            t = get_font(14, bold=True).render(
+                "按 %s 打药(读条 1~3 秒)" % bindings.label_for(raid.game.save, "heal"),
+                True, COL["good"])
+            screen.blit(t, (26, H - 92))
 
-    # 武器/弹药
-    wname = p.weapon.name if p.weapon else "未携带武器"
+    # 武器/弹药(观战时画的是还在场上的 P2 的,免得看着像自己还能开火)
+    shown = raid.player2 if (watcher and raid.player2 is not None) else p
+    wname = shown.weapon.name if shown.weapon else "未携带武器"
+    if watcher:
+        wname = "P2 的 " + wname
     f16 = get_font(16, bold=True)
     t = f16.render(wname, True, COL["text"])
     screen.blit(t, (W - t.get_width() - 26, H - 92))
-    if p.weapon:
-        d = p.weapon.def_
+    if shown.weapon:
+        d = shown.weapon.def_
         col = COL["accent"]
         big = get_font(30, bold=True).render(
-            f"{p.weapon.state.get('mag', 0)} / {p.reserve_count()}", True, col)
+            f"{shown.weapon.state.get('mag', 0)} / {shown.reserve_count()}", True, col)
         screen.blit(big, (W - big.get_width() - 26, H - 64))
         # 射击模式(按 G / 手机「模式」按钮切换):全自动武器才有得切
-        mode = weapon_fire_mode(p.weapon)
+        mode = weapon_fire_mode(shown.weapon)
         mcol = {"semi": COL["text_dim"], "burst": (255, 190, 90),
                 "auto": COL["good"]}.get(mode, COL["text_dim"])
         mtext = fire_mode_name(mode)
-        if len(weapon_fire_modes(p.weapon)) > 1 and not getattr(raid, "touch_mode", False):
+        if len(weapon_fire_modes(shown.weapon)) > 1 and not watcher \
+                and not getattr(raid, "touch_mode", False):
             mtext += "(%s 切)" % bindings.label_for(raid.game.save, "firemode")
         mt = get_font(16, bold=True).render(mtext, True, mcol)
         screen.blit(mt, (W - big.get_width() - 26 - mt.get_width() - 16, H - 58))
         cal = get_font(13).render(ITEMS_CAL(d), True, COL["text_dim"])
         screen.blit(cal, (W - cal.get_width() - 26, H - 30))
-        if p.reloading:
+        if shown is p and p.reloading:
             rt = get_font(15, bold=True).render("装填中…", True, (255, 200, 90))
             screen.blit(rt, (W - rt.get_width() - 26, H - 118))
         # 架枪(长按右键)提示:非狙击枪都可架枪,M139 架枪时不能移动
-        if d.get("spread_braced") is not None:
+        if d.get("spread_braced") is not None and not watcher:
             braced = getattr(raid, "braced", False)
             immo = d.get("braced_immobile")
             if braced:
@@ -963,9 +980,17 @@ def _draw_hud(raid, screen):
         q = raid.player2
         col = COOP["color"]
         y0 = 44 if not getattr(raid, "dark", False) else 84
-        head = "P2 合作队友" + ("  阵亡" if q.dead else "")
+        if q.extracted:
+            state, scol = "  已撤离", COL["good"]
+        elif q.dead:
+            state, scol = "  阵亡", (200, 120, 110)
+        else:
+            state, scol = "", col
+        head = "P2 合作队友" + state
         hp_txt = f"HP {max(0, int(q.hp))}/{q.max_hp}"
-        if q.weapon is not None:
+        if q.out:
+            wtxt = "已退出战场" if q.extracted else "倒地"
+        elif q.weapon is not None:
             wtxt = (f"{q.weapon.name}  {q.weapon.state.get('mag', 0)}"
                     f" / {q.reserve_count()}")
         else:
@@ -973,12 +998,11 @@ def _draw_hud(raid, screen):
         hint = coop_mod.key_hint(short=True)
         bw = 430
         screen.blit(_hud_bg(bw, 82, (10, 12, 14, 178)), (20, y0))
-        t = get_font(16, bold=True).render(head, True,
-                                           (200, 120, 110) if q.dead else col)
+        t = get_font(16, bold=True).render(head, True, scol)
         screen.blit(t, (30, y0 + 4))
         bar = pygame.Rect(30, y0 + 26, 190, 14)
         pygame.draw.rect(screen, COL["hp_bg"], bar, border_radius=4)
-        if not q.dead and q.hp > 0:
+        if not q.out and q.hp > 0:
             pygame.draw.rect(screen, COL["hp"],
                              (bar.x, bar.y, bar.w * max(0.0, q.hp / q.max_hp),
                               bar.h), border_radius=4)
@@ -995,8 +1019,26 @@ def _draw_hud(raid, screen):
         screen.blit(get_font(13).render(hint, True, COL["text_dim"]),
                     (30, y0 + 50))
 
-    # 提示(交互键名跟玩家改键走)
-    if not (raid.inv_open or raid.loot_target or raid.paused or raid.over):
+    # 双人合作:有人先撤出去了 —— 提示另一位还能继续(各自撤离,不一起走)
+    if getattr(raid, "coop", False) and not raid.over:
+        rest = [q for q in raid.players() if not q.out]
+        msg = None
+        if raid.player.extracted and rest:
+            msg = ("P1 已撤离 · 战利品已进仓库 —— 现在看的是 P2,"
+                   "等他撤离或倒下后统一结算")
+        elif raid.player2 is not None and raid.player2.extracted and rest:
+            msg = "P2 已撤离 · 他那份已进仓库 —— 你可以继续搜刮,再自己找撤离点"
+        elif raid.player.dead and rest:
+            msg = "P1 已阵亡 —— 现在看的是 P2,把他带出去就能保住这一局搜到的"
+        if msg:
+            t = get_font(17, bold=True).render(msg, True, COL["accent"])
+            bg = _hud_bg(t.get_width() + 20, 30, (10, 10, 12, 190))
+            screen.blit(bg, (W // 2 - bg.get_width() // 2, H - 156))
+            screen.blit(t, (W // 2 - t.get_width() // 2, H - 147))
+
+    # 提示(交互键名跟玩家改键走;已经撤出去/倒下的 P1 不再提示)
+    if not (raid.inv_open or raid.loot_target or raid.paused or raid.over) \
+            and not p.out:
         prompt = None
         ik = bindings.label_for(raid.game.save, "interact")
         for name, r in raid.map.extracts:
@@ -1387,8 +1429,10 @@ def _draw_result(raid, screen):
               "death": ("你已阵亡 — 带入装备已丢失", COL["bad"]),
               "mia": ("行动超时 — 按阵亡处理", COL["bad"])}
     title, col = titles[r["kind"]]
-    if r.get("coop") and r["kind"] != "extract":
+    if r.get("coop") and r["kind"] == "death":
         title = "两人都倒下了 — 这一局搜到的都丢了"
+    elif r.get("coop") and r["kind"] == "mia":
+        title = "行动超时 — 还在场里的那位没撤出来"
     t = get_font(42, bold=True).render(title, True, col)
     screen.blit(t, t.get_rect(center=(W // 2, 150)))
 
@@ -1403,15 +1447,19 @@ def _draw_result(raid, screen):
     t = get_font(20).render(line, True, COL["text"])
     screen.blit(t, t.get_rect(center=(W // 2, 210)))
     if r.get("coop"):
-        # 双人合作结算:P2 的死活 + 战利品去向
-        if r["kind"] == "extract":
-            l2 = ("P2 也活着撤出来了" if not r.get("p2_dead")
-                  else "P2 阵亡 —— 他背包里的那份丢了")
-            if r.get("banked") is not None:
-                l2 += f"(战利品进仓库 {r['banked']} 件"
-                l2 += (f",放不下 {r['bank_lost']} 件)" if r.get("bank_lost") else ")")
-        else:
-            l2 = "P2 阵亡" if r.get("p2_dead") else "行动失败"
+        # 双人合作结算:两人各自的结果(各自撤离,先撤的那个战利品已经进仓库了)
+        parts = []
+        for name, state in (r.get("coop_status") or []):
+            if state == "extract":
+                parts.append(f"{name} 已撤离")
+            elif state == "dead":
+                parts.append(f"{name} 阵亡(他背包里的丢了)")
+            else:
+                parts.append(f"{name} 没撤出来(背包里的丢了)")
+        l2 = " · ".join(parts) if parts else ""
+        if r["kind"] == "extract" and r.get("banked") is not None:
+            l2 += f"(战利品进仓库 {r['banked']} 件"
+            l2 += (f",放不下 {r['bank_lost']} 件)" if r.get("bank_lost") else ")")
         t = get_font(16, bold=True).render(l2, True, COL["accent"])
         screen.blit(t, t.get_rect(center=(W // 2, 242)))
     if r.get("mode") == "hostage":
