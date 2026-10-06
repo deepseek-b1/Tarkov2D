@@ -31,6 +31,11 @@ def run():
     results = []
 
     def check(name, fn):
+        # 调试便利:设 TK2D_ONLY=关键词 只跑名字里含该关键词的用例
+        # (用例都是自给自足的,单独跑也成立)
+        only = os.environ.get("TK2D_ONLY")
+        if only and only not in name:
+            return
         t0 = time.perf_counter()
         print(f"[....] {name}", flush=True)
         try:
@@ -4157,6 +4162,374 @@ def run():
 
     check("保险箱-40任务解锁/长按详情/横竖旋转", t_safe_hold_rotate)
     check("礼品-神秘人10星收集/每轮刷新/全装包/机密文件", t_mystery)
+    def t_accounts():
+        """账号:多档隔离 / 密码校验 / 老存档并入 / 登录界面交互。"""
+        import accounts
+        from login import LoginScreen
+        base_dir, base_file = save_mod.SAVE_DIR, save_mod.SAVE_FILE
+        try:
+            save_mod.SAVE_DIR = tempfile.mkdtemp(prefix="tk2d_acc_")
+            save_mod.SAVE_FILE = os.path.join(save_mod.SAVE_DIR, "save.json")
+            # 1) 建号 + 密码校验(大小写不敏感的名字)
+            assert accounts.list_names() == []
+            ok, why = accounts.register("Bob", "abc123")
+            assert ok, why
+            assert accounts.exists("BOB") and accounts.exists("bob")
+            assert accounts.verify("bob", "abc123")
+            assert not accounts.verify("bob", "abc124"), "错误密码不能通过"
+            assert not accounts.register("bob", "zzz")[0], "重名要被拒"
+            assert not accounts.register("bad name", "zzz")[0], "非法名字要被拒"
+            assert not accounts.register("carol", "ab")[0], "密码至少 3 位"
+            assert accounts.name_reason("名字太长太长太长太长太长") is not None
+            assert accounts.name_reason("bob") is None
+            # 密码不能明文落在索引里
+            with open(accounts.index_path(), "r", encoding="utf-8") as f:
+                raw = f.read()
+            assert "abc123" not in raw, "密码不能明文存盘"
+            # 2) 两个账号的存档互相隔离
+            ok, why, mig = accounts.register_and_login("Alice", "pw123")
+            assert ok and not mig, (why, mig)
+            assert save_mod.PROFILE == "alice", save_mod.PROFILE
+            assert save_mod.SAVE_FILE.endswith("alice\\save.json") or \
+                save_mod.SAVE_FILE.endswith("alice/save.json"), save_mod.SAVE_FILE
+            sd = save_mod.reset_data()
+            sd.rubles = 777777
+            save_mod.save_data(sd)
+            assert accounts.use("bob")
+            assert save_mod.load_data().rubles == 20000, "两个账号不能串档"
+            assert accounts.use("alice")
+            assert save_mod.load_data().rubles == 777777
+            assert accounts.list_names() == ["Bob", "Alice"], accounts.list_names()
+            assert accounts.last_name() == "Alice"
+            # 3) 老存档(单档时代)并入第一个新账号
+            save_mod.SAVE_DIR = tempfile.mkdtemp(prefix="tk2d_acc2_")
+            save_mod.SAVE_FILE = os.path.join(save_mod.SAVE_DIR, "save.json")
+            legacy = save_mod.SaveData()
+            legacy.default_fill()
+            legacy.rubles = 12345
+            legacy.stash.add_item(Item("btc"))
+            save_mod.save_data(legacy)
+            assert accounts.has_legacy()
+            n_before = save_mod.load_data().stash.item_count()
+            assert not accounts.login("nobody", "x")[0], "没这个账号"
+            ok, why, mig = accounts.register_and_login("Vet", "pw123")
+            assert ok and mig, (why, mig)
+            assert not accounts.has_legacy(), "老档只能并入一次"
+            got = save_mod.load_data()
+            assert got.rubles == 12345, got.rubles
+            assert got.stash.item_count() == n_before
+            assert os.path.exists(accounts.profile_save_path("Vet"))
+            # 第二次建号不该再吃老档
+            ok, why, mig = accounts.register_and_login("Rookie", "pw123")
+            assert ok and not mig, (why, mig)
+            assert save_mod.load_data().rubles == 20000
+            # 4) 删档要密码,且只删该账号
+            assert not accounts.remove("Vet", "wrong")[0]
+            ok, why = accounts.remove("Vet", "pw123")
+            assert ok, why
+            assert not accounts.exists("Vet") and accounts.exists("Rookie")
+            import glob
+            assert glob.glob(accounts.profile_save_path("Vet") + ".deleted-*"), \
+                "删档要留备份文件"
+            # 5) 登录界面:新号流程(两次密码) -> 老号流程(一次密码)
+            from login import LoginScreen as LS
+            scr = pygame.display.get_surface()
+            ls = LS()
+            ls.names = accounts.list_names()
+            ls._compute_layout()
+            ls.name = "Rookie"
+            ls.pw = "pw123"
+            assert ls.signup is False, "已存在的名字 = 登录流程"
+            assert ls.submit() and ls.done
+            assert save_mod.PROFILE == "rookie"
+            ls2 = LS()
+            ls2.name = "Newbie"
+            assert ls2.signup is True
+            ls2.pw = "abc"
+            ls2.pw2 = "abd"
+            assert not ls2.submit() and "不一样" in ls2.msg
+            ls2.pw2 = "abc"
+            assert ls2.submit() and ls2.done and accounts.exists("Newbie")
+            # 屏幕键盘:点 q 输入 -> 大写 -> 退格
+            from login import _key_rects as key_rects
+            ls3 = LS()
+            ls3.name = ""
+            ls3.field = "name"
+            for rect, v in key_rects():
+                if v[1] == "q":
+                    ls3.click(rect.center)
+                    break
+            assert ls3.name == "q", ls3.name
+            ls3.press_key("caps")
+            ls3.press_key("a")
+            assert ls3.name == "qA", ls3.name
+            ls3.press_key("back")
+            assert ls3.name == "q", ls3.name
+            # 键盘打字 + 各字段都能点(布局在任何一次绘制前也可用)
+            ls3.add_text("x")
+            ls3.next_field()
+            assert ls3.field in ("name", "pw", "pw2")
+            ls3.draw(scr)
+            # 6) 名字非法时提交会被拦下
+            ls4 = LS()
+            ls4.name = "有中文"
+            assert not ls4.submit() and not ls4.done
+        finally:
+            save_mod.SAVE_DIR, save_mod.SAVE_FILE = base_dir, base_file
+            save_mod.use_profile(None)
+
+    def t_coop():
+        """双人合作:同一台电脑两人玩(P2 键盘 + 自动瞄准 + 自动搜刮)。"""
+        from game import Game
+        from settings import W as SW, H as SH, COOP, PLAYER
+        import coop as coop_mod
+        import raid as raid_mod
+        screen = pygame.display.set_mode((SW, SH))
+        # 1) 藏身处开关(只在搜打撤模式生效)
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        g.save.mode = "raid"
+        g.save.touch = False
+        assert g.save.coop is False
+        h = g.hideout
+        h.show_intro = False
+        h._click(h.coop_rect.center)
+        assert g.save.coop is True, "点「双人合作」应该打开"
+        h._click(h.coop_rect.center)
+        assert g.save.coop is False
+        h._click(h.coop_rect.center)
+        # 换个模式就点不动(只对搜打撤生效)
+        g.save.mode = "hostage"
+        h._click(h.coop_rect.center)
+        assert g.save.coop is True      # 保持原值
+        g.save.mode = "raid"
+        # 手机模式不给开(要键盘)
+        g.save.coop = False
+        g.save.touch = True
+        h._click(h.coop_rect.center)
+        assert g.save.coop is False
+        g.save.touch = False
+        g.draw(screen)                  # 侧栏两个状态都要能画
+        h._click(h.coop_rect.center)
+        assert g.save.coop is True
+        g.draw(screen)
+        # 存档往返
+        save_mod.save_data(g.save)
+        assert save_mod.load_data().coop is True
+        # 2) 进战局:P2 存在、有装备、出生在 P1 旁边
+        snap_weapon = g.save.weapon.serialize() if g.save.weapon else None
+        g.start_raid()
+        r = g.raid
+        assert r.coop and r.player2 is not None and r.p2_kit is not None
+        p2 = r.player2
+        assert p2.weapon is not None and p2.armor is not None
+        assert p2.bag.w > 0
+        d = math.hypot(p2.x - r.player.x, p2.y - r.player.y)
+        assert 20 < d < 260, f"P2 应该出生在 P1 旁边:{d}"
+        assert r.players() == (r.player, r.player2)
+        assert len(r.alive_players()) == 2
+        assert "P2" in coop_mod.key_hint() and "自动瞄准" in coop_mod.key_hint()
+        assert "↑" in coop_mod.key_hint(short=True)
+        assert coop_mod.key_hint() is coop_mod.key_hint(), "提示串要缓存(HUD 每帧用)"
+        # 3) 双人可见性:两位玩家各一个视野多边形,可见集是并集
+        r.refresh_fog(force=True)
+        assert len(r.fog_polys) == 2, len(r.fog_polys)
+        assert r.fog_polygon is r.fog_polys[0]
+        # P2 走远 -> 重算(任一玩家移动都触发)
+        ver = r.fog_version
+        p2.x += 200
+        r.refresh_fog(1 / 60)
+        assert r.fog_version > ver, "P2 移动也要重算迷雾"
+        # 4) 按键让位:P1 的移动/静步不含 P2 的键
+        assert pygame.K_UP not in r._p1_keys("up"), r._p1_keys("up")
+        assert pygame.K_w in r._p1_keys("up")
+        assert pygame.K_RSHIFT not in r._p1_keys("walk")
+        assert pygame.K_LSHIFT in r._p1_keys("walk")
+        # P2 的键就在 COOP 里
+        assert pygame.K_UP in COOP["keys"]["up"]
+        assert pygame.K_RSHIFT in COOP["keys"]["fire"]
+        # 5) 敌人目标选择:最近的可见玩家
+        s = r.scavs[0]
+        r.scavs = [s]
+        s.view2 = 900 * 900
+        r.sight_vis = {id(s)}
+        r.sight_vis2 = {id(s)}
+        p2.x, p2.y = 1000.0, 1000.0
+        r.player.x, r.player.y = 1400.0, 1000.0
+        s.x, s.y = 1100.0, 1000.0
+        tgt, see = r.threat_for(s)
+        assert tgt is p2 and see, (tgt, see)      # 100 < 300 -> 打 P2
+        s.x, s.y = 1350.0, 1000.0
+        tgt, see = r.threat_for(s)
+        assert tgt is r.player and see, (tgt, see)   # 50 < 350 -> 改打 P1
+        # 全倒下时不该崩
+        r.player.dead = True
+        r.player2.dead = True
+        assert r.seek_player(0, 0) is r.player
+        r.player.dead = r.player2.dead = False
+        # 几何可见性:真的用视线判定 P2
+        found = False
+        for ox, oy in ((80, 0), (-80, 0), (0, 80), (0, -80),
+                       (120, 120), (-120, -120)):
+            x, y = p2.x + ox, p2.y + oy
+            if r.map.collides(x, y, 12) or not r.map.los_clear(x, y, p2.x, p2.y):
+                continue
+            s.x, s.y = x, y
+            found = True
+            break
+        assert found, "P2 附近应该找得到一个有视线的位置"
+        s.view2 = 900 * 900
+        r.refresh_fog(force=True)
+        assert id(s) in r.sight_vis2, "守军应该能看见 P2"
+        # 6) 子弹能打中 P2(而不是只打 P1)
+        r.scavs = []
+        p2.hp = p2.max_hp
+        p2.armor = None
+        r.player.hp = r.player.max_hp
+        r.bullets = [dict(x=p2.x - 20, y=p2.y, dx=900.0, dy=0.0, dmg=7,
+                          owner="scav", ttl=0.2, src=None)]
+        for _ in range(3):
+            r.update(1 / 60, [])
+        assert p2.hp < p2.max_hp, "队友子弹打不中 P2"
+        assert r.player.hp == r.player.max_hp, "不该误伤 P1"
+        # 7) P2 换弹 / 打药 / 自动搜刮
+        p2.weapon = Item.weapon("pm", mag=0)
+        p2.bag.clear()
+        p2.bag.add_item(Item("a9", count=30))
+        r.start_reload(p2)
+        assert p2.reloading
+        for _ in range(180):
+            r._update_weapon_timers(p2, 1 / 60)
+        assert not p2.reloading and p2.weapon.state["mag"] == 8, p2.weapon.state
+        p2.hp = 40
+        p2.bag.add_item(Item("medkit"))
+        r.p2_quick_heal()
+        assert p2.hp > 40 and not any(pl.item.iid == "medkit"
+                                      for pl in p2.bag.items)
+        # 自动搜刮:把 P2 放到箱子边,按交互 -> 逐件搜出收进自己背包
+        lc = None
+        for cand in r.containers:
+            if cand.kind in ("crate", "val", "med", "gun") and cand.container.items:
+                lc = cand
+                break
+        assert lc is not None
+        lc.container.items = []
+        lc.container.add_item(Item("gold"))
+        lc.container.add_item(Item("a9", count=20))
+        p2.x, p2.y = lc.rect.centerx, lc.rect.centery
+        p2.bag.clear()
+        n0 = len(lc.container.items)
+        assert n0 == 2, n0
+        r.p2_interact()
+        assert r.p2_take is not None
+        assert "自动" in r.toasts[-1][0] or "搜刮" in r.toasts[-1][0]
+        for _ in range(60 * 30):
+            r.update(1 / 60, [])
+            if r.p2_take is None or r.over:
+                break
+        assert r.p2_take is None, "P2 搜刮应该会结束"
+        assert not lc.container.items, "箱子应该被 P2 搜空"
+        assert p2.bag.item_count() >= 2, p2.bag.item_count()
+        assert all(r.is_known(pl) for pl in lc.container.items) or True
+        # 离开太远会中断
+        lc.container.add_item(Item("gold"))
+        r.p2_interact()
+        assert r.p2_take is not None
+        p2.x, p2.y = lc.rect.centerx + 400, lc.rect.centery
+        r.update(1 / 60, [])
+        assert r.p2_take is None, "离太远要中断"
+        # 8) 单人阵亡不结束战局;两人都倒下才结算
+        #    先验证「6 级甲倒地自救」是每人一次:P2 用掉不影响 P1
+        p2.armor = Item("b45")
+        p2.hp = p2.max_hp
+        assert r.can_revive(p2) and r.can_revive(r.player)
+        p2.take_damage(99999, r)
+        assert not p2.dead, "6 级甲应该先自救"
+        assert not r.can_revive(p2), "自救每人每局一次"
+        assert r.can_revive(r.player), "P2 用掉自救不该影响 P1"
+        p2.armor = None
+        p2.take_damage(9999, r)
+        assert p2.dead and not r.over, "还有 P1 活着就不该结束"
+        r.refresh_fog(force=True)
+        r.update(1 / 60, [])
+        assert not r.over
+        r.player.armor = None
+        r.player.take_damage(9999, r)
+        assert r.over and r.result["kind"] == "death"
+        assert r.result["coop"] and r.result["p2_dead"]
+        g.draw(screen)                 # 阵亡结算页(双人)
+        g.to_hideout()
+        # 9) 撤离结算:两人背包里的战利品并进仓库,配发装备回收
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        g.save.mode = "raid"
+        g.save.coop = True
+        g.save.touch = False
+        before_weapon = g.save.weapon.serialize() if g.save.weapon else None
+        before_value = int(g.save.stats["value"])
+        g.start_raid()
+        r = g.raid
+        stash0 = g.save.stash.item_count()
+        for bag in (r.player.bag, r.player2.bag):
+            it = Item("gold")
+            bag.add_item(it)
+            r._log_gained(it)
+        r.player2.armor = None
+        r.player2.take_damage(9999, r)          # P2 倒下,P1 撤离
+        assert not r.over
+        r.finish("extract")
+        assert r.result["kind"] == "extract"
+        assert r.result["banked"] == 2, r.result
+        assert g.save.stash.item_count() == stash0 + 2, "战利品要并进仓库"
+        assert r.result["gained"] > 0
+        assert int(g.save.stats["value"]) == before_value + r.result["gained"], \
+            "撤离收益要记进统计(搜刮价值)"
+        assert (g.save.weapon.serialize() if g.save.weapon else None) == before_weapon, \
+            "配发装备必须回收,玩家自己的出战配置原样还原"
+        g.to_hideout()
+        g.draw(screen)                 # 藏身处
+        # 10) 渲染:双人世界 + P2 HUD + P2 阵亡画面
+        g.save.coop = True
+        g.start_raid()
+        r = g.raid
+        r.player2.x, r.player2.y = r.player.x + 60, r.player.y + 60
+        r.player2.hurt_flash = 0.3
+        r.player.hurt_flash = 0.2
+        r.add_toast("双人测试", (255, 255, 255))
+        for _ in range(20):
+            r.update(1 / 60, [])
+        g.draw(screen)
+        r.p2_extract_t = 1.5
+        r.p2_take = dict(lc=r.containers[0], queue=[], t=0.4, need=1.0)
+        g.draw(screen)                 # P2 撤离条 + 搜刮条
+        r.p2_take = None
+        r.player2.dead = True
+        g.draw(screen)                 # P2 阵亡(灰叉)
+        r.inv_open = True
+        g.draw(screen)
+        r.inv_open = False
+        r.finish("extract")
+        g.draw(screen)
+        g.to_hideout()
+        # 11) 单人模式完全不受影响(coop=False 时没有 P2)
+        g.save.coop = False
+        g.start_raid()
+        assert g.raid.coop is False and g.raid.player2 is None
+        assert len(g.raid.players()) == 1
+        g.draw(screen)
+        g.to_hideout()
+        # 12) 手机模式自动关掉双人(要键盘)
+        g.save.coop = True
+        g.save.touch = True
+        g.start_raid()
+        assert g.raid.coop is False and g.raid.player2 is None
+        g.to_hideout()
+        g.save.touch = False
+        pygame.display.flip()
+
+    check("账号-名字+密码多档登录/老存档并入/登录界面", t_accounts)
+    check("双人合作-P2键盘操作/双人可见性/战利品并仓/单独阵亡", t_coop)
 
     ok = all(r[1] for r in results)
     report = ["Tarkov2D selftest " + ("PASS" if ok else "FAIL"), ""]

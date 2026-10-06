@@ -5,6 +5,7 @@ import pygame
 import assault
 import audio
 import bindings
+import coop as coop_mod
 import mystery
 import quests
 import save as save_mod
@@ -54,6 +55,7 @@ class Game:
         self.hideout = Hideout(self)
         self.raid = None
         self.quit = False
+        self.switch_account = False   # True = 回登录界面换账号(main 会重新登录)
         # 突袭模式:系统配发装备前的配置快照(战局结束原样还原)
         self.assault_snap = None
         # 剧情模式:配发 M4A1 前的配置快照 + 本次配发清单
@@ -103,6 +105,10 @@ class Game:
         if self.is_assault():
             # 突袭:系统强制配发一套随机满配的高级装备(战后回收,不动仓库)
             self.assault_snap = assault.issue(self.save)
+        elif self.is_coop():
+            # 双人合作:两位玩家都由系统配发装备(战后回收,不动仓库),
+            # 撤离时背包里的战利品会先并进仓库 —— 仓库里自己的装备不会被碰
+            self.assault_snap = assault.issue(self.save)
         elif self.is_story():
             # 剧情:系统配发 M4A1 + 6 级甲 + 药品(战后回收,不动仓库);
             # 撤离时背包里的战利品会先存进仓库再回收配发装备
@@ -118,17 +124,24 @@ class Game:
     def is_story(self):
         return getattr(self.save, "mode", "raid") == "story"
 
+    def is_coop(self):
+        """双人合作(同一台电脑两人玩):只对搜打撤模式生效,手机模式不行(要键盘)。"""
+        return (bool(getattr(self.save, "coop", False))
+                and getattr(self.save, "mode", "raid") == "raid"
+                and not getattr(self.save, "touch", False))
+
     def raid_finished(self, result):
         """战局结算:extract 保留装备,死亡/超时清空带入装备。
-        突袭/剧情模式例外:配发装备一律回收,玩家的原配置原样还原;
-        剧情模式撤离时,背包里的战利品会先放进仓库。"""
+        突袭/剧情/双人合作模式例外:配发装备一律回收,玩家的原配置原样还原;
+        剧情与双人合作撤离时,背包里的战利品会先放进仓库。"""
         sd = self.save
         assault_run = self.is_assault()
         story_run = self.is_story()
+        coop_run = self.is_coop()
         sd.stats["kills"] += result["kills"]
         if result["kind"] == "extract":
             sd.stats["extracts"] += 1
-            if not assault_run and not story_run:
+            if not assault_run and not story_run and not coop_run:
                 sd.stats["value"] += result["gained"]
                 if self.raid is not None:
                     # 关键:战局内可能换装/卸装,撤离前把玩家当前装备写回存档,
@@ -140,11 +153,16 @@ class Game:
                 kept, lost = story_mod.bank_loot(sd)
                 result["banked"] = kept
                 result["bank_lost"] = lost
+            if coop_run:
+                kept, lost = coop_mod.bank_loot(sd, self.raid)
+                result["banked"] = kept
+                result["bank_lost"] = lost
+                sd.stats["value"] += result["gained"]
         else:
             sd.stats["deaths"] += 1
-            if not assault_run and not story_run:
+            if not assault_run and not story_run and not coop_run:
                 sd.wipe_loadout()
-        if assault_run:
+        if assault_run or coop_run:
             assault.restore(sd, self.assault_snap)
             self.assault_snap = None
         if story_run:
@@ -173,7 +191,15 @@ class Game:
             self.raid.finish("mia")
         self.quit = True
 
-    def shutdown(self):
+    def request_switch_account(self):
+        """回登录界面换账号(藏身处设置页)。战局中不允许(先撤/先死)。"""
+        if self.phase != "hideout":
+            return False
+        self.switch_account = True
+        self.quit = True
+        return True
+
+    def shutdown(self, keep_window=False):
         try:
             if self.assault_snap is not None:
                 # 中途关窗也要把配发装备还掉,别把系统装备写进存档
@@ -185,4 +211,5 @@ class Game:
             save_mod.save_data(self.save)
         except Exception:
             pass
-        pygame.quit()
+        if not keep_window:
+            pygame.quit()

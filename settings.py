@@ -3,7 +3,7 @@
 import pygame
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.11.3"
+GAME_VERSION = "2.12.0"
 # 更新清单地址(可换成自建服务器 / GitHub raw;留空则只认 EXE 同目录的 version.json)
 UPDATE_MANIFEST_URL = "http://127.0.0.1:8765/version.json"
 UPDATE_TIMEOUT = 3   # 检查 / 下载超时(秒)
@@ -1216,6 +1216,27 @@ SUPPORT = {
 # ---------- 固定强度的模式(不给难度档) ----------
 # 人质解救 = 强化封锁强度;夜战 = 强化封锁(用户要求:太亮/太简单就没意思)
 MODE_DIFF = {"hostage": "hardened", "night": "hardened"}
+
+# ---------- 双人合作(同一台电脑两人玩,见 coop.py) ----------
+# P2 只用键盘:方向键移动 + 自动瞄准最近可见敌人,其余是动作键。这些键由 P2
+# 独占 —— 双人模式下 P1 的移动/静步会让出它们(否则按方向键两人一起动)。
+COOP = dict(
+    color=(96, 200, 240),     # P2 的血条/标记色
+    spawn_dx=52,              # P2 出生点相对 P1 的偏移(像素)
+    spawn_dy=6,
+    aim_range=620,            # P2 自动瞄准距离(和最大视距同级)
+    bank_range=120,           # P2 自动搜刮的箱子距离(和交互距离同一量级)
+    keys=dict(
+        up=(pygame.K_UP,),
+        down=(pygame.K_DOWN,),
+        left=(pygame.K_LEFT,),
+        right=(pygame.K_RIGHT,),
+        fire=(pygame.K_RSHIFT,),
+        interact=(pygame.K_RCTRL, pygame.K_SLASH),
+        reload=(pygame.K_KP0, pygame.K_PERIOD),
+        heal=(pygame.K_KP1, pygame.K_COMMA),
+    ),
+)
 
 # ---------- 剧情模式《灰区二日》 ----------
 # 独立模式:固定强度,两天 × 四时段,每个时段出击一次

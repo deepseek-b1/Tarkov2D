@@ -6,6 +6,7 @@ import random
 import pygame
 
 import audio
+import coop as coop_mod
 import story as story_mod
 import uikit
 from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
@@ -37,6 +38,7 @@ from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       fire_mode_name, BURST_COUNT,
                       FOG_MOVE_STEP, FOG_VIS_REFRESH, FOG_VIS_RADIUS,
                       MOVE_AIM_MUL, MOVE_RELOAD_MUL,
+                      COOP,
                       fmt_rub, get_font)
 import bindings
 from inventory import Item, try_move
@@ -163,6 +165,7 @@ class Player:
         self.reload_t = 0.0
         self.reloading = False
         self.hurt_flash = 0.0
+        self.dead = False         # 双人合作:倒下的玩家不再操作/不再被瞄准
 
     def fire_mode(self):
         """当前武器的射击模式(semi/burst/auto)。"""
@@ -174,6 +177,8 @@ class Player:
         return cycle_fire_mode(self.weapon)
 
     def take_damage(self, dmg, raid, rpg=False):
+        if self.dead:      # 双人合作里已经倒下的不再吃伤害
+            return
         if rpg:
             # 火箭弹:穿 6 级甲只掉一半血;<6 级甲直接阵亡
             if (self.armor is not None
@@ -190,13 +195,13 @@ class Player:
             raid.add_particles(self.x, self.y, 26, (255, 170, 60), speed=210)
             if self.hp <= 0:
                 if (self.armor is not None and self.armor.def_.get("revive")
-                        and not raid.revive_used):
-                    raid.revive_used = True
+                        and raid.can_revive(self)):
+                    raid.mark_revive(self)
                     self.hp = max(1, int(self.max_hp * 0.3))
                     raid.add_toast("倒地自救成功!(本局仅一次)", COL["good"], 3.6)
                     return
                 self.hp = 0
-                raid.finish("death")
+                raid.player_down(self)
             return
         if self.armor is not None:
             dmg *= (1 - self.armor.def_.get("reduce", 0))
@@ -212,8 +217,8 @@ class Player:
         if self.hp <= 0:
             # 6级甲自带的倒地自救:每局一次,免于阵亡
             if (self.armor is not None and self.armor.def_.get("revive")
-                    and not raid.revive_used):
-                raid.revive_used = True
+                    and raid.can_revive(self)):
+                raid.mark_revive(self)
                 self.hp = max(1, int(self.max_hp * 0.3))
                 self.hurt_flash = 1.0
                 raid.shake = 12
@@ -222,7 +227,7 @@ class Player:
                 raid.add_toast("倒地自救成功!(本局仅一次)", COL["good"], 3.6)
                 return
             self.hp = 0
-            raid.finish("death")
+            raid.player_down(self)
 
     def heal(self, n):
         before = self.hp
@@ -283,9 +288,26 @@ class Raid:
         self.story_issued = list(getattr(game, "story_issued", []) or [])
         self.player = Player(game.save)
         self.player.x, self.player.y = self.map.spawn
+        # ---- 双人合作:第二位玩家(键盘操作,装备由系统配发,见 coop.py) ----
+        self.coop = (bool(getattr(game.save, "coop", False)) and self.mode == "raid"
+                     and not self.touch_mode)
+        self.player2 = None
+        self.p2_kit = None
+        self.p2_revive_used = False     # P2 的 6 级甲自救(每局一次)
+        self.p2_take = None             # P2 的自动搜刮状态
+        self.p2_extract_t = 0.0         # P2 的撤离引导进度
+        self.p2_fire_edge = False       # P2 的点射沿(键盘按下那一帧)
+        self.p2_start_value = 0
+        if self.coop:
+            self.p2_kit = coop_mod.P2Kit()
+            self.player2 = Player(self.p2_kit)
+            self.player2.x, self.player2.y = self._p2_spawn()
+            self.player2.aim = self.player.aim
         self.cam = [0, 0]
         self.shake = 0.0
         self.start_value = self._loadout_value()   # 进局装备总值(撤离收益快照基准)
+        if self.coop:
+            self.p2_start_value = self._loadout_value(self.player2)
 
         self.scavs = [Scav(k, x, y, self.diff) for k, (x, y) in self._pick_spawns()]
         if self.mode == "hostage":
@@ -409,6 +431,9 @@ class Raid:
                 self.add_toast("黑暗行动 · 光源:" + " + ".join(src), COL["good"], 5.5)
             self.add_toast("只有亮区里的敌人才看得见(也才会被自动瞄准);敌人可不受你的灯光限制",
                            COL["accent"], 6.0)
+        if self.coop:
+            self.add_toast("双人合作:配发装备 · 战利品撤离时并进仓库 · "
+                           "P2 靠近箱子按交互自动搜刮", COL["good"], 9.0)
         if self.mode == "assault":
             self.add_toast(f"任务:给 {len(self.objectives)} 座指挥设施安 C4"
                            f"(按 E 安放,{int(C4_FUSE)} 秒后起爆,爆区 ±{C4_BLAST_RADIUS})",
@@ -460,12 +485,17 @@ class Raid:
         self._click_cd = 0.0
         # 迷雾/可见性缓存(性能:见 refresh_fog;敌人 AI 与绘制都读它)
         self.fog_polygon = None
+        self.fog_polys = []         # 每位活着的玩家一个视野多边形(双人时有 2 个)
         self.fog_vis = set()
         self.fog_px = -1e9
         self.fog_py = -1e9
+        self.fog2_px = -1e9
+        self.fog2_py = -1e9
+        self.fog2_aim = 0.0
         self.fog_t = 0.0
         self.fog_version = 0
         self._fog_drawn_ver = -1
+        self.sight_vis2 = set()     # 能看见 P2 的敌人(双人合作)
         # 黑暗模式(夜战):光源形状(世界坐标)+ 亮区内的敌人集合
         self.dark = self.mode == "night"
         self.light_shapes = []      # [("poly", pts) | ("circle", (x, y, r, tint))]
@@ -478,8 +508,146 @@ class Raid:
         self.frame = 0              # 帧序号(远景守军按它错峰降频)
         self.view_reach2 = 1e18     # 玩家屏幕位置到四个屏幕角的最大距离²(每帧算)
 
+    # ---------- 玩家集合(单人 / 双人合作共用) ----------
+    def players(self):
+        """本局所有玩家:P1,双人合作时还有 P2。"""
+        if self.player2 is not None:
+            return (self.player, self.player2)
+        return (self.player,)
+
+    def _p2_spawn(self):
+        """给 P2 找一个离 P1 一两格、站得下人的出生点(找不到就同点出生)。"""
+        bx, by = self.map.spawn
+        tx, ty = int(bx // TILE), int(by // TILE)
+        for rad in (1, 2, 3):
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1),
+                           (1, 1), (-1, -1), (1, -1), (-1, 1)):
+                nx, ny = tx + dx * rad, ty + dy * rad
+                if self.map.tile_solid(nx, ny):
+                    continue
+                cx, cy = nx * TILE + TILE // 2, ny * TILE + TILE // 2
+                if self.map.collides(cx, cy, PLAYER["radius"]):
+                    continue
+                if math.hypot(cx - bx, cy - by) < TILE * 0.8:
+                    continue
+                return cx, cy
+        return bx, by
+
+    def alive_players(self):
+        return tuple(p for p in self.players() if not p.dead)
+
+    def p_is_p2(self, p):
+        return self.player2 is not None and p is self.player2
+
+    def player_name(self, p):
+        return "P2" if self.p_is_p2(p) else "P1"
+
+    def nearest_player_d2(self, x, y):
+        """(x, y) 到最近玩家的距离²(守军 AI 的远景降级判定用)。"""
+        best = 1e18
+        for p in self.players():
+            dx = p.x - x
+            dy = p.y - y
+            d2 = dx * dx + dy * dy
+            if d2 < best:
+                best = d2
+        return best
+
+    def seek_player(self, x, y):
+        """离 (x, y) 最近的活着的玩家(全倒下时给 P1)。"""
+        alive = self.alive_players()
+        if not alive:
+            return self.player
+        return min(alive, key=lambda q: (q.x - x) ** 2 + (q.y - y) ** 2)
+
+    def cam_anchor(self):
+        """镜头跟随的锚点位置(双人 = 还活着的玩家的中点)。"""
+        if self.coop:
+            alive = self.alive_players() or (self.player,)
+            return (sum(q.x for q in alive) / len(alive),
+                    sum(q.y for q in alive) / len(alive))
+        return self.player.x, self.player.y
+
+    def can_revive(self, p):
+        """6 级甲倒地自救还能用吗(每位玩家每局一次)。"""
+        if self.p_is_p2(p):
+            return not self.p2_revive_used
+        return not self.revive_used
+
+    def mark_revive(self, p):
+        if self.p_is_p2(p):
+            self.p2_revive_used = True
+        else:
+            self.revive_used = True
+
+    def player_down(self, p):
+        """玩家倒下:单人 = 直接结算;双人 = 只要还有一个活着就继续打。"""
+        p.dead = True
+        p.hp = 0
+        if self.coop and self.alive_players():
+            self.add_toast(f"{self.player_name(p)} 倒下了 —— 另一个人还在场上,"
+                           "活下去把他那一份也带出去!", COL["bad"], 5.5)
+            return
+        self.finish("death")
+
+    # ---------- 按键(双人时 P1 要让出 P2 独占的键) ----------
+    def _p1_keys(self, action):
+        """P1 该动作实际生效的键位(双人合作时过滤掉 P2 的键)。"""
+        ks = bindings.keys_for(self.game.save, action)
+        if not self.coop:
+            return ks
+        blocked = coop_mod.p2_key_set()
+        out = tuple(k for k in ks if k not in blocked)
+        if out:
+            return out
+        # 玩家把该动作全改到方向键上了:退回默认键(双人时 P1 用 WASD)
+        out = tuple(k for k in bindings.DEFAULTS.get(action, ks)
+                    if k not in blocked)
+        return out or ks
+
+    def key_down(self, keys, p, action):
+        """某位玩家此刻某动作是否被按住。
+
+        P1 走 bindings(会过滤 P2 的键),P2 走 settings.COOP 里固定的键。
+        自检里 get_pressed() 会被换成 dict 式假对象,取不到就当作没按。
+        """
+        ks = (COOP["keys"].get(action, ()) if self.p_is_p2(p)
+              else self._p1_keys(action))
+        for k in ks:
+            try:
+                if keys[k]:
+                    return True
+            except (IndexError, KeyError, TypeError):
+                continue
+        return False
+
+    def moving_now(self, p):
+        """该玩家此刻是否在推移动键 / 摇杆。"""
+        if p is self.player and self.touch_mode and self.touch is not None:
+            if any(abs(v) > 0.1 for v in self.touch.move_axis()):
+                return True
+        keys = pygame.key.get_pressed()
+        return any(self.key_down(keys, p, a)
+                   for a in ("up", "down", "left", "right"))
+
+    def nearest_visible_enemy(self, x, y, max_range):
+        """以 (x, y) 为圆心、max_range 内最近的可见敌人(手机锁敌 / P2 自动瞄准)。"""
+        vis = self.fog_vis
+        dark = self.dark
+        los = self.map.los_clear
+        best, bd2 = None, float(max_range) ** 2
+        for s in self.scavs:
+            if dark and id(s) not in vis:
+                continue
+            dx = s.x - x
+            dy = s.y - y
+            d2 = dx * dx + dy * dy
+            if d2 < bd2 and los(x, y, s.x, s.y):
+                best, bd2 = s, d2
+        return best
+
     # ---------- 黑暗模式:光照形状 ----------
-    def night_light(self):
+    def night_light(self, p=None):
         """返回 (亮区形状列表, 敌人可见判定函数用的参数)。
 
         光源优先级:枪上照明配件(锥形,跟准星) > 夜视头盔(全向圆) > 脚边微光。
@@ -487,7 +655,7 @@ class Raid:
         """
         from settings import (NIGHT_AMBIENT, NIGHT_AMBIENT_TINT, NIGHT_BEAM_STEPS,
                               weapon_beam, helmet_nvg)
-        p = self.player
+        p = p or self.player
         shapes = []
         nvg = helmet_nvg(getattr(p, "helmet", None))
         beam = weapon_beam(getattr(p, "weapon", None))
@@ -507,10 +675,10 @@ class Raid:
             shapes.append(("poly", pts))
         return shapes
 
-    def in_light(self, x, y):
+    def in_light(self, x, y, p=None):
         """某点在不在亮区里(敌人「可见」的几何判定,视线另外算)。"""
         from settings import NIGHT_AMBIENT, helmet_nvg, weapon_beam
-        p = self.player
+        p = p or self.player
         nvg = helmet_nvg(getattr(p, "helmet", None))
         beam = weapon_beam(getattr(p, "weapon", None))
         dx, dy = x - p.x, y - p.y
@@ -528,62 +696,83 @@ class Raid:
         """战争迷雾 / 夜战光照的两级缓存(120fps 的关键)。
 
         白天:
-          1) 视野多边形(140 条 DDA 射线)只在玩家移动超过 FOG_MOVE_STEP 时重算;
+          1) 视野多边形(140 条 DDA 射线)**每位活着的玩家一个**,只在有人
+             移动超过 FOG_MOVE_STEP 时整批重算;
           2) 可见敌人集合在(1)之外,最短每 FOG_VIS_REFRESH 秒也刷一次 ——
              玩家站着不动时,敌人自己走进/走出视野也要能判定。
         夜里(黑暗模式):可见 = 在光源形状内(手电锥形 / 夜视圆 / 脚边微光)+ 有视线;
           光锥跟着准星转,所以准星变化超过阈值也要重算。
 
-        fog_vis  = 玩家能看见的敌人(绘制与自动锁敌用)
-        sight_vis = 能看见玩家的敌人(敌人 AI 用,夜里不受玩家光源限制)
+        双人合作:屏幕上只有一张画面,所以可见范围是两位玩家的并集。
+        fog_vis  = 能看见的敌人(绘制与自动锁敌用)
+        sight_vis / sight_vis2 = 能看见 P1 / P2 的敌人(敌人 AI 用)
         """
         p = self.player
+        p2 = self.player2
+        p2_alive = p2 is not None and not p2.dead
         if force:
             do_poly = True
         else:
             self.fog_t += dt
             moved = math.hypot(p.x - self.fog_px, p.y - self.fog_py) >= FOG_MOVE_STEP
+            if p2_alive:
+                moved = moved or math.hypot(
+                    p2.x - self.fog2_px, p2.y - self.fog2_py) >= FOG_MOVE_STEP
             if self.dark:
                 turned = abs((p.aim - self.fog_aim + math.pi) % math.tau - math.pi) > 0.05
+                if p2_alive:
+                    turned = turned or abs(
+                        (p2.aim - self.fog2_aim + math.pi) % math.tau - math.pi) > 0.05
                 # 夜里 fog_polygon 恒为 None(不用 360° 视野多边形),
                 # 所以"首次"要用 light_shapes 判断 —— 否则每帧都会重建光照层
                 do_poly = moved or turned or not self.light_shapes
             else:
-                turned = False
-                do_poly = moved or self.fog_polygon is None
+                do_poly = moved or not self.fog_polys
             if not do_poly and self.fog_t < FOG_VIS_REFRESH:
                 return
         if do_poly:
+            self.fog_polys = []
+            self.light_shapes = []
             if self.dark:
-                self.light_shapes = self.night_light()
+                for q in self.alive_players():
+                    self.light_shapes.extend(self.night_light(q))
                 self.fog_polygon = None      # 夜里不用 360° 视野多边形
             else:
-                self.fog_polygon = self.map.visibility_polygon(p.x, p.y, 560)
-                self.light_shapes = []
+                for q in self.alive_players():
+                    self.fog_polys.append(
+                        self.map.visibility_polygon(q.x, q.y, 560))
+                self.fog_polygon = self.fog_polys[0] if self.fog_polys else None
             self.fog_px, self.fog_py = p.x, p.y
             self.fog_aim = p.aim
+            if p2 is not None:
+                self.fog2_px, self.fog2_py = p2.x, p2.y
+                self.fog2_aim = p2.aim
             self.fog_version += 1
         vis = set()
         sight = set()
+        sight2 = set()
         r = FOG_VIS_RADIUS
-        px, py = p.x, p.y
         los = self.map.los_clear
-        in_light = self.in_light
         dark = self.dark
-        for s in self.scavs:
-            dx = s.x - px
-            if dx > r or dx < -r:
+        for i, q in enumerate(self.players()):
+            if q.dead:
                 continue
-            dy = s.y - py
-            if dy > r or dy < -r:
-                continue
-            clear = los(px, py, s.x, s.y)
-            if clear:
-                sight.add(id(s))
-                if (not dark) or in_light(s.x, s.y):
-                    vis.add(id(s))
+            qx, qy = q.x, q.y
+            mine_sight = sight2 if i else sight
+            for s in self.scavs:
+                dx = s.x - qx
+                if dx > r or dx < -r:
+                    continue
+                dy = s.y - qy
+                if dy > r or dy < -r:
+                    continue
+                if los(qx, qy, s.x, s.y):
+                    mine_sight.add(id(s))
+                    if (not dark) or self.in_light(s.x, s.y, q):
+                        vis.add(id(s))
         self.fog_vis = vis
         self.sight_vis = sight
+        self.sight_vis2 = sight2
         self.fog_t = 0.0
 
     # ---------- 提示/粒子 ----------
@@ -799,6 +988,44 @@ class Raid:
         """突袭模式必须先把指挥设施全炸掉才能撤离。"""
         return self.mode != "assault" or self.objectives_done()
 
+    def _extract_tick(self, p, cur, dt, moving=None):
+        """一位玩家的撤离引导进度。返回 (新进度, 是否站满)。
+
+        撤离点条件(突袭要先炸完 / 剧情各点各的规矩)在两人身上都生效。
+        moving 由调用方传入(P1 用本帧算好的值,含 M139 架枪不能动的情况);
+        不传就现算(P2)。
+        """
+        zone = None
+        for name, r in self.map.extracts:
+            if r.collidepoint(p.x, p.y):
+                zone = name
+                break
+        if zone is not None and not self.allows_extract():
+            # 突袭模式:指挥设施没炸完不让撤
+            if "locked" not in self.warned:
+                self.warned.add("locked")
+                self.add_toast("先炸掉全部指挥设施才能撤离!", COL["bad"], 3.6)
+            zone = None
+            cur = max(0.0, cur - dt * 3)
+        if zone is not None and self.mode == "story":
+            # 剧情:每个撤离点都有自己的条件(信任/通行证/样本/隐藏点)
+            ok, why = story_mod.can_use_extract(self.game.save, zone)
+            if not ok:
+                if zone not in self.warned:
+                    self.warned.add(zone)
+                    self.add_toast(f"「{zone}」现在还走不了:{why}", COL["bad"], 3.6)
+                zone = None
+                cur = max(0.0, cur - dt * 3)
+        if zone is not None and not (moving if moving is not None
+                                     else self.moving_now(p)) and not p.reloading:
+            if cur <= 0:
+                who = (f"{self.player_name(p)} " if self.coop
+                       and self.p_is_p2(p) else "")
+                self.add_toast(f"{who}开始撤离:{zone}", COL["accent"])
+            cur += dt
+            return cur, cur >= EXTRACT_TIME
+        return max(0.0, cur - dt * 3), False
+
     def interact(self):
         """E / 搜刮按钮:优先剧情交互、救人质、拉队友、炸设施,其次搜刮容器。"""
         if self.dialogue is not None:
@@ -848,10 +1075,7 @@ class Raid:
         ent = self.channel["ent"]
         need = self.channel_need()
         d = math.hypot(ent.x - p.x, ent.y - p.y)
-        keys = pygame.key.get_pressed()
-        _sd = self.game.save
-        moving = any(bindings.is_down(keys, _sd, a)
-                     for a in ("up", "down", "left", "right"))
+        moving = self.moving_now(p)
         if self.touch_mode and self.touch is not None:
             moving = moving or any(abs(v) > 0.1 for v in self.touch.move_axis())
         if d > INTERACT_RANGE * 1.6:
@@ -958,8 +1182,12 @@ class Raid:
         return best
 
     # ---------- 射击 ----------
-    def try_fire(self, held):
-        p = self.player
+    def try_fire(self, held, p=None, edge=None, braced=None):
+        p = p or self.player
+        if edge is None:
+            edge = self.fire_edge
+        if braced is None:
+            braced = self.braced
         w = p.weapon
         if w is None or p.reload_t > 0 or p.fire_cd > 0:
             return
@@ -972,14 +1200,14 @@ class Raid:
             # 三连发:扣一次扳机打 BURST_COUNT 发,打完必须松手再扣
             # (点按也算一次扣扳机 —— 手机点按只给 fire_edge,没有 held)
             if p.burst_left <= 0:
-                if not self.fire_edge:
+                if not edge:
                     return
                 p.burst_left = BURST_COUNT
         else:
-            if not self.fire_edge:
+            if not edge:
                 return
         if w.state.get("mag", 0) <= 0:
-            if self.fire_edge:
+            if edge:
                 audio.play("empty")
             p.burst_left = 0
             return
@@ -991,7 +1219,7 @@ class Raid:
         tx = p.x + math.cos(p.aim) * 22
         ty = p.y + math.sin(p.aim) * 22
         # 架枪(长按右键)用架枪散布;腰射用腰射散布(配件/天赋都会影响)
-        spread = braced_s if self.braced else hip
+        spread = braced_s if braced else hip
         is_rpg = "rocket" in weapon_ammo_ids(w)
         for _ in range(pellets):
             ang = p.aim + random.uniform(-spread, spread)
@@ -1040,8 +1268,14 @@ class Raid:
         audio.play("epm")
         self.emit_noise(x, y, 450)
 
+    def sees_player(self, scav, p):
+        """该守军是否看得见某位玩家(读 refresh_fog 算好的缓存)。"""
+        if self.p_is_p2(p):
+            return id(scav) in self.sight_vis2
+        return id(scav) in self.sight_vis
+
     def threat_for(self, scav):
-        """拾荒者的当前目标:优先玩家;玩家不可见而被队友看得见时打队友。
+        """拾荒者的当前目标:最近的可见玩家(双人时两个都算);都不行就打队友。
 
         返回 (目标, 是否看得见)。原来拆成 threat_for + sees_player 两步,而
         sees_player 会把这里的距离与可见性判定整个再做一遍 —— 一次算完返回。
@@ -1050,12 +1284,18 @@ class Raid:
         玩家可见性读 fog 缓存(refresh_fog 算好的对称视线),
         不再对每个敌人每帧打一条 DDA 射线。
         """
-        p = self.player
         view2 = scav.view2
-        dx = p.x - scav.x
-        dy = p.y - scav.y
-        if dx * dx + dy * dy <= view2 and id(scav) in self.sight_vis:
-            return p, True
+        best, bd2 = None, view2
+        for q in self.players():
+            if q.dead:
+                continue
+            dx = q.x - scav.x
+            dy = q.y - scav.y
+            d2 = dx * dx + dy * dy
+            if d2 <= view2 and d2 < bd2 and self.sees_player(scav, q):
+                best, bd2 = q, d2
+        if best is not None:
+            return best, True
         best, bd2 = None, view2
         los = self.map.los_clear
         sx, sy = scav.x, scav.y
@@ -1069,7 +1309,7 @@ class Raid:
                 best, bd2 = a, d2
         if best is not None:
             return best, True
-        return p, False
+        return self.seek_player(sx, sy), False
 
     def explode(self, x, y, dmg, owner, src=None, blast_mul=1.0, radius=None,
                 friendly=False, struct_dmg=None):
@@ -1094,14 +1334,16 @@ class Raid:
             self.damage_structures_at(x, y, rad,
                                       dmg if struct_dmg is None else struct_dmg,
                                       owner=owner)
-        p = self.player
-        if math.hypot(p.x - x, p.y - y) <= rad:
-            if friendly:
-                if self.mode == "assault":
-                    self.add_toast("被友军火力波及!", COL["bad"], 2.6)
-                p.take_damage(dmg * 0.5, self)
-            else:
-                p.take_damage(dmg, self, rpg=True)
+        for q in self.players():
+            if q.dead:
+                continue
+            if math.hypot(q.x - x, q.y - y) <= rad:
+                if friendly:
+                    if self.mode == "assault":
+                        self.add_toast("被友军火力波及!", COL["bad"], 2.6)
+                    q.take_damage(dmg * 0.5, self)
+                else:
+                    q.take_damage(dmg, self, rpg=True)
 
     def _update_bullets(self, dt):
         alive = []
@@ -1188,14 +1430,19 @@ class Raid:
                     if dead:
                         break
                     p0 = self.player
-                    dx = p0.x - bx
-                    dy = p0.y - by
                     lim = PLAYER["radius"] + 2
-                    if (dx < lim and dx > -lim and dy < lim and dy > -lim
-                            and dx * dx + dy * dy < lim * lim):
-                        self.explode(bx, by, b["dmg"], b["owner"],
-                                     src=b.get("src"))
-                        dead = True
+                    for q in self.players():
+                        if q.dead:
+                            continue
+                        dx = q.x - bx
+                        dy = q.y - by
+                        if (dx < lim and dx > -lim and dy < lim and dy > -lim
+                                and dx * dx + dy * dy < lim * lim):
+                            self.explode(bx, by, b["dmg"], b["owner"],
+                                         src=b.get("src"))
+                            dead = True
+                            break
+                    if dead:
                         break
                     continue
                 if b["owner"] in ("player", "ally"):
@@ -1226,15 +1473,18 @@ class Raid:
                                 dead = True
                                 break
                 else:
-                    p = self.player
-                    dx = p.x - bx
-                    dy = p.y - by
                     lim = PLAYER["radius"] + 2
-                    if (dx < lim and dx > -lim and dy < lim and dy > -lim
-                            and dx * dx + dy * dy < lim * lim):
-                        p.take_damage(b["dmg"], self)
-                        dead = True
-                    else:
+                    for q in self.players():
+                        if q.dead:
+                            continue
+                        dx = q.x - bx
+                        dy = q.y - by
+                        if (dx < lim and dx > -lim and dy < lim and dy > -lim
+                                and dx * dx + dy * dy < lim * lim):
+                            q.take_damage(b["dmg"], self)
+                            dead = True
+                            break
+                    if not dead:
                         for a in self.allies:
                             if a.downed:
                                 continue
@@ -1254,23 +1504,24 @@ class Raid:
         self.bullets = alive
 
     # ---------- 装填/使用/装备 ----------
-    def start_reload(self):
-        p = self.player
+    def start_reload(self, p=None):
+        p = p or self.player
         if p.weapon is None or p.reloading or p.reload_t > 0:
             return
         w = p.weapon
         if w.state.get("mag", 0) >= weapon_capacity(w):
             return
         if p.reserve_count() <= 0:
-            self.add_toast("没有可用弹药!", COL["bad"])
+            who = f"{self.player_name(p)}:" if self.coop else ""
+            self.add_toast(who + "没有可用弹药!", COL["bad"])
             return
         p.reload_t = weapon_params(w)[5]
         p.reloading = True
         p.burst_left = 0          # 装填会打断三连发
         audio.play("reload")
 
-    def _finish_reload(self):
-        p = self.player
+    def _finish_reload(self, p=None):
+        p = p or self.player
         w = p.weapon
         p.reloading = False        # 装填完成,状态自洽(外部直接调用也安全)
         p.reload_t = 0.0
@@ -1291,7 +1542,8 @@ class Raid:
                     p.bag.remove_placed(placed)
         if got:
             w.state["mag"] = w.state.get("mag", 0) + got
-            self.add_toast(f"装填完成 {w.state['mag']}/{cap}", COL["good"])
+            who = f"{self.player_name(p)} " if self.coop else ""
+            self.add_toast(f"{who}装填完成 {w.state['mag']}/{cap}", COL["good"])
 
     def use_med(self, placed):
         p = self.player
@@ -1317,20 +1569,7 @@ class Raid:
         if staggered:
             self._aim_t = self.now + 0.08
         p = self.player
-        px, py = p.x, p.y
-        vis = self.fog_vis
-        dark = self.dark
-        best, bd2 = None, float(TOUCH["aim_assist_range"]) ** 2
-        los = self.map.los_clear
-        for s in self.scavs:
-            if dark and id(s) not in vis:
-                continue
-            dx = s.x - px
-            dy = s.y - py
-            d2 = dx * dx + dy * dy
-            if d2 < bd2 and los(px, py, s.x, s.y):
-                best, bd2 = s, d2
-        return best
+        return self.nearest_visible_enemy(p.x, p.y, TOUCH["aim_assist_range"])
 
     def quick_heal(self):
         """快捷打药(按 H / 手机打药键):自动挑最合适的医疗品,然后读条 1~3 秒。"""
@@ -1472,12 +1711,7 @@ class Raid:
 
     def player_moving(self):
         """玩家此刻是否在推移动键/摇杆(读条时移动会减慢进度)。"""
-        if self.touch_mode and self.touch is not None:
-            return any(abs(v) > 0.1 for v in self.touch.move_axis())
-        keys = pygame.key.get_pressed()
-        sd = self.game.save
-        return any(bindings.is_down(keys, sd, a)
-                   for a in ("up", "down", "left", "right"))
+        return self.moving_now(self.player)
 
     def _update_heal(self, dt):
         hc = self.heal_ch
@@ -2197,8 +2431,8 @@ class Raid:
             audio.play("click")
 
     # ---------- 结算 ----------
-    def _loadout_value(self):
-        p = self.player
+    def _loadout_value(self, p=None):
+        p = p or self.player
         v = p.bag.total_value()
         if p.weapon is not None:
             v += p.weapon.total_price()
@@ -2224,6 +2458,10 @@ class Raid:
         # 用"撤离时装备总值 - 进局时装备总值"快照计算净收益,事件式记账
         # 会在放回物品/部分堆叠转移时失真
         gained = max(0, int(self._loadout_value() - self.start_value))
+        if self.coop and self.player2 is not None:
+            # 双人合作:P2 背包里的战利品也是这局的收益
+            gained += max(0, int(self._loadout_value(self.player2)
+                                 - self.p2_start_value))
         rescued = sum(1 for h in self.hostages if h.rescued)
         objs_done = sum(1 for o in self.objectives if o.destroyed)
         if self.mode == "hostage":
@@ -2237,6 +2475,8 @@ class Raid:
                            entries=self.loot_log,
                            mode=self.mode, rescued=rescued,
                            hostages=len(self.hostages),
+                           coop=self.coop,
+                           p2_dead=(self.player2 is not None and self.player2.dead),
                            objectives=len(self.objectives),
                            objectives_done=objs_done,
                            support_calls=self.support_calls,
@@ -2357,6 +2597,9 @@ class Raid:
                             tx, ty = self._support_target()
                             self.call_support(SUPPORT_ORDER[i], tx, ty)
                             break
+                # 双人合作:P2 的动作键(与 P1 的键不重叠,不会互相触发)
+                if self.coop and not (self.inv_open or self.loot_target):
+                    self._p2_key(ev.key)
             elif ev.type == pygame.MOUSEBUTTONDOWN:
                 if self.paused:
                     self._handle_pause_click(ev.pos)
@@ -2388,16 +2631,18 @@ class Raid:
             return
 
         # 移动(M139 架枪时无法移动;手机模式用左半屏摇杆)
+        keys = pygame.key.get_pressed()
         if self.touch_mode:
             vx, vy = self.touch.move_axis()
             walking = False
+        elif p.dead:
+            vx, vy, walking = 0.0, 0.0, False      # 双人合作:P1 倒下后只操作 P2
         else:
-            keys = pygame.key.get_pressed()
-            vx = float(bindings.is_down(keys, sd, "right")
-                       - bindings.is_down(keys, sd, "left"))
-            vy = float(bindings.is_down(keys, sd, "down")
-                       - bindings.is_down(keys, sd, "up"))
-            walking = bindings.is_down(keys, sd, "walk")
+            vx = float(self.key_down(keys, p, "right")
+                       - self.key_down(keys, p, "left"))
+            vy = float(self.key_down(keys, p, "down")
+                       - self.key_down(keys, p, "up"))
+            walking = self.key_down(keys, p, "walk")
         # 动作对移动的影响:架枪(瞄准)剩 20%;换弹剩 40%;
         # 重武器(M139,braced_immobile)架枪或换弹时完全不能动
         heavy = (p.weapon is not None
@@ -2425,6 +2670,8 @@ class Raid:
                 p.aim = math.atan2(self.aim_locked.y - p.y, self.aim_locked.x - p.x)
             elif moving:
                 p.aim = math.atan2(vy, vx)
+        elif p.dead:
+            self.aim_locked = None
         else:
             self.aim_locked = None
             mpx, mpy = pygame.mouse.get_pos()
@@ -2472,57 +2719,30 @@ class Raid:
             self.braced = bool(pygame.mouse.get_pressed()[2])   # 右键=架枪
         world_active = not (self.inv_open or self.loot_target is not None
                             or self.dialogue is not None)
-        if world_active:
+        if world_active and not p.dead:
             self.try_fire(held)
         self.fire_edge = False
+        # 双人合作:P2 移动/自动瞄准/开火(键盘)
+        if self.coop:
+            self._update_p2(dt, keys)
 
-        # 装填计时
-        p.fire_cd = max(0.0, p.fire_cd - dt)
-        if p.reloading:
-            p.reload_t -= dt
-            if p.reload_t <= 0:
-                p.reload_t = 0
-                p.reloading = False
-                self._finish_reload()
-        # 自动换弹:弹匣空了且背包里有对应弹药,自动开始装填(不必按 R)
-        if (p.weapon is not None and not p.reloading and p.reload_t <= 0
-                and p.weapon.state.get("mag", 0) <= 0
-                and p.reserve_count() > 0 and not self.over):
-            self.start_reload()
-        p.hurt_flash = max(0.0, p.hurt_flash - dt)
+        # 装填计时 / 自动换弹 / 受击闪光(两人各自算)
+        self._update_weapon_timers(p, dt)
+        if self.coop and self.player2 is not None:
+            self._update_weapon_timers(self.player2, dt)
 
-        # 撤离引导
-        zone = None
-        for name, r in self.map.extracts:
-            if r.collidepoint(p.x, p.y):
-                zone = name
-                break
-        if zone is not None and not self.allows_extract():
-            # 突袭模式:指挥设施没炸完不让撤
-            if "locked" not in self.warned:
-                self.warned.add("locked")
-                self.add_toast("先炸掉全部指挥设施才能撤离!", COL["bad"], 3.6)
-            zone = None
-            self.extract_t = max(0.0, self.extract_t - dt * 3)
-        if zone is not None and self.mode == "story":
-            # 剧情:每个撤离点都有自己的条件(信任/通行证/样本/隐藏点)
-            ok, why = story_mod.can_use_extract(self.game.save, zone)
-            if not ok:
-                if zone not in self.warned:
-                    self.warned.add(zone)
-                    self.add_toast(f"「{zone}」现在还走不了:{why}", COL["bad"], 3.6)
-                zone = None
-                self.extract_t = max(0.0, self.extract_t - dt * 3)
-        if zone is not None and not moving and not p.reloading:
-            if self.extract_t == 0:
-                self.add_toast(f"开始撤离:{zone}", COL["accent"])
-            self.extract_t += dt
-            if self.extract_t >= EXTRACT_TIME:
-                self.add_toast("撤离成功!", COL["good"])
-                self.finish("extract")
-                return
+        # 撤离引导(双人合作:两位玩家各自累积,任意一人站满就带队撤离)
+        self.extract_t, ready = self._extract_tick(p, self.extract_t, dt,
+                                                   moving=moving)
+        if self.coop and self.player2 is not None and not self.player2.dead:
+            self.p2_extract_t, ready2 = self._extract_tick(
+                self.player2, self.p2_extract_t, dt)
         else:
-            self.extract_t = max(0.0, self.extract_t - dt * 3)
+            ready2 = False
+        if ready or ready2:
+            self.add_toast("撤离成功!", COL["good"])
+            self.finish("extract")
+            return
 
         # 迷雾/可见性缓存刷新(敌人 AI 的 threat_for/sees_player 都读它)
         self.refresh_fog(dt)
@@ -2530,16 +2750,20 @@ class Raid:
         # 「玩家屏幕位置到四个屏幕角的最大距离」—— 超过它的守军一定在画面外,
         # 于是可以降频模拟(enemy.Scav.update 里的远景降级)。摄像机贴地图边时
         # 玩家不在屏幕正中,所以必须每帧按实际相机位置算,不能用常数。
+        # 双人合作:取两位玩家里的最大值(任何一位能看到就不许降级)。
         self.frame += 1
         camx, camy = self.cam
-        pxs = p.x - camx
-        pys = p.y - camy
-        wx = W - pxs
-        hy = H - pys
-        self.view_reach2 = max(pxs * pxs + pys * pys,
-                               wx * wx + pys * pys,
-                               pxs * pxs + hy * hy,
-                               wx * wx + hy * hy)
+        reach = 0.0
+        for q in self.players():
+            pxs = q.x - camx
+            pys = q.y - camy
+            wx = W - pxs
+            hy = H - pys
+            reach = max(reach, pxs * pxs + pys * pys,
+                        wx * wx + pys * pys,
+                        pxs * pxs + hy * hy,
+                        wx * wx + hy * hy)
+        self.view_reach2 = reach
 
         # 实体
         for s in self.scavs:
@@ -2551,6 +2775,7 @@ class Raid:
         self._update_burn(dt)
         self._update_channel(dt)
         self._update_take(dt)
+        self._update_p2_take(dt)
         self._update_heal(dt)
         self._update_support(dt)
         self._update_c4(dt)
@@ -2576,9 +2801,192 @@ class Raid:
         self.toasts = [t for t in self.toasts if t[1] > 0]
         self.shake = max(0.0, self.shake - dt * 18)
 
-        # 摄像机
-        self.cam[0] = max(0, min(self.map.px_w - W, p.x - W / 2))
-        self.cam[1] = max(0, min(self.map.px_h - H, p.y - H / 2))
+        # 摄像机:双人合作跟随还活着的玩家的中点(倒下的不再拉着镜头)
+        fx, fy = self.cam_anchor()
+        self.cam[0] = max(0, min(self.map.px_w - W, fx - W / 2))
+        self.cam[1] = max(0, min(self.map.px_h - H, fy - H / 2))
+
+    # ---------- 双人合作:P2 的操作 ----------
+    def _update_weapon_timers(self, p, dt):
+        """武器计时:开火冷却 / 装填 / 自动换弹 / 受击闪光(每位玩家各算)。"""
+        p.fire_cd = max(0.0, p.fire_cd - dt)
+        if p.reloading:
+            p.reload_t -= dt
+            if p.reload_t <= 0:
+                p.reload_t = 0
+                p.reloading = False
+                self._finish_reload(p)
+        # 自动换弹:弹匣空了且背包里有对应弹药,自动开始装填(不必按 R)
+        if (p.weapon is not None and not p.reloading and p.reload_t <= 0
+                and p.weapon.state.get("mag", 0) <= 0
+                and p.reserve_count() > 0 and not self.over):
+            self.start_reload(p)
+        p.hurt_flash = max(0.0, p.hurt_flash - dt)
+
+    def _update_p2(self, dt, keys):
+        """P2:方向键移动 + 自动瞄准最近可见敌人 + 动作键(全程不用鼠标)。"""
+        p2 = self.player2
+        if p2 is None or p2.dead or self.over:
+            return
+        # 移动(换弹时减速;重武器换弹不能动)
+        vx = float(self.key_down(keys, p2, "right")
+                   - self.key_down(keys, p2, "left"))
+        vy = float(self.key_down(keys, p2, "down")
+                   - self.key_down(keys, p2, "up"))
+        heavy = (p2.weapon is not None
+                 and p2.weapon.def_.get("braced_immobile"))
+        if p2.reloading and heavy:
+            vx = vy = 0.0
+        if vx or vy:
+            length = math.hypot(vx, vy)
+            spd = p2.speed(False) * (MOVE_RELOAD_MUL if p2.reloading else 1.0)
+            p2.x, p2.y = self.map.move_circle(
+                (p2.x, p2.y), vx / length * spd * dt, vy / length * spd * dt,
+                PLAYER["radius"])
+        # 瞄准:自动锁最近的可见敌人(看不到就朝移动方向)
+        tgt = self.nearest_visible_enemy(p2.x, p2.y, COOP["aim_range"])
+        if tgt is not None:
+            p2.aim = math.atan2(tgt.y - p2.y, tgt.x - p2.x)
+        elif vx or vy:
+            p2.aim = math.atan2(vy, vx)
+        # 开火:按住 = 连发,点按 = 点射(具体由武器射击模式决定)
+        if self.dialogue is None and not self.over:
+            self.try_fire(self.key_down(keys, p2, "fire"), p=p2,
+                          edge=self.p2_fire_edge, braced=False)
+        self.p2_fire_edge = False
+
+    def _p2_key(self, key):
+        """P2 按下的动作键(不认识的键直接忽略)。"""
+        if self.player2 is None or self.player2.dead:
+            return
+        k = COOP["keys"]
+        if key in k["fire"]:
+            self.p2_fire_edge = True
+        elif key in k["interact"]:
+            self.p2_interact()
+        elif key in k["reload"]:
+            if not (self.inv_open or self.loot_target is not None):
+                self.start_reload(self.player2)
+        elif key in k["heal"]:
+            if not (self.inv_open or self.loot_target is not None):
+                self.p2_quick_heal()
+
+    def nearest_container_for(self, p, dist):
+        best, bd = None, dist
+        for lc in self.containers:
+            d = math.hypot(lc.rect.centerx - p.x, lc.rect.centery - p.y)
+            if d < bd:
+                best, bd = lc, d
+        return best
+
+    def p2_interact(self):
+        """P2 的交互:正在搜刮就停下;附近有箱子就开始自动搜刮。
+
+        P2 不打开搜刮面板(鼠标是 P1 的),所以这里是「逐件搜出 + 直接进包」。
+        """
+        p2 = self.player2
+        if self.p2_take is not None:
+            self.p2_take = None
+            self.add_toast("P2 停止搜刮", COL["text_dim"], 2.0)
+            return
+        lc = self.nearest_container_for(p2, COOP["bank_range"])
+        if lc is None:
+            self.add_toast("P2:附近没有可搜的箱子", COL["text_dim"], 2.2)
+            return
+        queue = list(lc.container.items)
+        if not queue:
+            self.add_toast(f"P2:{lc.name} 是空的", COL["text_dim"], 2.2)
+            return
+        self.p2_take = dict(lc=lc, queue=queue, t=0.0,
+                            need=self.loot_take_time(queue[0].item))
+        self.add_toast(f"P2 开始搜刮 {lc.name}(再按一次交互可停)", COL["accent"], 2.6)
+        audio.play("click")
+
+    def p2_take_one(self, lc, placed):
+        """P2 拿走一件:空手时武器/护甲/头盔直接装上,否则进背包。放不下 = 停。"""
+        p2 = self.player2
+        item = placed.item
+        if item.cat == "weapon" and p2.weapon is None \
+                and armor_allows(p2.armor, item.def_):
+            lc.container.remove_placed(placed)
+            p2.weapon = item
+            p2.burst_left = 0
+            p2.reloading = False
+            p2.reload_t = 0
+        elif item.cat == "armor" and p2.armor is None:
+            lc.container.remove_placed(placed)
+            p2.armor = item
+        elif item.cat == "helmet" and p2.helmet is None:
+            lc.container.remove_placed(placed)
+            p2.helmet = item
+        elif not try_move(lc.container, placed, p2.bag):
+            self.add_toast("P2 背包满了!先撤离(战利品并进仓库),或让 P1 收剩下的",
+                           COL["bad"], 3.4)
+            return False
+        self._log_gained(item)
+        audio.play("pickup")
+        self.add_toast(f"P2 收走 {item.name}"
+                       + (f" ×{item.count}" if item.count > 1 else ""),
+                       COL["good"], 1.8)
+        return True
+
+    def _update_p2_take(self, dt):
+        """P2 的自动搜刮:读条搜出身份 -> 收进自己背包 -> 下一件。"""
+        tk = self.p2_take
+        if tk is None or self.over:
+            return
+        p2 = self.player2
+        if p2 is None or p2.dead:
+            self.p2_take = None
+            return
+        lc = tk["lc"]
+        if lc not in self.containers or \
+                math.hypot(lc.rect.centerx - p2.x,
+                           lc.rect.centery - p2.y) > COOP["bank_range"]:
+            self.p2_take = None
+            self.add_toast("P2 离开太远,搜刮中断", COL["text_dim"], 2.2)
+            return
+        queue = [x for x in tk["queue"] if x in lc.container.items]
+        if not queue:
+            self.p2_take = None
+            self.add_toast(f"P2:{lc.name} 搜完了", COL["good"], 2.4)
+            return
+        placed = queue[0]
+        tk["t"] += dt
+        if tk["t"] < tk["need"]:
+            return
+        self.mark_known(placed)
+        if not self.p2_take_one(lc, placed):
+            self.p2_take = None
+            return
+        tk["queue"] = queue[1:]
+        tk["t"] = 0.0
+        if tk["queue"]:
+            tk["need"] = self.loot_take_time(tk["queue"][0].item)
+        else:
+            self.p2_take = None
+            self.add_toast(f"P2:{lc.name} 搜完了", COL["good"], 2.4)
+
+    def p2_quick_heal(self):
+        """P2 打药:直接用手上最合适的那件(双人里 P2 不开背包,所以不读条)。"""
+        p2 = self.player2
+        if p2 is None or p2.dead:
+            return
+        if p2.hp >= p2.max_hp:
+            self.add_toast("P2:生命值已满", COL["text_dim"], 1.8)
+            return
+        meds = [pl for pl in p2.bag.items if pl.item.cat == "med"]
+        if not meds:
+            self.add_toast("P2:背包里没有医疗品", COL["bad"], 2.2)
+            return
+        missing = p2.max_hp - p2.hp
+        cover = [pl for pl in meds if pl.item.def_.get("heal", 0) >= missing]
+        pick = min(cover, key=lambda pl: pl.item.def_["heal"]) if cover else \
+            max(meds, key=lambda pl: pl.item.def_["heal"])
+        healed = p2.heal(pick.item.def_["heal"])
+        p2.bag.remove_placed(pick)
+        audio.play("heal")
+        self.add_toast(f"P2 打药 +{healed}({pick.item.name})", COL["good"], 2.2)
 
     # ---------- 界面点击 ----------
     def _handle_pause_click(self, pos):

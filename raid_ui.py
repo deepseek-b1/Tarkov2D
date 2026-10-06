@@ -8,7 +8,8 @@ import audio
 import bindings
 from settings import (W, H, COL, BAG_W, BAG_H, RAID_TIME, EXTRACT_TIME,
                       HOSTAGE_RESCUE_TIME, REVIVE_TIME, C4_BLAST_RADIUS,
-                      NIGHT_DARK_RGB, NIGHT_BEAM_RGB, PLAYER, fmt_rub, get_font,
+                      NIGHT_DARK_RGB, NIGHT_BEAM_RGB, PLAYER, COOP,
+                      fmt_rub, get_font,
                       weapon_beam, helmet_nvg, weapon_fire_mode,
                       weapon_fire_modes, fire_mode_name)
 import uikit
@@ -513,18 +514,14 @@ def draw_raid(raid, screen):
         if batch:
             screen.blits(batch, 0)
 
-    # 玩家
+    # 玩家(双人合作时 P2 也画出来:自己的颜色 + 名字牌)
     px, py = p.x + ox, p.y + oy
-    gun_len = 26 if p.weapon else 0
-    if p.weapon:
-        pygame.draw.line(screen, (235, 235, 240),
-                         (px, py),
-                         (px + math.cos(p.aim) * gun_len, py + math.sin(p.aim) * gun_len), 4)
-    pygame.draw.circle(screen, COL["player"], (int(px), int(py)), PLAYER["radius"])
-    pygame.draw.circle(screen, (20, 26, 34), (int(px), int(py)), PLAYER["radius"], 3)
-    if p.hurt_flash > 0:
-        pygame.draw.circle(screen, (255, 60, 50), (int(px), int(py)),
-                           PLAYER["radius"] + 6, 2)
+    coop = getattr(raid, "coop", False)
+    _draw_actor(screen, raid, p, px, py, COL["player"],
+                "P1" if coop else None)
+    p2 = getattr(raid, "player2", None)
+    if p2 is not None:
+        _draw_actor(screen, raid, p2, p2.x + ox, p2.y + oy, COOP["color"], "P2")
 
     # 战争迷雾 / 夜战光照(乘性压暗,见文件头的 _mask_surface 说明)。
     # 缓存表面只在 fog_version 变化(移动/转头)时"填充 + 打洞",
@@ -546,9 +543,12 @@ def draw_raid(raid, screen):
                     if len(pts) >= 3:
                         pygame.draw.polygon(layer, NIGHT_BEAM_RGB, pts)
         else:
-            pts = [(x - cx, y - cy) for x, y in (raid.fog_polygon or ())]
-            if len(pts) >= 3:
-                pygame.draw.polygon(layer, (255, 255, 255), pts)
+            # 双人合作:两位玩家的视野多边形都打洞(屏幕上只有一张画面)
+            polys = getattr(raid, "fog_polys", None) or [raid.fog_polygon]
+            for poly in polys:
+                pts = [(x - cx, y - cy) for x, y in (poly or ())]
+                if len(pts) >= 3:
+                    pygame.draw.polygon(layer, (255, 255, 255), pts)
     screen.blit(layer, (0, 0), special_flags=pygame.BLEND_RGB_MULT)
 
     # 受击红屏(保持原来的红色蒙版观感:
@@ -638,6 +638,20 @@ def draw_raid(raid, screen):
         t = get_font(13, bold=True).render(f"{label} {int(ratio * 100)}%", True, col)
         screen.blit(t, t.get_rect(center=(px, by - 12)))
 
+    # 双人合作:P2 的撤离/自动搜刮进度条(条在 P2 头顶)
+    if p2 is not None and not p2.dead:
+        p2x, p2y = p2.x + ox, p2.y + oy
+        if getattr(raid, "p2_extract_t", 0.0) > 0:
+            _bar(screen, p2x, p2y - 34,
+                 raid.p2_extract_t / EXTRACT_TIME, COL["extract"])
+        tk2 = getattr(raid, "p2_take", None)
+        if tk2 is not None:
+            ratio2 = min(1.0, tk2["t"] / max(0.01, tk2["need"]))
+            _bar(screen, p2x, p2y - 54, ratio2, COL["good"])
+            t = get_font(13, bold=True).render(f"P2 搜刮 {int(ratio2 * 100)}%",
+                                               True, COL["good"])
+            screen.blit(t, t.get_rect(center=(p2x, p2y - 66)))
+
     _draw_hud(raid, screen)
 
     # 手机模式的虚拟摇杆与按钮(弹窗打开时不显示,让位给界面操作)
@@ -657,6 +671,41 @@ def draw_raid(raid, screen):
         _draw_dialogue(raid, screen)
     if raid.over:
         _draw_result(raid, screen)
+
+
+def _draw_actor(screen, raid, p, sx, sy, col, label=None):
+    """画一位玩家:枪线 + 身体 + 名字牌(倒下 = 暗红叉;双人时标 P1/P2)。"""
+    if p.dead:
+        r = PLAYER["radius"]
+        pygame.draw.circle(screen, (96, 60, 60), (int(sx), int(sy)), r)
+        pygame.draw.circle(screen, (40, 24, 26), (int(sx), int(sy)), r, 3)
+        pygame.draw.line(screen, (170, 70, 66), (sx - 9, sy - 9), (sx + 9, sy + 9), 3)
+        pygame.draw.line(screen, (170, 70, 66), (sx - 9, sy + 9), (sx + 9, sy - 9), 3)
+        if label:
+            t = get_font(12, bold=True).render(f"{label} 阵亡", True, (214, 126, 116))
+            screen.blit(t, t.get_rect(center=(sx, sy - r - 12)))
+        return
+    if p.weapon:
+        pygame.draw.line(screen, (235, 235, 240), (sx, sy),
+                         (sx + math.cos(p.aim) * 26,
+                          sy + math.sin(p.aim) * 26), 4)
+    pygame.draw.circle(screen, col, (int(sx), int(sy)), PLAYER["radius"])
+    pygame.draw.circle(screen, (20, 26, 34), (int(sx), int(sy)), PLAYER["radius"], 3)
+    if p.hurt_flash > 0:
+        pygame.draw.circle(screen, (255, 60, 50), (int(sx), int(sy)),
+                           PLAYER["radius"] + 6, 2)
+    if label:
+        t = get_font(12, bold=True).render(label, True, col)
+        screen.blit(t, t.get_rect(center=(sx, sy - PLAYER["radius"] - 12)))
+
+
+def _bar(screen, cx, y, ratio, col):
+    """玩家头顶的小进度条(撤离/搜刮/治疗)。"""
+    bw = 90
+    bx = cx - bw / 2
+    pygame.draw.rect(screen, (30, 30, 36), (bx, y, bw, 9), border_radius=4)
+    pygame.draw.rect(screen, col, (bx, y, bw * min(1.0, max(0.0, ratio)), 9),
+                     border_radius=4)
 
 
 def _draw_dialogue(raid, screen):
@@ -724,12 +773,13 @@ def dialogue_layout(raid):
 
 
 def _edge_arrow(screen, raid, name, r, ox, oy):
-    p = raid.player
+    # 以镜头锚点为基准(双人合作 = 还活着的玩家的中点),和镜头保持一致
+    ax_w, ay_w = raid.cam_anchor()
     sx, sy = r.centerx - raid.cam[0], r.centery - raid.cam[1]
-    dist = math.hypot(r.centerx - p.x, r.centery - p.y)
+    dist = math.hypot(r.centerx - ax_w, r.centery - ay_w)
     if dist < 300:
         return
-    pxs, pys = p.x - raid.cam[0], p.y - raid.cam[1]
+    pxs, pys = ax_w - raid.cam[0], ay_w - raid.cam[1]
     dx, dy = sx - pxs, sy - pys
     if dx == dy == 0:
         return
@@ -906,6 +956,44 @@ def _draw_hud(raid, screen):
             t = f.render(ln, True, col)
             screen.blit(t, (32, yy))
             yy += 22
+
+    # 双人合作:P2 状态面板(左上角常驻;放在战局计时条下面,不压住它)
+    if getattr(raid, "coop", False) and raid.player2 is not None and not raid.over:
+        import coop as coop_mod
+        q = raid.player2
+        col = COOP["color"]
+        y0 = 44 if not getattr(raid, "dark", False) else 84
+        head = "P2 合作队友" + ("  阵亡" if q.dead else "")
+        hp_txt = f"HP {max(0, int(q.hp))}/{q.max_hp}"
+        if q.weapon is not None:
+            wtxt = (f"{q.weapon.name}  {q.weapon.state.get('mag', 0)}"
+                    f" / {q.reserve_count()}")
+        else:
+            wtxt = "未携带武器"
+        hint = coop_mod.key_hint(short=True)
+        bw = 430
+        screen.blit(_hud_bg(bw, 82, (10, 12, 14, 178)), (20, y0))
+        t = get_font(16, bold=True).render(head, True,
+                                           (200, 120, 110) if q.dead else col)
+        screen.blit(t, (30, y0 + 4))
+        bar = pygame.Rect(30, y0 + 26, 190, 14)
+        pygame.draw.rect(screen, COL["hp_bg"], bar, border_radius=4)
+        if not q.dead and q.hp > 0:
+            pygame.draw.rect(screen, COL["hp"],
+                             (bar.x, bar.y, bar.w * max(0.0, q.hp / q.max_hp),
+                              bar.h), border_radius=4)
+        pygame.draw.rect(screen, COL["border"], bar, 1, border_radius=4)
+        t = get_font(13, bold=True).render(hp_txt, True, (255, 255, 255))
+        screen.blit(t, t.get_rect(center=bar.center))
+        screen.blit(get_font(14).render(wtxt, True, COL["text"]),
+                    (bar.right + 12, y0 + 25))
+        tk2 = getattr(raid, "p2_take", None)
+        if tk2 is not None:
+            screen.blit(get_font(13).render(
+                f"正在搜刮 {tk2['lc'].name}(还剩 {len(tk2['queue'])} 件)",
+                True, COL["good"]), (bar.right + 12, y0 + 45))
+        screen.blit(get_font(13).render(hint, True, COL["text_dim"]),
+                    (30, y0 + 50))
 
     # 提示(交互键名跟玩家改键走)
     if not (raid.inv_open or raid.loot_target or raid.paused or raid.over):
@@ -1299,6 +1387,8 @@ def _draw_result(raid, screen):
               "death": ("你已阵亡 — 带入装备已丢失", COL["bad"]),
               "mia": ("行动超时 — 按阵亡处理", COL["bad"])}
     title, col = titles[r["kind"]]
+    if r.get("coop") and r["kind"] != "extract":
+        title = "两人都倒下了 — 这一局搜到的都丢了"
     t = get_font(42, bold=True).render(title, True, col)
     screen.blit(t, t.get_rect(center=(W // 2, 150)))
 
@@ -1312,6 +1402,18 @@ def _draw_result(raid, screen):
                 f"搜刮 {r['n']} 件  价值 {fmt_rub(r['gained'])}")
     t = get_font(20).render(line, True, COL["text"])
     screen.blit(t, t.get_rect(center=(W // 2, 210)))
+    if r.get("coop"):
+        # 双人合作结算:P2 的死活 + 战利品去向
+        if r["kind"] == "extract":
+            l2 = ("P2 也活着撤出来了" if not r.get("p2_dead")
+                  else "P2 阵亡 —— 他背包里的那份丢了")
+            if r.get("banked") is not None:
+                l2 += f"(战利品进仓库 {r['banked']} 件"
+                l2 += (f",放不下 {r['bank_lost']} 件)" if r.get("bank_lost") else ")")
+        else:
+            l2 = "P2 阵亡" if r.get("p2_dead") else "行动失败"
+        t = get_font(16, bold=True).render(l2, True, COL["accent"])
+        screen.blit(t, t.get_rect(center=(W // 2, 242)))
     if r.get("mode") == "hostage":
         ok = r.get("mission")
         obj = (f"人质解救 {r.get('rescued', 0)}/{r.get('hostages', 0)} —— "

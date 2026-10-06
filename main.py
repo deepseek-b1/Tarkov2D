@@ -18,7 +18,7 @@ import traceback
 
 
 def write_run_version():
-    """把当前版本写到存档目录,便于排查"现在跑的是哪一版"。"""
+    """把当前版本(和登录的账号)写到存档目录,便于排查"现在跑的是哪一版"。"""
     try:
         import save as _save
         from settings import GAME_VERSION
@@ -26,6 +26,8 @@ def write_run_version():
         with open(os.path.join(_save.SAVE_DIR, "last_run_version.txt"),
                   "w", encoding="utf-8") as f:
             f.write(GAME_VERSION + "\n")
+            if getattr(_save, "PROFILE", None):
+                f.write(f"account: {_save.PROFILE}\n")
     except Exception:
         pass
 
@@ -116,37 +118,53 @@ async def run_game():
         except Exception:
             pass
 
-    clock = pygame.time.Clock()
-    game = Game(screen)
-    # 命令行/平台覆盖手机模式
-    if "--touch" in sys.argv:
-        game.save.touch = True
-    elif "--pc" in sys.argv:
-        game.save.touch = False
-    elif on_android or _is_web():
-        game.save.touch = True      # 安卓 / 网页版默认手机模式(触屏 + 自动锁敌)
+    # 账号登录:一个「名字 + 密码」= 一份独立存档(accounts.py)。
+    # 藏身处设置页的「切换账号」会回到这里重新登录,所以外面套一层循环。
+    import login as login_mod
+    while True:
+        entered, migrated = await login_mod.run_login(screen)
+        if not entered:
+            pygame.quit()
+            return              # 玩家在登录界面选择了退出
+        write_run_version()
+        clock = pygame.time.Clock()
+        game = Game(screen)
+        if migrated:
+            game.hideout.say("原来那份存档已并进这个账号 —— 进度、仓库、钱都在",
+                             None, ttl=9.0)
+        # 命令行/平台覆盖手机模式
+        if "--touch" in sys.argv:
+            game.save.touch = True
+        elif "--pc" in sys.argv:
+            game.save.touch = False
+        elif on_android or _is_web():
+            game.save.touch = True      # 安卓 / 网页版默认手机模式(触屏 + 自动锁敌)
 
-    try:
-        while not game.quit:
-            # 帧率上限从存档读(设置页可改;0 = 不锁)
-            cap = int(getattr(game.save, "fps_cap", 0) or 0)
-            dt = min(clock.tick(cap) / 1000.0, 0.05)
-            events = pygame.event.get()
-            game.update(dt, events)
-            if game.quit:
-                break
-            game.draw(screen)
-            if getattr(game.save, "show_fps", True):
-                from settings import get_font
-                fps = clock.get_fps()
-                col = ((110, 220, 120) if fps >= 110 else
-                       (240, 200, 90) if fps >= 55 else (240, 90, 80))
-                t = get_font(15, bold=True).render(f"{fps:.0f} FPS", True, col)
-                screen.blit(t, (W - t.get_width() - 12, 8))
-            pygame.display.flip()
-            await asyncio.sleep(0)     # 让出控制权(网页版必需)
-    finally:
-        game.shutdown()
+        try:
+            while not game.quit:
+                # 帧率上限从存档读(设置页可改;0 = 不锁)
+                cap = int(getattr(game.save, "fps_cap", 0) or 0)
+                dt = min(clock.tick(cap) / 1000.0, 0.05)
+                events = pygame.event.get()
+                game.update(dt, events)
+                if game.quit:
+                    break
+                game.draw(screen)
+                if getattr(game.save, "show_fps", True):
+                    from settings import get_font
+                    fps = clock.get_fps()
+                    col = ((110, 220, 120) if fps >= 110 else
+                           (240, 200, 90) if fps >= 55 else (240, 90, 80))
+                    t = get_font(15, bold=True).render(f"{fps:.0f} FPS", True, col)
+                    screen.blit(t, (W - t.get_width() - 12, 8))
+                pygame.display.flip()
+                await asyncio.sleep(0)     # 让出控制权(网页版必需)
+        finally:
+            # 切账号时保留窗口(pygame.quit 会把显示表面一起销毁)
+            game.shutdown(keep_window=game.switch_account)
+        if not game.switch_account:
+            break
+
 
 
 def main():

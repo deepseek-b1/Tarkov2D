@@ -21,6 +21,8 @@ from settings import (W, H, COL, fmt_rub, get_font, DIFF_ORDER, DIFFICULTIES,
                       armor_allows, MAPS, MAP_ORDER, MODES, MODE_ORDER, MODE_MAP,
                       weapon_class, WEAPON_CLASS_COL)
 from inventory import Item, Placed, organize, try_move
+import accounts
+import coop as coop_mod
 import uikit
 from uikit import draw_grid, draw_button, draw_slot, draw_tooltip
 
@@ -73,6 +75,8 @@ class Hideout:
                 sp.x + 18 + col * 100, sp.y + 62 + row * 34, 92, 30))
         self.mode_rects = [pygame.Rect(sp.x + 18 + i * 58, sp.y + 172, 55, 30)
                            for i in range(len(MODE_ORDER))]
+        # 双人合作开关(同一台电脑两人玩;只在搜打撤模式生效,见 coop.py)
+        self.coop_rect = pygame.Rect(sp.x + 220, sp.y + 146, 92, 26)
         self.diff_rects = [pygame.Rect(sp.x + 18 + i * 100, sp.y + 248, 92, 30)
                            for i in range(3)]
         # 仓库滚轮(仓库格子变多了,面板只显示一部分)
@@ -147,6 +151,8 @@ class Hideout:
         self.opt_plus = pygame.Rect(1052, 552, 44, 30)
         self.opt_save = pygame.Rect(548, 616, 200, 40)
         self.opt_defaults = pygame.Rect(770, 616, 200, 40)
+        # 账号:显示当前存档属于谁 + 回登录界面换账号(见 accounts.py)
+        self.opt_account = pygame.Rect(1010, 74, 150, 30)
         # 触屏模式的翻页按钮(手机没有滚轮)
         self.scroll_btns = {}
         self.rscroll_btns = {}
@@ -282,6 +288,11 @@ class Hideout:
         if self.opt_defaults.collidepoint(pos):
             self._opt_restore_defaults()
             return
+        if self.opt_account.collidepoint(pos):
+            # 回登录界面换账号(藏身处才允许;战局中不能换)
+            if self.game.request_switch_account():
+                audio.play("pickup")
+            return
         if self.opt_tab == "controls":
             for i, (act, _name) in enumerate(bindings.ACTIONS):
                 if self.opt_bind_rects[i].collidepoint(pos):
@@ -353,6 +364,14 @@ class Hideout:
         t = get_font(30, bold=True).render("设置 — 键位 / 触屏 / 画质", True,
                                            COL["accent"])
         screen.blit(t, t.get_rect(center=(W // 2, 44)))
+
+        # 账号(存档归属)+ 换账号
+        acct = getattr(save_mod, "PROFILE", None)
+        t = get_font(15, bold=True).render(
+            f"账号:{acct or '(未登录)'}", True, COL["text_dim"])
+        screen.blit(t, (546, 80))
+        draw_button(screen, self.opt_account, "切换账号",
+                    self.opt_account.collidepoint(mx, my), small=True)
 
         labels = {"controls": "控制(键盘)", "touch": "触屏按键", "video": "画质与帧率"}
         for i, key in enumerate(self.opt_tab_keys):
@@ -1193,6 +1212,23 @@ class Hideout:
                          COL["accent"], ttl=3.2)
                 return
 
+        # 双人合作开关(同一台电脑两人玩;P2 用键盘,见 coop.py)
+        if self.coop_rect.collidepoint(pos):
+            if sd.touch:
+                self.say("双人合作要键盘:P2 用方向键操作 —— "
+                         "先把「手机模式」关掉", COL["bad"], 3.6)
+                return
+            if sd.mode != "raid":
+                self.say("双人合作只在「搜打撤」模式生效(先切回搜打撤)", COL["bad"], 3.4)
+                return
+            sd.coop = not sd.coop
+            save_mod.save_data(sd)
+            if sd.coop:
+                self.say("双人合作已开启 · " + coop_mod.key_hint(), COL["accent"], 6.0)
+            else:
+                self.say("双人合作已关闭(恢复单人)", COL["text_dim"], 3.2)
+            return
+
         # 难度选择(突袭/人质/剧情是固定强度,没有难度档)
         if sd.mode in ("assault", "story") or sd.mode in MODE_DIFF:
             fixed_txt = ("突袭模式是固定强度,不适用难度档(系统会配发满配装备)"
@@ -1711,6 +1747,18 @@ class Hideout:
 
         t = get_font(17, bold=True).render("游戏模式", True, COL["accent"])
         screen.blit(t, (sp.x + 18, sp.y + 148))
+        # 双人合作开关(放在标题右侧;只对搜打撤生效)
+        coop_on = bool(getattr(sd, "coop", False))
+        cbtn = self.coop_rect
+        chov = cbtn.collidepoint(mx, my)
+        pygame.draw.rect(screen, COL["panel_hi"] if chov else COL["panel"], cbtn,
+                         border_radius=6)
+        pygame.draw.rect(screen, COL["accent"] if coop_on else COL["border"], cbtn,
+                         2 if coop_on else 1, border_radius=6)
+        ct = get_font(13, bold=True).render(
+            "双人合作:开" if coop_on else "双人合作:关", True,
+            COL["accent"] if coop_on else COL["text_dim"])
+        screen.blit(ct, ct.get_rect(center=cbtn.center))
         draw_choice(self.mode_rects, MODE_ORDER,
                     {k: MODES[k].get("short", MODES[k]["name"]) for k in MODE_ORDER},
                     sd.mode)
@@ -1755,7 +1803,8 @@ class Hideout:
             f"出击 {st['raids']} 次    撤离 {st['extracts']} 次",
             f"阵亡 {st['deaths']} 次    击杀 {st['kills']} 人",
             f"余额 {fmt_rub(sd.rubles)}    搜刮 {fmt_rub(st['value'])}",
-            "",
+            ("★ 双人合作已开:P2 用方向键 + 右Shift(见玩法简介)"
+             if coop_on else ""),
             f"{move_txt} · 左键射击 · 右键架枪",
             f"弹匣空自动换弹 · {hr} 打药 · {kl} 搜刮/救人",
             f"{hb} 背包 · 死亡会丢装备(保险箱除外)",

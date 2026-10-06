@@ -23,6 +23,24 @@ def _default_dir():
 SAVE_DIR = _default_dir()
 SAVE_FILE = os.path.join(SAVE_DIR, "save.json")
 
+# 当前登录的账号目录名(None = 还没登录/单档)。多账号见 accounts.py:
+# 每个账号一份 <SAVE_DIR>/accounts/<名字>/save.json,切账号就是换 SAVE_FILE。
+PROFILE = None
+
+
+def use_profile(slug=None):
+    """把存档文件切到某个账号(名字为空 = 回到 <SAVE_DIR>/save.json)。"""
+    global SAVE_FILE, PROFILE
+    if not slug:
+        PROFILE = None
+        SAVE_FILE = os.path.join(SAVE_DIR, "save.json")
+        return SAVE_FILE
+    d = os.path.join(SAVE_DIR, "accounts", str(slug))
+    os.makedirs(d, exist_ok=True)
+    PROFILE = str(slug)
+    SAVE_FILE = os.path.join(d, "save.json")
+    return SAVE_FILE
+
 
 class SaveData:
     def __init__(self):
@@ -37,6 +55,7 @@ class SaveData:
         self.difficulty = "lockdown"   # easy / lockdown / hardened
         self.map_key = "border"        # 出战地图(border / tv / port / indoor / base)
         self.mode = "raid"             # raid 搜打撤 / hostage 人质解救 / assault 突袭
+        self.coop = False              # 双人合作(同一台电脑两人玩,只对搜打撤生效)
         self.touch = False             # 手机(触屏)模式:虚拟摇杆 + 按钮 + 自动锁敌
         self.seen_intro = False        # 是否看过玩法简介
         self.rubles = 20000  # 货币
@@ -119,6 +138,7 @@ class SaveData:
             "difficulty": self.difficulty,
             "map": self.map_key,
             "mode": self.mode,
+            "coop": bool(self.coop),
             "touch": bool(self.touch),
             "seen_intro": bool(self.seen_intro),
             "rubles": int(self.rubles),
@@ -174,6 +194,7 @@ class SaveData:
             sd.map_key = data["map"]
         if data.get("mode") in MODES:
             sd.mode = data["mode"]
+        sd.coop = bool(data.get("coop", False))
         sd.touch = bool(data.get("touch", False))
         sd.seen_intro = bool(data.get("seen_intro", False))
         try:

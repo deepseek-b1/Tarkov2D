@@ -102,6 +102,9 @@ class Scav:
             return False
         if target is raid.player:
             return id(self) in raid.sight_vis
+        p2 = getattr(raid, "player2", None)
+        if p2 is not None and target is p2:
+            return id(self) in raid.sight_vis2
         return raid.map.los_clear(self.x, self.y, target.x, target.y)
 
     # ---- 移动 ----
@@ -173,10 +176,8 @@ class Scav:
         # 50 人大本营要靠这个把帧率稳住。
         # 关键顺序:先用「到玩家的距离」判降级,再选目标 —— 选目标要对每个队友
         # 做一次判定,原来放在最前面,于是远端守军白烧这份钱。
-        pl = raid.player
-        dpx = pl.x - self.x
-        dpy = pl.y - self.y
-        d2p = dpx * dpx + dpy * dpy
+        # 双人合作:取两位玩家里的最近距离(谁在附近就按谁算,不会被降级)。
+        d2p = raid.nearest_player_d2(self.x, self.y)
         self.path_interval = 0.6 if d2p <= _LOD2 else 1.6
         if d2p > _LOD2 and self.state != "chase":
             # 远景降级:连屏幕都够不到的守军(玩家在哪儿都看不到他)每 4 帧才
@@ -252,7 +253,7 @@ class Scav:
                 if (dist < self.d["atk_range"] and self.shoot_t <= 0
                         and raid.map.los_clear(self.x, self.y, p.x, p.y)):
                     self.shoot_t = self.d["atk_cd"]
-                    raid.player.take_damage(self.d["dmg"], raid)
+                    p.take_damage(self.d["dmg"], raid)
                     raid.add_particles(self.x, self.y, 6, (200, 60, 60))
             else:
                 if see and dist < self.d["range"] and self.shoot_t <= 0:
