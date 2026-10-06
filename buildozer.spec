@@ -12,12 +12,11 @@ package.domain = org.tarkov2d
 
 source.dir = .
 source.include_exts = py,png,jpg,json,ttf,otf,ttc
-source.include_patterns = fonts/*,art/*.png
-source.exclude_patterns = art/_*.png
+source.include_patterns = fonts/*
 source.exclude_dirs = build, dist, update_server, webapp, .github, .codely-cli, __pycache__, p4a-recipes
 source.exclude_exts = spec, bat, md, exe, log, zip
 
-version = 2.11.0
+version = 2.11.1
 
 # Pinned on purpose - each line below is a fix for a real build failure:
 #   * p4a stock pygame recipe is stuck at 2.1.0 (2021) and uses the old

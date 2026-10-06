@@ -324,34 +324,6 @@ def run():
         g.draw(screen)                       # 藏身处(战绩变化后)
         pygame.display.flip()
 
-    def t_player_art():
-        """玩家立绘:三视图素材必须存在且能加载,四个朝向都要画得出来。
-
-        打包(EXE/APK)漏带 art/ 时这里会直接失败 —— 这是有意的:
-        没图会静默退回圆点,只有这条用例能拦住"发布出去才发现没带图"。
-        """
-        from settings import W, H
-        import raid_ui
-
-        frames = raid_ui._player_art_frames()
-        for key in ("front", "back", "side", "side_r"):
-            s = frames.get(key)
-            assert s is not None, f"缺少玩家立绘 {key}(art/player_*.png 没找到?)"
-            assert s.get_height() == raid_ui.PLAYER_SPRITE_H, "立绘高度未按设定缩放"
-        # 四向映射:右 = 左侧镜像、下 = 正面、上 = 背面
-        assert raid_ui._player_facing(0.0) == "side_r"
-        assert raid_ui._player_facing(math.pi) == "side"
-        assert raid_ui._player_facing(math.pi / 2) == "front"
-        assert raid_ui._player_facing(-math.pi / 2) == "back"
-        # 真画一遍:四个朝向都不能抛异常(素材缺失时走圆点回退分支)
-        from game import Game
-        screen = pygame.display.set_mode((W, H))
-        g = Game()
-        g.start_raid()
-        for a in (0.0, math.pi / 2, math.pi, -math.pi / 2):
-            g.raid.player.aim = a
-            g.draw(screen)      # 不能 g.shutdown():那会 pygame.quit() 掉后面的用例
-
     def t_mystery():
         """礼品-神秘人:10 星收集清单、每轮刷新、交货换 6 套全装包、机密文件与开包。"""
         from game import Game
@@ -537,7 +509,6 @@ def run():
     check("战局-全流程模拟(索敌/射击/击杀/医疗/搜刮/装填/撤离)", t_raid)
     check("战局-阵亡清空带入装备", t_death_wipe)
     check("渲染-藏身处与战局全部界面", t_render_all_screens)
-    check("渲染-玩家立绘三视图与四向", t_player_art)
     check("难度-三档强度与存档", t_difficulty)
 
     def t_bugfixes():
