@@ -59,6 +59,24 @@ class Game:
         # 剧情模式:配发 M4A1 前的配置快照 + 本次配发清单
         self.story_snap = None
         self.story_issued = []
+        self._prewarm_map()
+
+    def _prewarm_map(self):
+        """把"下一张要打的地图"提前预渲染好。
+
+        Raid 初始化时会把整张地图画进一张表面(1920×1408,实测约 150 ms),
+        原来这笔开销正好落在**进战局的那一帧**上 —— 就是"点开始战局会卡一下"
+        的来源。地图表面按 map_key 缓存,所以在这里(载入阶段,还没画第一帧)
+        先付掉,之后每次进同一张图都是白拿。
+        """
+        try:
+            from maps import MODE_MAP
+            from world import GameMap
+            mode = getattr(self.save, "mode", "raid")
+            key = MODE_MAP.get(mode) or getattr(self.save, "map_key", "border")
+            GameMap(key).prerender()
+        except Exception:
+            pass
 
     def update(self, dt, events):
         if self.save.touch:

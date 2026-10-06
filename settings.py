@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Tarkov2D 全局配置:常量、物品定义、地图、拾荒者定义。"""
 import pygame
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.11.1"
+GAME_VERSION = "2.11.3"
 # 更新清单地址(可换成自建服务器 / GitHub raw;留空则只认 EXE 同目录的 version.json)
 UPDATE_MANIFEST_URL = "http://127.0.0.1:8765/version.json"
 UPDATE_TIMEOUT = 3   # 检查 / 下载超时(秒)

@@ -983,9 +983,29 @@ class Hideout:
         self.msg_col = color or COL["text"]
 
     # ---------- 逻辑 ----------
+    def _prewarm_selected_map(self):
+        """把当前选中的地图提前画好(只做一次,之后命中缓存直接返回)。
+
+        进战局时 Raid 会把整张地图画一遍(1920×1408,约 150 ms),原来这笔钱
+        正好落在"点了开始战局"的那一帧上。放在藏身处(菜单,帧率不敏感)先付掉,
+        玩家在地图/模式之间切换也会跟着重新预热。
+        每帧只是一次字典查询,代价可以忽略。
+        """
+        try:
+            import world as world_mod
+            from maps import MODE_MAP
+            sd = self.game.save
+            key = (MODE_MAP.get(getattr(sd, "mode", "raid"))
+                   or getattr(sd, "map_key", "border"))
+            if not world_mod.is_prerendered(key):
+                world_mod.prerender_map(key)
+        except Exception:
+            pass
+
     def update(self, dt, events):
         self.msg_t -= dt
         self.reset_armed = max(0.0, self.reset_armed - dt)
+        self._prewarm_selected_map()
         # 玩法简介:先读完再进游戏
         if self.show_intro:
             for ev in events:

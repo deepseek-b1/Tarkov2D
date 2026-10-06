@@ -28,6 +28,18 @@ _PRERENDER_CACHE = {}
 _PRERENDER_MAX = 3
 
 
+def is_prerendered(map_key):
+    """这张地图的表面是不是已经画好了(藏身处每帧只查这一个)。"""
+    if map_key not in MAPS:
+        map_key = "border"
+    return map_key in _PRERENDER_CACHE
+
+
+def prerender_map(map_key):
+    """把某张地图的表面准备好(已缓存则直接返回)。"""
+    return GameMap(map_key).prerender()
+
+
 def _ray_dirs(n):
     """按角度预生成射线方向:每帧 140 次 cos/sin 是白花的。"""
     dirs = _RAY_DIRS.get(n)
