@@ -4274,6 +4274,32 @@ def run():
             ls4 = LS()
             ls4.name = "有中文"
             assert not ls4.submit() and not ls4.done
+            # 7) 滚动备份:写盘前把上一版留成 save.json.bak(丢档保险)
+            import json as _json
+            save_mod._backup_t = 0.0
+            sd = save_mod.load_data()
+            sd.rubles = 4242
+            save_mod.save_data(sd)
+            bak = save_mod.SAVE_FILE + ".bak"
+            assert not os.path.exists(bak), "第一次写盘时还没有旧档可备份"
+            save_mod._backup_t = 0.0          # 模拟"新的一次启动"
+            save_mod.save_data(sd)
+            assert os.path.exists(bak), "再次写盘应该留下 .bak"
+            with open(bak, "r", encoding="utf-8") as f:
+                assert _json.load(f)["rubles"] == 4242, "备份里应该是上一版内容"
+            sd.rubles = 9999
+            save_mod.save_data(sd)            # 10 分钟内不重复备份
+            with open(bak, "r", encoding="utf-8") as f:
+                assert _json.load(f)["rubles"] == 4242, "时间窗内不该刷新备份"
+            with open(save_mod.SAVE_FILE, "r", encoding="utf-8") as f:
+                assert _json.load(f)["rubles"] == 9999
+            # 清档(下一个会话)也会先备份:重置后仍能找回旧档
+            save_mod._backup_t = 0.0
+            save_mod.reset_data()
+            with open(bak, "r", encoding="utf-8") as f:
+                assert _json.load(f)["rubles"] == 9999, "清档也要先留备份"
+            with open(save_mod.SAVE_FILE, "r", encoding="utf-8") as f:
+                assert _json.load(f)["rubles"] == 20000
         finally:
             save_mod.SAVE_DIR, save_mod.SAVE_FILE = base_dir, base_file
             save_mod.use_profile(None)

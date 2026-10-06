@@ -2,6 +2,7 @@
 """存档:JSON 持久化(Windows 用 %LOCALAPPDATA%,安卓用应用私有目录,网页版用虚拟盘)。"""
 import json
 import os
+import shutil
 import sys
 import time
 
@@ -244,8 +245,32 @@ class SaveData:
         return sd
 
 
+_backup_t = 0.0        # 上次滚动备份的时刻(进程内)
+
+# 存档被覆盖(清档 / 出 bug / 手滑)时的最后一道保险:每个进程第一次写盘前、
+# 以及之后每 10 分钟,把上一次的存档留一份 save.json.bak —— 至少能退回
+# "这次启动之前"的状态(比 save.json.broken-* 的"读到坏档才备份"更主动)。
+BACKUP_INTERVAL = 600.0
+
+
+def backup_due(force=False):
+    global _backup_t
+    now = time.time()
+    if not force and _backup_t and now - _backup_t < BACKUP_INTERVAL:
+        return False
+    if not os.path.exists(SAVE_FILE):
+        return False        # 还没有旧档可备份(不占用 10 分钟时间窗)
+    try:
+        shutil.copy2(SAVE_FILE, SAVE_FILE + ".bak")
+    except OSError:
+        return False
+    _backup_t = now
+    return True
+
+
 def save_data(sd):
     os.makedirs(SAVE_DIR, exist_ok=True)
+    backup_due()
     tmp = SAVE_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(sd.serialize(), f, ensure_ascii=False)
