@@ -21,10 +21,16 @@ def progress(sd, task):
 
 
 def task_state(sd, task):
-    """返回 (状态, 进度, 需求)。状态:done / ready / doing。"""
+    """返回 (状态, 进度, 需求)。状态:done / ready / doing / locked。
+
+    locked = 这条任务有前置(req):必须先把前置任务**领掉**,它才会解锁。
+    (教官专属的「全自动扳机组件」就是这么串成一条长线的。)"""
     need = int(task["need"])
     if not task.get("repeat") and task["id"] in sd.tasks_done:
         return "done", need, need
+    req = task.get("req")
+    if req and req not in sd.tasks_done:
+        return "locked", progress(sd, task), need
     p = progress(sd, task)
     return ("ready" if p >= need else "doing"), p, need
 
@@ -103,6 +109,10 @@ def claim(sd, task):
     state, p, need = task_state(sd, task)
     if state == "done":
         return False, f"「{task['name']}」已结算过了"
+    if state == "locked":
+        pre = task_by_id(task.get("req") or "")
+        return False, (f"「{task['name']}」还没解锁 —— 先完成并领取"
+                       f"「{pre['name'] if pre else task.get('req')}」")
     if state != "ready":
         return False, f"「{task['name']}」还没完成({p}/{need})"
     ok, why = grant(sd, task["reward"])

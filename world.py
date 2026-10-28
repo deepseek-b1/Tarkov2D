@@ -6,7 +6,7 @@ import random
 
 import pygame
 
-from settings import TILE, MW, MH, MAPS, CONTAINER_INFO, COL
+from settings import TILE, MW, MH, MAPS, CONTAINER_INFO, COL, to_display
 from inventory import Container
 
 WALL = "#"
@@ -26,6 +26,39 @@ _RAY_SETUP = {}
 # 预渲染好的整张地图表面:map_key -> Surface(只读共享,见 GameMap.prerender)
 _PRERENDER_CACHE = {}
 _PRERENDER_MAX = 3
+
+# 「已压暗」的地图副本:快速迷雾用(见 raid_ui.draw_raid 的说明)。
+# 只保留当前这一张 —— 一张 1920x1408 就是 10MB,多留几张手机上吃不消。
+_DARK_CACHE = {}
+_DARK_MAX = 1
+
+
+def darkened_map(map_key, tint):
+    """取/建整张地图的「已压暗」副本(一次性生成,之后只读)。
+
+    快速迷雾把原来的「整屏 BLEND_RGB_MULT 压暗」换成:
+        先纯拷贝这张暗版地图,再把亮区按条带覆盖回正常地图。
+    两者结果完全一致(压暗系数用 settings.fog_darken,和原来同一个公式),
+    但逐像素乘法变成了 memcpy —— 真机实测整屏 166ms -> 1.6ms。
+
+    生成一次约 100ms(和 prerender 同量级),所以放在 Game._prewarm_map 里
+    预热,不要落在进战局的第一帧上。
+    """
+    if map_key not in MAPS:
+        map_key = "border"
+    key = (map_key, tint)
+    hit = _DARK_CACHE.get(key)
+    if hit is not None:
+        return hit
+    base = _PRERENDER_CACHE.get(map_key)
+    if base is None:
+        base = GameMap(map_key).prerender()
+    dark = base.copy()
+    dark.fill(tint, None, pygame.BLEND_RGB_MULT)
+    _DARK_CACHE.clear()
+    _DARK_CACHE[key] = dark
+    return dark
+
 
 
 def is_prerendered(map_key):
@@ -448,7 +481,10 @@ class GameMap:
         cached = _PRERENDER_CACHE.get(self.map_key)
         if cached is not None:
             return cached
-        surf = pygame.Surface((self.px_w, self.px_h))
+        # 转成显示格式:这张表面每帧都被整屏 blit(raid_ui.draw_raid 的第一条),
+        # 不 convert 的话 SDL 每次都要逐像素做格式转换 —— 桌面 SSE 路径看不出来,
+        # 安卓上是大头。整张只有 10MB 级别,转一次即可。
+        surf = to_display(pygame.Surface((self.px_w, self.px_h)))
         rnd = random.Random(7)
         for ty in range(self.mh):
             for tx in range(self.mw):

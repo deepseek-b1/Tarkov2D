@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """战局:搜刮-战斗-撤离。玩家操作、子弹、战利品、撤离引导、阵亡结算。"""
 import math
 import random
@@ -34,10 +34,15 @@ from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       HQ_REACTION_COOLDOWN, REBUILD_RATE,
                       weapon_params, weapon_capacity, weapon_ammo_ids,
                       weapon_slots, weapon_attach, weapon_blast_mul, ATTACH_SLOTS,
+                      LOADOUT_SLOTS, LOADOUT_SLOT_NAMES, loadout_all, loadout_get,
+                      loadout_set, is_melee, is_drone, drone_cfg, drone_kind,
+                      is_kamikaze, TALENTS,
+                      DRONE, KAMIKAZE, DRONE_VIEW_FPS, DRONE_VIEW_POLYS,
                       weapon_fire_mode, weapon_fire_modes, cycle_fire_mode,
                       fire_mode_name, BURST_COUNT,
                       FOG_MOVE_STEP, FOG_VIS_REFRESH, FOG_VIS_RADIUS,
                       MOVE_AIM_MUL, MOVE_RELOAD_MUL,
+                      PENETRABLE, MISFIRE_JAM_TIME,
                       COOP, COOP_MODES,
                       fmt_rub, get_font)
 import bindings
@@ -149,6 +154,19 @@ class StoryPoint:
         return ""
 
 
+def _light_order(shape):
+    """夜战光源形状的绘制优先级:数值小的先画(暗的先画,亮的盖在上面)。
+
+    单人有光源时 night_light() 自己就是「脚边微光 -> 夜视 -> 光锥」的顺序;
+    双人时两个人的形状是拼在一起的,不重排就会变成
+    P1 微光 / P1 光锥 / P2 微光 / P2 光锥 —— P2 的脚边微光会盖在 P1 的
+    光锥上,把队友的灯光压暗一小块(实测约 2300 像素)。
+    """
+    if shape[0] == "circle":
+        return sum(shape[1][3])
+    return 10 ** 6              # 光锥(NIGHT_BEAM_RGB)永远最亮,最后画
+
+
 class Player:
     def __init__(self, sd):
         self.x, self.y = 0.0, 0.0
@@ -162,6 +180,9 @@ class Player:
         self.aim = 0.0
         self.fire_cd = 0.0
         self.burst_left = 0       # 三连发剩余待发数(按 G 可切换射击模式)
+        self.jam_t = 0.0          # 卡壳剩余时间(M966 高穿弹炸膛后枪膛卡死)
+        self.piloting = False     # 是否正在掌镜操控侦察无人机
+        self.cur_slot = "main1"   # 当前用的装备位(1/2/3/4 切枪)
         self.reload_t = 0.0
         self.reloading = False
         self.hurt_flash = 0.0
@@ -294,6 +315,12 @@ class Raid:
         # ---- 双人合作:第二位玩家(键盘操作,装备由系统配发,见 coop.py) ----
         self.coop = (bool(getattr(game.save, "coop", False))
                      and self.mode in COOP_MODES and not self.touch_mode)
+        # ---- 局域网联机(见 net.py) ----
+        #   "host"   = 本机跑完整模拟,P2 由网络输入驱动
+        #   "client" = 本机不跑模拟,只镜像主机状态,按自己的视角渲染
+        self.lan = getattr(game, "lan_role", None)
+        self.net_input = {}
+        self.lan_edge = False        # 客户端:本帧鼠标左键刚按下
         self.player2 = None
         self.p2_kit = None
         self.p2_revive_used = False     # P2 的 6 级甲自救(每局一次)
@@ -513,6 +540,13 @@ class Raid:
         self.fog_version = 0
         self._fog_drawn_ver = -1
         self.sight_vis2 = set()     # 能看见 P2 的敌人(双人合作)
+        # 非常规武器:侦察无人机(状态全在本局内存里;电量/标记不写存档)
+        self.drone = None           # 部署中的无人机:{x,y,owner,battery,hold,ang}
+        self.drone_marks = {}       # 无人机/侦察标出来的守军:{id(scav): 剩余秒}
+        self.drone_cd = 0.0         # 放出后的冷却(防止连点秒放)
+        self._drone_scan_t = 0.0    # 下一次自动标记扫描的倒计时
+        self._drone_light_t = 0.0   # 下一次重建无人机视野多边形的倒计时
+        self.drone_view_poly = None  # 无人机摄像头的视野多边形(世界坐标)
         # 黑暗模式(夜战):光源形状(世界坐标)+ 亮区内的敌人集合
         self.dark = self.mode == "night"
         self.light_shapes = []      # [("poly", pts) | ("circle", (x, y, r, tint))]
@@ -587,8 +621,33 @@ class Raid:
             return self.player
         return min(pool, key=lambda q: (q.x - x) ** 2 + (q.y - y) ** 2)
 
+    def view_players(self):
+        """本机屏幕上要打亮视野的玩家。
+
+        同屏双人 = 两位活着的玩家(一张画面,看并集);
+        局域网联机 = 只有自己 —— 自己倒下/撤离后改看还在场上的队友(观战)。
+        """
+        if not self.lan:
+            return self.active_players() or (self.player,)
+        if not self.player.out:
+            return (self.player,)
+        others = tuple(q for q in self.players()
+                       if q is not self.player and not q.out)
+        return others or (self.player,)
+
     def cam_anchor(self):
-        """镜头跟随的锚点位置(双人 = 还在场上的玩家的中点)。"""
+        """镜头跟随的锚点位置(同屏双人 = 场上玩家中点;联机 = 跟自己的角色)。
+
+        掌镜操控无人机时,镜头直接跟着无人机走(这就是"鸟瞰侦察"的观感)。
+        """
+        if self.drone is not None:
+            who = self.player
+            if getattr(who, "piloting", False) and not who.out:
+                return self.drone["x"], self.drone["y"]
+        if self.lan:
+            pool = self.view_players()
+            return (sum(q.x for q in pool) / len(pool),
+                    sum(q.y for q in pool) / len(pool))
         if self.coop:
             pool = self.active_players() or self.players()
             return (sum(q.x for q in pool) / len(pool),
@@ -612,6 +671,9 @@ class Raid:
         p.dead = True
         p.out = True
         p.hp = 0
+        p.piloting = False          # 倒下的人不再掌镜
+        if self.drone is not None and self.drone["owner"] == self.player_name(p):
+            self.recall_drone(crash=True)   # 操作者倒了,无人机失去操控坠毁
         self.fog_dirty = True
         if self.coop and self.active_players():
             self.add_toast(f"{self.player_name(p)} 倒下了 —— 另一个人还在场上,"
@@ -627,6 +689,9 @@ class Raid:
         """
         p.extracted = True
         p.out = True
+        p.piloting = False
+        if self.drone is not None and self.drone["owner"] == self.player_name(p):
+            self.recall_drone(ok=True)      # 人撤了,无人机一起收回来
         self.fog_dirty = True
         if p.extract_gain is None:
             p.extract_gain = max(0, int(self._loadout_value(p)
@@ -637,7 +702,16 @@ class Raid:
             self.add_toast("撤离成功!", COL["good"])
             self.finish("extract")
             return
-        kept, lost = coop_mod.bank_player(self.game.save, self, p)
+        if self.lan == "host" and self.p_is_p2(p):
+            # 联机:队友的战利品要进**他自己的**仓库 —— 把背包/装备原样发给
+            # 客户端,由客户端在自己那边入账(主机这边不入账,免得重复)
+            kept = lost = 0
+            try:
+                self.game.net.host_event("extract", self._lan_extract_payload(p))
+            except Exception:
+                pass
+        else:
+            kept, lost = coop_mod.bank_player(self.game.save, self, p)
         self.banked += kept
         self.bank_lost += lost
         others = self.active_players()
@@ -647,6 +721,35 @@ class Raid:
         self.add_toast(msg, COL["good"], 6.5)
         if not others:
             self._finish_when_cleared()
+
+    def _lan_extract_payload(self, p):
+        """联机撤离:把「这一局捡到的战利品」编码好发给客户端。
+
+        注意不能直接让客户端跑 coop.bank_player —— 它靠 loot_log 里的
+        id(item) 判断哪些算战利品,而 id() 只在各自进程里有意义,跨进程
+        永远对不上(搬过去一件也进不了仓库)。所以由主机这边判断好、
+        只把战利品本身发过去。
+        """
+        import net as net_mod
+        reg = net_mod._registry()
+        seen = {}
+        # loot_log 每条是 dict(id=id(item), name/count/value),不是裸 id
+        logged = {e.get("id") for e in self.loot_log}
+        loot = []
+        for pl in list(p.bag.items):
+            if id(pl.item) in logged:
+                loot.append(pl.item)
+        for slot in (p.weapon, p.armor, p.helmet):
+            if slot is not None and id(slot) in logged:
+                loot.append(slot)          # 局内捡到并穿在身上的也算
+        items = []
+        for it in loot:
+            node = net_mod.encode_value(it, ["item"], seen, reg)
+            if node is not net_mod._SKIP:
+                items.append(node)
+        return {"who": "p2" if self.p_is_p2(p) else "p1",
+                "name": self.player_name(p), "loot": items,
+                "count": len(items)}
 
     def _finish_when_cleared(self):
         """场上没人了:只要有人撤出去过,这一局就算撤离成功(倒下那位丢装备)。"""
@@ -742,10 +845,18 @@ class Raid:
             shapes.append(("poly", pts))
         return shapes
 
-    def in_light(self, x, y, p=None):
-        """某点在不在亮区里(敌人「可见」的几何判定,视线另外算)。"""
+    def in_light(self, x, y, p=None, drone=False):
+        """某点在不在亮区里(敌人「可见」的几何判定,视线另外算)。
+
+        drone=True 时把「在无人机摄像头圆内」也算作被照亮 —— 夜战里无人机
+        带的是红外/微光摄像头,不这么算的话夜里放飞就等于睁眼瞎。
+        """
         from settings import NIGHT_AMBIENT, helmet_nvg, weapon_beam
         p = p or self.player
+        if self.drone is not None:
+            cfg = drone_cfg(self.drone.get("kind", "recon"))
+            if math.hypot(x - self.drone["x"], y - self.drone["y"]) <= cfg["view_radius"]:
+                return True
         nvg = helmet_nvg(getattr(p, "helmet", None))
         beam = weapon_beam(getattr(p, "weapon", None))
         dx, dy = x - p.x, y - p.y
@@ -777,6 +888,15 @@ class Raid:
         p = self.player
         p2 = self.player2
         p2_alive = p2 is not None and not p2.out
+        # 无人机视野也要参与重建判定:它飞得快、视野圆也一直在动
+        drone_dirty = False
+        if self.drone is not None:
+            if self.drone_view_poly is None:
+                drone_dirty = True
+            else:
+                drone_dirty = (math.hypot(self.drone["x"] - self.fog_px,
+                                          self.drone["y"] - self.fog_py) > 60.0
+                               or self._drone_light_t <= 0)
         if force:
             do_poly = True
         else:
@@ -792,9 +912,10 @@ class Raid:
                         (p2.aim - self.fog2_aim + math.pi) % math.tau - math.pi) > 0.05
                 # 夜里 fog_polygon 恒为 None(不用 360° 视野多边形),
                 # 所以"首次"要用 light_shapes 判断 —— 否则每帧都会重建光照层
-                do_poly = moved or turned or self.fog_dirty or not self.light_shapes
+                do_poly = (moved or turned or self.fog_dirty or not self.light_shapes
+                           or drone_dirty)
             else:
-                do_poly = moved or self.fog_dirty or not self.fog_polys
+                do_poly = moved or self.fog_dirty or not self.fog_polys or drone_dirty
             if not do_poly and self.fog_t < FOG_VIS_REFRESH:
                 return
         if do_poly:
@@ -802,13 +923,28 @@ class Raid:
             self.fog_polys = []
             self.light_shapes = []
             if self.dark:
-                for q in self.active_players():
-                    self.light_shapes.extend(self.night_light(q))
+                shapes = []
+                for q in self.view_players():
+                    shapes.extend(self.night_light(q))
+                if self.drone is not None:
+                    # 无人机带的是红外/微光摄像头:整块视野圆自发光
+                    shapes.append(("circle", (self.drone["x"], self.drone["y"],
+                                              drone_cfg(self.drone.get("kind", "recon"))["view_radius"],
+                                              (150, 235, 210))))
+                # 双人:两个人的光源形状拼在一起后要按「先暗后亮」重排,
+                # 否则 P2 的脚边微光会盖在 P1 的光锥上(见 _light_order)
+                shapes.sort(key=_light_order)
+                self.light_shapes = shapes
                 self.fog_polygon = None      # 夜里不用 360° 视野多边形
             else:
-                for q in self.active_players():
+                for q in self.view_players():
                     self.fog_polys.append(
                         self.map.visibility_polygon(q.x, q.y, 560))
+                if self.drone is not None:
+                    if self.drone_view_poly is None:
+                        self._drone_camera()
+                    if self.drone_view_poly:
+                        self.fog_polys.append(self.drone_view_poly)
                 self.fog_polygon = self.fog_polys[0] if self.fog_polys else None
             self.fog_px, self.fog_py = p.x, p.y
             self.fog_aim = p.aim
@@ -838,6 +974,15 @@ class Raid:
                     mine_sight.add(id(s))
                     if (not dark) or self.in_light(s.x, s.y, q):
                         vis.add(id(s))
+        # 无人机:摄像头圆内的守军直接算"看得见"(绘制/锁敌都用这个集合)
+        if self.drone is not None:
+            dx, dy = self.drone["x"], self.drone["y"]
+            rr = float(drone_cfg(self.drone.get("kind", "recon"))["view_radius"])
+            for s in self.scavs:
+                if s.dead:
+                    continue
+                if math.hypot(s.x - dx, s.y - dy) <= rr and los(dx, dy, s.x, s.y):
+                    vis.add(id(s))
         self.fog_vis = vis
         self.sight_vis = sight
         self.sight_vis2 = sight2
@@ -845,7 +990,13 @@ class Raid:
 
     # ---------- 提示/粒子 ----------
     def add_toast(self, text, color=None, ttl=2.6):
-        self.toasts.append([text, ttl, ttl, color or COL["text"]])
+        # 颜色统一成三元组:联机时提示要跟着补丁同步,别把 None/怪东西写进列表
+        c = color or COL["text"]
+        try:
+            c = (int(c[0]), int(c[1]), int(c[2]))
+        except (TypeError, ValueError, IndexError, KeyError):
+            c = COL["text"]
+        self.toasts.append([text, ttl, ttl, c])
 
     def add_particles(self, x, y, n, color, speed=90):
         for _ in range(n):
@@ -903,8 +1054,10 @@ class Raid:
                 it = Item(iid, count=1)
                 if d["cat"] == "weapon":
                     it.state["mag"] = random.randint(0, d["mag"])
-                    if random.random() < 0.5:
-                        aid = random.choice(weapon_ammo_ids(it))
+                    # 近战武器(刀)没有弹种,别往空列表里取弹药
+                    aids = weapon_ammo_ids(it) if d["mag"] else []
+                    if aids and random.random() < 0.5:
+                        aid = random.choice(aids)
                         ammo = ITEMS[aid]
                         lc.container.add_item(Item(
                             aid, count=random.randint(8, min(30, ammo.get("stack", 30)))))
@@ -1254,10 +1407,31 @@ class Raid:
         p = p or self.player
         if edge is None:
             edge = self.fire_edge
+        if self.drone is not None and getattr(p, "piloting", False):
+            # 掌镜时左键不开枪,而是"对无人机下指令":
+            #   侦察机 = 收回 / 自杀机 = 俯冲自爆
+            if edge:
+                self.drone_primary(p)
+            return
         if braced is None:
             braced = self.braced
         w = p.weapon
-        if w is None or p.reload_t > 0 or p.fire_cd > 0:
+        if w is None or p.reload_t > 0 or p.fire_cd > 0 or p.jam_t > 0:
+            return
+        if is_melee(w):
+            # 刀:左键挥刀(不消耗弹药、几乎没声音)
+            if not edge:
+                return
+            self.melee_attack(p)
+            return
+        if is_drone(w):
+            # 侦察无人机:左键 = 放出(已经有在飞的就先收回来)
+            if not edge:
+                return
+            if self.drone is not None:
+                self.recall_drone(p, ok=True)
+            else:
+                self.deploy_drone(p)
             return
         d = w.def_
         mode = p.fire_mode()
@@ -1279,8 +1453,13 @@ class Raid:
                 audio.play("empty")
             p.burst_left = 0
             return
-        dmg, pellets, hip, braced_s, rng, _rl, loud, burn = weapon_params(w)
+        dmg, pellets, hip, braced_s, rng, _rl, loud, burn, wall_pen, wall_decay, \
+            misfire, misfire_dmg = weapon_params(w)
         w.state["mag"] -= 1
+        if misfire > 0.0 and random.random() < misfire:
+            # 炸膛:这一发不出去,自己吃伤害 + 枪膛卡死一小会儿
+            self._misfire(w, misfire_dmg)
+            return
         if mode == "burst":
             p.burst_left = max(0, p.burst_left - 1)
         p.fire_cd = d["rof"]
@@ -1296,6 +1475,7 @@ class Raid:
                                      dy=math.sin(ang) * spd, dmg=dmg,
                                      owner="player", ttl=rng / spd,
                                      rpg=is_rpg, burn=burn,
+                                     pen=wall_pen, pen_mul=wall_decay,
                                      blast=weapon_blast_mul(w)))
         audio.play(d["sfx"])
         self.emit_noise(p.x, p.y, loud)
@@ -1303,6 +1483,36 @@ class Raid:
                            (255, 210, 90), speed=160)
         self.shake = min(12, self.shake + (6.0 if is_rpg
                                           else (2.5 if pellets > 1 else 1.2)))
+
+    def _misfire(self, w, dmg):
+        """炸膛:枪没响,人重伤,枪膛卡死一小会儿(M966 高穿弹的代价)。
+
+        伤害走 take_damage(普通伤害:护甲/头盔照常减伤,6 级甲的倒地自救也有效),
+        所以炸膛可能把自己送走 —— 这是「高穿弹有概率炸膛」该有的代价。
+        """
+        p = self.player
+        audio.play("hurt")
+        self.add_particles(p.x, p.y, 14, (255, 160, 60), speed=170)
+        self.add_particles(p.x, p.y, 8, (90, 90, 96), speed=80)
+        self.emit_noise(p.x, p.y, 900)
+        self.shake = min(14, self.shake + 7)
+        p.jam_t = MISFIRE_JAM_TIME
+        p.take_damage(dmg, self)
+        self.add_toast(f"{w.name} 炸膛!自伤 {int(dmg)} —— 枪膛卡死…",
+                       COL["bad"], 3.0)
+
+    def _penetrable_at(self, bx, by):
+        """(bx, by) 所在格能不能被高穿弹打穿:墙/树可以,水与地图外不行。
+
+        普通子弹不看这个函数(它们照旧撞墙即停);只有带 pen 的子弹会问。
+        """
+        tx = int(bx // TILE)
+        ty = int(by // TILE)
+        if not self.map.tile_solid(tx, ty):
+            return False
+        if tx < 0 or ty < 0 or tx >= self.map.mw or ty >= self.map.mh:
+            return False
+        return self.map.tiles[ty][tx] in PENETRABLE
 
     def cycle_shoot_mode(self):
         """按 G 切换射击模式(单发 / 三连发 / 全自动)。"""
@@ -1432,6 +1642,13 @@ class Raid:
             sdt = dt / n
             dead = False
             is_rpg = b.get("rpg", False)
+            # 子弹当前所在格与已打穿的墙格集合:记在子弹自己身上。
+            # 子弹穿墙要跨好几帧(32px 厚的墙,帧内子步只有 9px),每帧新建集合
+            # 会让同一面墙被反复扣穿深。
+            cur_tile = (int(b["x"] // TILE), int(b["y"] // TILE))
+            wall_done = b.get("wall_done")
+            if wall_done is None:
+                wall_done = b["wall_done"] = set()
             for _ in range(n):
                 bx = b["x"] + bdx * sdt
                 by = b["y"] + bdy * sdt
@@ -1445,7 +1662,29 @@ class Raid:
                                      blast_mul=b.get("blast", 1.0))
                     dead = True
                     break
-                if self.map.tile_solid(int(bx // TILE), int(by // TILE)):
+                # 高穿弹(M966)的穿墙记账:踏进一个新格子时结算一次 ——
+                # 新格是墙/树就扣一层穿深并削一截伤害(穿完继续飞),是水(不可穿)
+                # 或穿深已经用完就照旧停下。逐格判定而不是按线段算,弹道正好压在
+                # 格线上时也不会多算一层。
+                tile = (int(bx // TILE), int(by // TILE))
+                # 已经打穿过的墙格:子弹还在这面墙里飞(墙厚 32px,一小步只有 9px),
+                # 这些格子在当前小步里同样算「已打穿」,不能再拦它一次。
+                pierced = tile in wall_done
+                if tile != cur_tile:
+                    cur_tile = tile
+                    if b.get("pen", 0) > 0 and not is_rpg:
+                        if self._penetrable_at(bx, by):
+                            # pen = 还能打穿几堵墙。穿过去就扣一个,伤害乘一次
+                            # pen_mul(M966 是穿一堵剩 75%);pen 扣到 0 后,后面
+                            # 再遇到墙就按普通子弹处理 —— 停在墙上。
+                            b["pen"] -= 1
+                            b["dmg"] *= b.get("pen_mul", 0.0)
+                            wall_done.add(tile)
+                            pierced = True
+                            self.add_particles(bx, by, 4, (228, 214, 150), speed=90)
+                            self.shake = min(12, self.shake + 1.2)
+                # 撞到实心格:打得穿就继续,打不穿(水、穿深用完、普通弹)就停
+                if not pierced and self.map.tile_solid(int(bx // TILE), int(by // TILE)):
                     if is_rpg:
                         self.explode(bx, by, b["dmg"], b["owner"],
                                      src=b.get("src"))
@@ -1570,6 +1809,108 @@ class Raid:
             if not dead:
                 alive.append(b)
         self.bullets = alive
+
+    # ---------- 装备位:切枪 / 挥刀 ----------
+    def _clear_slot(self, p, slot, held):
+        """清空一个武器位;held=True 时把手上的枪也一起清掉(保持一致)。"""
+        if slot == "main1":
+            p.weapon = None
+        else:
+            loadout_set(self.game.save, slot, None)
+            if held:
+                p.weapon = None
+
+    def _put_slot(self, p, slot, item, held):
+        """把武器放回某个位(撤销卸下用)。"""
+        if slot == "main1":
+            p.weapon = item
+        else:
+            loadout_set(self.game.save, slot, item)
+            if held:
+                p.weapon = item
+
+    def switch_weapon(self, p, slot):
+        """换到某个装备位上的武器(键 1/2/3/4 或点 HUD 上的槽)。
+
+        位子上的武器是从存档序列化数据里取的,所以换枪前要把手上这把的状态
+        (弹匣/配件)写回它原来那个槽,免得打了一半换回去又满弹。
+        """
+        if p is None or p.reloading or p.reload_t > 0:
+            return False
+        cur = p.weapon
+        old_slot = getattr(p, "cur_slot", None)
+        if old_slot is None:
+            old_slot = next((s for s, w in loadout_all(self.game.save).items()
+                             if w is cur), None)
+        if old_slot == slot:
+            return False
+        if old_slot is not None and old_slot != "main1":
+            loadout_set(self.game.save, old_slot, cur)     # 状态回写旧槽
+        nxt = loadout_get(self.game.save, slot)
+        if nxt is None:
+            self.add_toast("%s 是空的" % LOADOUT_SLOT_NAMES[slot],
+                           COL["text_dim"], 1.6)
+            return False
+        p.weapon = nxt
+        p.cur_slot = slot
+        p.reloading = False
+        p.reload_t = 0.0
+        p.burst_left = 0
+        p.jam_t = 0.0
+        self.add_toast("%s:%s" % (LOADOUT_SLOT_NAMES[slot], nxt.name),
+                       COL["accent"], 1.6)
+        audio.play("click")
+        return True
+
+    def switch_slot_key(self, p, key):
+        """数字键 1-4 -> 装备位。"""
+        idx = key - pygame.K_1
+        if 0 <= idx < len(LOADOUT_SLOTS):
+            return self.switch_weapon(p, LOADOUT_SLOTS[idx])
+        return False
+
+    def _slot_button_at(self, pos):
+        """点到了哪个装备位方块(没点到返回 None)。"""
+        import raid_ui
+        for i, rect in enumerate(raid_ui.slot_strip_layout()):
+            if rect.collidepoint(pos):
+                return i
+        return None
+
+    def melee_attack(self, p):
+        """挥刀:面前一小段距离内的守军挨一刀(还会啃设施)。"""
+        w = p.weapon
+        d = w.def_
+        p.fire_cd = d["rof"]
+        p.burst_left = 0
+        reach = d["range"] + PLAYER["radius"]
+        dmg = d["dmg"] * TALENTS.get(w.iid, {}).get("dmg_mul", 1.0)
+        hx = p.x + math.cos(p.aim) * (reach * 0.6)
+        hy = p.y + math.sin(p.aim) * (reach * 0.6)
+        self.add_particles(hx, hy, 3, (210, 220, 235), speed=90)
+        self.emit_noise(p.x, p.y, d["loud"])
+        hit = False
+        for s in list(self.scavs):
+            if math.hypot(s.x - p.x, s.y - p.y) > reach + s.r:
+                continue
+            s.damage(dmg)
+            audio.play("hit")
+            self.add_particles(s.x, s.y, 6, (190, 40, 40))
+            hit = True
+            if s.dead:
+                self.kill_scav(s)
+            break
+        if not hit and self.structures:
+            for st in self.structures:
+                if st.destroyed or st.side == "ally":
+                    continue
+                if math.hypot(st.x - p.x, st.y - p.y) <= reach + st.r:
+                    st.damage(STRUCT_BULLET_DMG + dmg * STRUCT_BULLET_MUL)
+                    self.add_particles(st.x, st.y, 4, (210, 200, 150))
+                    hit = True
+                    break
+        if not hit:
+            audio.play("empty")     # 挥空:只有风声
 
     # ---------- 装填/使用/装备 ----------
     def start_reload(self, p=None):
@@ -2034,6 +2375,328 @@ class Raid:
             if sp.cd > 0:
                 sp.cd = max(0.0, sp.cd - dt)
 
+    # ---------- 非常规武器:便携侦察无人机 ----------
+    # 一件装备 = 一架无人机:左键放出(朝准星飞到最远 96px,撞墙就停),
+    # 放出即掌镜:按住键盘 **← / →** 无人机就左右飞(↑/↓ 也认),
+    # 按住右键则朝鼠标方向飞;F 切回自己视角 / 再按 F 掌镜,左键收回。
+    # 侦察效果:以无人机为圆心的大圆照亮迷雾/夜战,并自动标记圈内守军。
+    # 代价:电量有限(耗尽自动回收);飞离操作者太远 = 信号断开,原地自毁。
+    def drone_ctl(self, p=None):
+        """**这一位**是不是无人机的操控者(按人判定,不是"谁在掌镜")。
+
+        双人合作里必须严格按人分:掌镜的那位右键归无人机、人站着不动,
+        没掌镜的那位照常走路。所以这里绝不能"兜底返回任何在掌镜的人" ——
+        传 P2 进来就只能回答 P2(想找"现在谁在掌镜"用 drone_pilot())。
+        """
+        return p or self.player
+
+    def drone_pilot(self):
+        """现在谁在掌镜(没人掌镜返回 None;画信号线/HUD 这类用它)。"""
+        if self.drone is None:
+            return None
+        for q in self.players():
+            if getattr(q, "piloting", False):
+                return q
+        return None
+
+    def drone_operator(self):
+        """无人机的操作者(按 owner 认人;用来算信号距离 / 回收半径)。"""
+        who = self.drone_pilot()
+        if who is not None and not who.out:
+            return who
+        if self.drone is not None:
+            name = self.drone.get("owner")
+            for q in self.players():
+                if self.player_name(q) == name and not q.out:
+                    return q
+        return self.player
+
+    def piloting(self, p=None):
+        """这一位是不是正在掌镜操控无人机。"""
+        p = p or self.player
+        return self.drone is not None and bool(getattr(p, "piloting", False))
+
+    def drone_held(self, p=None):
+        """手里是不是拿着无人机(没放出去)。"""
+        p = p or self.player
+        return is_drone(getattr(p, "weapon", None))
+
+    def _drone_dest(self, p, dist=None):
+        """放出点:从玩家出发沿准星方向推 dist,撞墙/出界就停在前一格。"""
+        cfg = drone_cfg(drone_kind(getattr(p, "weapon", None)))
+        dist = cfg["deploy_dist"] if dist is None else dist
+        dx, dy = math.cos(p.aim), math.sin(p.aim)
+        step = 6.0
+        x, y = p.x, p.y
+        moved = 0.0
+        while moved < dist:
+            nx, ny = x + dx * step, y + dy * step
+            if self.map.collides(nx, ny, cfg["radius"]):
+                break
+            x, y = nx, ny
+            moved += step
+        return x, y
+
+    def deploy_drone(self, p, x=None, y=None):
+        """放出无人机(主机权威;客户端靠 acts 通道请求)。"""
+        kind = drone_kind(getattr(p, "weapon", None))
+        cfg = drone_cfg(kind)
+        if self.drone is not None:
+            return False
+        if self.drone_cd > 0:
+            self.add_toast(f"无人机还在自检,{self.drone_cd:.1f}s 后才能再放",
+                           COL["text_dim"], 1.8)
+            return False
+        if x is None or y is None:
+            x, y = self._drone_dest(p)
+        if self.map.collides(x, y, cfg["radius"]):
+            x, y = p.x, p.y
+        self.drone = dict(x=float(x), y=float(y), owner=self.player_name(p),
+                          battery=cfg["battery"], hold=False, ang=p.aim,
+                          kind=kind)
+        self.drone_cd = 1.0
+        p.piloting = True
+        self.drone_view_poly = None
+        self._drone_light_t = 0.0
+        self.fog_dirty = True
+        self.emit_noise(p.x, p.y, cfg["noise"])
+        self.add_particles(x, y, 8, (140, 220, 210), speed=120)
+        if kind == "kamikaze":
+            self.add_toast("自杀无人机已放出 —— 掌镜中 ←/→ 飞,F 切回视角,"
+                           "左键 = 俯冲自爆(一次性的)", COL["accent"], 4.0)
+        else:
+            self.add_toast("无人机已放出 —— 掌镜中:←/→ 左右飞,F 切回视角,左键收回",
+                           COL["accent"], 3.4)
+        audio.play("pickup")
+        return True
+
+    def recall_drone(self, p=None, ok=True, crash=False):
+        """收回无人机(电量耗尽/手动收回/信号断开自毁都走这里)。"""
+        if self.drone is None:
+            return False
+        d = self.drone
+        for q in self.players():
+            q.piloting = False
+        self.drone = None
+        self.drone_view_poly = None
+        self.fog_dirty = True
+        self.drone_cd = 2.0
+        self.drone_marks.clear()
+        if crash:
+            self.add_particles(d["x"], d["y"], 16, (255, 190, 120), speed=150)
+            self.add_toast("无人机失控坠毁(信号中断)", COL["bad"], 3.0)
+        elif ok:
+            self.add_particles(d["x"], d["y"], 6, (140, 220, 210), speed=90)
+            self.add_toast("无人机已收回", COL["good"], 2.0)
+        return True
+
+
+    def drone_primary(self, p=None):
+        """掌镜时按左键:侦察机 = 收回;自杀机 = 俯冲自爆。返回是否处理了。"""
+        if self.drone is None:
+            return False
+        if self.drone.get("kind") == "kamikaze":
+            return self.detonate_drone(p)
+        self.recall_drone(p, ok=True)
+        return True
+
+    def detonate_drone(self, p=None):
+        """自杀式无人机俯冲自爆:在机体位置炸开一片,然后机体损毁(一次性消耗)。"""
+        if self.drone is None:
+            return False
+        d = self.drone
+        cfg = drone_cfg(d.get("kind", "kamikaze"))
+        op = self.drone_operator()
+        owner = self.player_name(op) if op is not None else self.player_name(p)
+        x, y = d["x"], d["y"]
+        # 先清空无人机状态,再炸 —— explode 可能连锁触发别的结算
+        self.drone = None
+        self.drone_view_poly = None
+        self.fog_dirty = True
+        self.drone_cd = 3.0
+        self.drone_marks.clear()
+        for q in self.players():
+            q.piloting = False
+        self.add_particles(x, y, 26, (255, 198, 128), speed=200)
+        self.emit_noise(x, y, 900)
+        self.explode(x, y, cfg["dmg"], owner, radius=cfg["blast_radius"],
+                     struct_dmg=cfg["struct_dmg"])
+        self.add_toast("自杀无人机已俯冲起爆", COL["bad"], 2.6)
+        audio.play("sg")
+        self.consume_kamikaze(p if p is not None else op)
+        return True
+
+    def consume_kamikaze(self, p):
+        """自爆后机体损毁:把这一架从装备位上抹掉(消耗品)。
+
+        主武器位被消耗时,先把另一个装备位顶上来,免得挂在 sd.weapon 上的
+        x_slots(其它三个槽)跟着一起丢。
+        """
+        if p is None:
+            return False
+        item = getattr(p, "weapon", None)
+        if item is None or not is_kamikaze(item):
+            return False
+        sd = self.game.save
+        slot = getattr(p, "cur_slot", None) or "main1"
+        if slot == "main1":
+            others = [(s, loadout_get(sd, s)) for s in LOADOUT_SLOTS
+                      if s != "main1"]
+            nxt = next((w for _s, w in others if w is not None), None)
+            loadout_set(sd, "main1", nxt)       # 可能是 None(那就真的空了)
+            if nxt is not None:
+                for s, w in others:
+                    if w is nxt:
+                        continue
+                    loadout_set(sd, s, w)
+        else:
+            loadout_set(sd, slot, None)
+        p.weapon = None
+        p.cur_slot = "main1"
+        self.add_toast("机体已损毁(自杀无人机是一次性的)", COL["text_dim"], 3.0)
+        return True
+
+    def toggle_drone_view(self, p=None):
+        """F 键:掌镜 <-> 回到操作者视角。"""
+        if self.drone is None:
+            self.add_toast("没有在飞的无人机(先用手里的无人机放出)", COL["text_dim"], 2.0)
+            return False
+        who = self.drone_ctl(p)
+        who.piloting = not who.piloting
+        self.drone_view_poly = None
+        self.fog_dirty = True
+        if who.piloting:
+            self.add_toast("已掌镜:←/→ 左右飞(↑/↓ 也可),F 切回", COL["accent"], 2.4)
+        else:
+            self.add_toast("已切回自己的视角", COL["text_dim"], 1.8)
+        audio.play("click")
+        return True
+
+    def mark_drone_targets(self):
+        """无人机自动侦察:标记圈内有视线的守军(需要持续看到才续期)。
+
+        判定和玩家视野同源(直线无遮挡 = los_clear),只是圆心换成无人机。
+        """
+        if self.drone is None:
+            return
+        cfg = drone_cfg(self.drone.get("kind", "recon"))
+        self.drone_marks.clear()
+        dx, dy = self.drone["x"], self.drone["y"]
+        r = float(cfg["mark_radius"])
+        los = self.map.los_clear
+        for s in self.scavs:
+            if s.dead:
+                continue
+            if math.hypot(s.x - dx, s.y - dy) > r:
+                continue
+            if los(dx, dy, s.x, s.y):
+                self.drone_marks[id(s)] = cfg["mark_hold"]
+
+    def _drone_camera(self):
+        """给无人机算一块视野多边形(和玩家视野同一套 DDA)。"""
+        if self.drone is None:
+            self.drone_view_poly = None
+            return
+        cfg = drone_cfg(self.drone.get("kind", "recon"))
+        self.drone_view_poly = self.map.visibility_polygon(
+            self.drone["x"], self.drone["y"], cfg["view_radius"],
+            n=DRONE_VIEW_POLYS)
+
+    def _update_drone(self, dt):
+        """无人机计时:电量、操控飞行、自动标记、信号距离。"""
+        cfg = drone_cfg(self.drone.get("kind", "recon") if self.drone else "recon")
+        self.drone_cd = max(0.0, self.drone_cd - dt)
+        for k in list(self.drone_marks):
+            self.drone_marks[k] -= dt
+            if self.drone_marks[k] <= 0:
+                del self.drone_marks[k]
+        if self.drone is None:
+            return
+        self._drone_scan_t -= dt
+        if self._drone_scan_t <= 0:
+            self._drone_scan_t = cfg["mark_scan"]
+            if cfg["mark_radius"] > 0:      # 自杀机不负责侦察,跳过标记扫描
+                self.mark_drone_targets()
+        d = self.drone
+        who = self.drone_pilot()          # 现在谁在掌镜(没人掌镜就没人能开)
+        # 操控:只有掌镜的那位能开 —— 按住键盘 **← / →** 左右飞(上下也认),
+        # 或者按住右键朝鼠标方向飞;联机客户端把方向放在 net_input 的 mx/my 里;
+        # 触屏用左半屏摇杆。
+        if who is not None and getattr(who, "piloting", False):
+            keyboard = False
+            if self.lan == "host" and self.player2 is not None and who is self.player2:
+                inp = self.net_input or {}
+                vx, vy = float(inp.get("mx", 0.0) or 0.0), float(inp.get("my", 0.0) or 0.0)
+            elif self.touch_mode:
+                vx, vy = self.touch.move_axis()
+            else:
+                vx, vy = (0.0, 0.0)
+                try:
+                    keys = pygame.key.get_pressed()
+                    vx = (1.0 if keys[pygame.K_RIGHT] else 0.0) - \
+                         (1.0 if keys[pygame.K_LEFT] else 0.0)
+                    vy = (1.0 if keys[pygame.K_DOWN] else 0.0) - \
+                         (1.0 if keys[pygame.K_UP] else 0.0)
+                except Exception:
+                    vx, vy = 0.0, 0.0
+                keyboard = bool(vx or vy)
+                if not keyboard:
+                    try:
+                        if pygame.mouse.get_pressed()[2]:    # 按住右键 = 朝鼠标方向飞
+                            mx, my = pygame.mouse.get_pos()
+                            vx = mx - W / 2.0
+                            vy = my - H / 2.0
+                    except Exception:
+                        vx, vy = 0.0, 0.0
+            mag = math.hypot(vx, vy)
+            if keyboard:
+                # 方向键:按住就是满速(方向键只有开/关,没有"推一半")
+                speed = cfg["speed"]
+                vx, vy = vx / mag, vy / mag
+            elif mag > 6.0:
+                # 鼠标/摇杆:离中点多远 = 多快(推到底满速),死区 6px 防手抖
+                speed = cfg["speed"] * min(1.0, mag / (min(W, H) * cfg["hold_speed_div"]))
+                vx, vy = vx / mag, vy / mag
+            else:
+                speed = 0.0
+            if speed > 0.0:
+                d["ang"] = math.atan2(vy, vx)
+                # 按整格推进:走得再快也不会穿过墙
+                left = speed * dt
+                while left > 1e-6:
+                    sub = min(8.0, left)
+                    nx, ny = d["x"] + vx * sub, d["y"] + vy * sub
+                    if self.map.collides(nx, ny, cfg["radius"]):
+                        d["hold"] = True
+                        break
+                    d["x"], d["y"] = nx, ny
+                    d["hold"] = False
+                    left -= sub
+        # 电量:只在空中耗(掌镜时不额外加耗)
+        d["battery"] = max(0.0, d["battery"] - dt)
+        d["t"] = d.get("t", 0.0) + dt
+        # 信号距离:超过 max_dist 直接失联坠毁
+        op = self.drone_operator()
+        far = math.hypot(d["x"] - op.x, d["y"] - op.y)
+        if far > cfg["max_dist"]:
+            self.recall_drone(crash=True)
+            return
+        if d["battery"] <= 0.0:
+            if far <= cfg["recall_dist"]:
+                self.recall_drone(ok=True)
+                self.add_toast("无人机电量耗尽,已自动回收", COL["good"], 2.6)
+            else:
+                self.recall_drone(crash=True)
+                self.add_toast("无人机电量耗尽,离得太远没能回收", COL["bad"], 3.0)
+            return
+        # 视野多边形:飞得快,按固定间隔重建(不是每帧)
+        self._drone_light_t -= dt
+        moved = math.hypot(d["x"] - self.fog_px, d["y"] - self.fog_py)
+        if self.drone_view_poly is None or self._drone_light_t <= 0 or moved > 220.0:
+            self._drone_light_t = DRONE_VIEW_FPS
+            self._drone_camera()
+            self.fog_dirty = True
+
     def _spawn_story_bosses(self):
         """剧情模式:按时段与选择生成 Boss(回声体/维克托/灰狼/信使)。"""
         for b in story_mod.bosses(self.game.save):
@@ -2483,7 +3146,22 @@ class Raid:
             merged += 1
         return merged
 
+    def _lan_readonly(self):
+        """联机客户端:背包/搜刮面板只能看,物品转移由主机说了算。
+
+        客户端不跑模拟,手动搬东西只会在下一帧被主机状态覆盖 —— 与其让人
+        白点,不如直接说清楚。搜刮请按交互键(自动搜刮),用药按打药键。
+        """
+        if self.lan != "client":
+            return False
+        self.add_toast("联机模式:按交互键自动搜刮 · 打药键自动用药(暂不支持手动搬运)",
+                       COL["text_dim"], 3.0)
+        return True
+
     def _handle_ask_click(self, pos):
+        if self._lan_readonly():
+            self.ask_merge = False
+            return
         import raid_ui
         lay = raid_ui.ask_layout()
         if lay["yes"].collidepoint(pos):
@@ -2579,9 +3257,19 @@ class Raid:
             self.result["story_log"] = list(self.story_log[-6:])
             self.result["brief"] = story_mod.brief_lines(self.game.save)
         self.game.raid_finished(self.result)
+        if self.lan == "host":
+            # 把结算页内容发给客户端(它在自己那边结算并显示同一页)
+            try:
+                self.game.net.host_event("over", {"result": self.result})
+            except Exception:
+                pass
 
     # ---------- 每帧 ----------
     def update(self, dt, events):
+        # 联机客户端:不跑模拟(世界状态由主机推过来),只读本机操作上传
+        if self.lan == "client":
+            self._lan_client_update(dt, events)
+            return
         p = self.player
         self._click_cd = max(0.0, self._click_cd - dt)
         self.now += dt                 # AI 错峰用的单调时钟
@@ -2667,6 +3355,10 @@ class Raid:
                     self.loot_target = None
                     self.ask_merge = False
                     self.inv_open = not self.inv_open
+                elif ev.key == pygame.K_f and not (self.inv_open or self.loot_target):
+                    # F = 侦察无人机掌镜/切回(手里拿的是无人机才管用)
+                    if self.drone is not None or self.drone_held(p):
+                        self.toggle_drone_view(p)
                 elif bindings.key_matches(ev.key, sd, "interact"):
                     self.interact()
                 elif bindings.key_matches(ev.key, sd, "reload"):
@@ -2687,7 +3379,8 @@ class Raid:
                             break
                 # 双人合作:P2 的动作键(与 P1 的键不重叠,不会互相触发;
                 # P2 不受 P1 的面板影响 —— 各干各的)
-                if self.coop:
+                # 联机时 P2 的操作由网络送来(见 _update_p2_net),不吃本机键盘
+                if self.coop and not self.lan:
                     self._p2_key(ev.key)
             elif ev.type == pygame.MOUSEBUTTONDOWN:
                 if self.paused:
@@ -2721,7 +3414,11 @@ class Raid:
 
         # 移动(M139 架枪时无法移动;手机模式用左半屏摇杆)
         keys = pygame.key.get_pressed()
-        if self.touch_mode:
+        # 掌镜操控无人机时:←/→ 归无人机,人站在原地
+        piloting = self.piloting(p)
+        if piloting:
+            vx, vy, walking = 0.0, 0.0, False
+        elif self.touch_mode:
             vx, vy = self.touch.move_axis()
             walking = False
         elif p.out:
@@ -2753,7 +3450,11 @@ class Raid:
         self.move_mul = mul          # HUD 显示用(装填中/架枪中减速)
 
         # 瞄准:电脑用鼠标;手机自动锁敌(视野内最近的敌人,不用手动瞄准)
-        if self.touch_mode:
+        if piloting:
+            # 掌镜时人不用瞄;准星留着"朝无人机"的方向,信号线看起来才顺
+            p.aim = math.atan2(self.drone["y"] - p.y, self.drone["x"] - p.x)
+            self.aim_locked = None
+        elif self.touch_mode:
             self.aim_locked = self._aim_assist_target(True)
             if self.aim_locked is not None:
                 p.aim = math.atan2(self.aim_locked.y - p.y, self.aim_locked.x - p.x)
@@ -2801,19 +3502,41 @@ class Raid:
                     idx = {"sup1": 0, "sup2": 1, "sup3": 2}[name]
                     tx, ty = self._support_target()
                     self.call_support(SUPPORT_ORDER[idx], tx, ty)
+                elif name.startswith("slot"):
+                    self.switch_weapon(p, LOADOUT_SLOTS[int(name[4:])])
             # 「模式」按钮上写当前射击模式(处理完本帧点按后再刷新)
             self.touch.mode_label = fire_mode_name(p.fire_mode())
         else:
             held = pygame.mouse.get_pressed()[0]
             self.braced = bool(pygame.mouse.get_pressed()[2])   # 右键=架枪
+            # 数字键 1-4 = 切装备位(2 主武器 + 副武器 + 近战);点 HUD 上的槽也行
+            for ev in events:
+                if ev.type == pygame.KEYDOWN and pygame.K_1 <= ev.key <= pygame.K_4:
+                    self.switch_slot_key(p, ev.key)
+                elif (ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1
+                      and not self.inv_open and self.loot_target is None
+                      and self.dialogue is None):
+                    idx = self._slot_button_at(ev.pos)
+                    if idx is not None:
+                        self.switch_weapon(p, LOADOUT_SLOTS[idx])
         world_active = not (self.inv_open or self.loot_target is not None
                             or self.dialogue is not None)
         if world_active and not p.out:
-            self.try_fire(held)
+            if self.piloting(p):
+                # 掌镜操控无人机时:左键交给无人机(收回 / 自爆)。
+                # 旧版这里直接把 try_fire 跳过,结果"左键收回"根本没接线,
+                # 点了完全没反应 —— 这就是玩家反馈的那个 bug。
+                if self.fire_edge:
+                    self.drone_primary(p)
+            else:
+                self.try_fire(held)
         self.fire_edge = False
-        # 双人合作:P2 移动/自动瞄准/开火(键盘)
+        # 双人合作:P2 移动/自动瞄准/开火(键盘;联机时改用网络输入)
         if self.coop:
-            self._update_p2(dt, keys)
+            if self.lan == "host":
+                self._update_p2_net(dt)
+            else:
+                self._update_p2(dt, keys)
 
         # 装填计时 / 自动换弹 / 受击闪光(两人各自算)
         self._update_weapon_timers(p, dt)
@@ -2875,6 +3598,7 @@ class Raid:
         self._update_hq(dt)
         self._update_rebuild(dt)
         self._update_supplies(dt)
+        self._update_drone(dt)
         self._update_story(dt)
         self._update_story_fx(dt)
         self._update_bullets(dt)
@@ -2901,6 +3625,7 @@ class Raid:
     def _update_weapon_timers(self, p, dt):
         """武器计时:开火冷却 / 装填 / 自动换弹 / 受击闪光(每位玩家各算)。"""
         p.fire_cd = max(0.0, p.fire_cd - dt)
+        p.jam_t = max(0.0, p.jam_t - dt)      # 炸膛卡壳:时间到自动排除
         if p.reloading:
             p.reload_t -= dt
             if p.reload_t <= 0:
@@ -2913,6 +3638,142 @@ class Raid:
                 and p.reserve_count() > 0 and not self.over):
             self.start_reload(p)
         p.hurt_flash = max(0.0, p.hurt_flash - dt)
+
+    # ---------- 局域网联机 ----------
+    def _update_p2_net(self, dt):
+        """联机:用客户端上传的输入驱动 P2(移动 / 鼠标瞄准 / 开火 / 动作)。"""
+        p2 = self.player2
+        if p2 is None:
+            return
+        try:
+            inp, acts = self.game.net.take_input()
+        except Exception:
+            inp, acts = {}, []
+        self.net_input = inp
+        if p2.out or self.over:
+            return
+        vx = float(inp.get("mx", 0.0) or 0.0)
+        vy = float(inp.get("my", 0.0) or 0.0)
+        heavy = (p2.weapon is not None
+                 and p2.weapon.def_.get("braced_immobile"))
+        if p2.reloading and heavy:
+            vx = vy = 0.0
+        # 掌镜操控无人机时人站着不动(和"低头看平板"一个意思)
+        if self.drone is not None and getattr(p2, "piloting", False):
+            vx = vy = 0.0
+        moving = bool(vx or vy)
+        if moving:
+            length = math.hypot(vx, vy)
+            spd = p2.speed(bool(inp.get("walk"))) * (
+                MOVE_RELOAD_MUL if p2.reloading else 1.0)
+            scale = min(1.0, length)          # 摇杆推一半 = 半速
+            p2.x, p2.y = self.map.move_circle(
+                (p2.x, p2.y), vx / length * spd * scale * dt,
+                vy / length * spd * scale * dt, PLAYER["radius"])
+        aim = inp.get("aim")
+        if aim is None:
+            # 没有鼠标方向(比如用键盘玩):退回自动锁敌,和同屏 P2 一样
+            tgt = self.nearest_visible_enemy(p2.x, p2.y, COOP["aim_range"])
+            if tgt is not None:
+                p2.aim = math.atan2(tgt.y - p2.y, tgt.x - p2.x)
+            elif moving:
+                p2.aim = math.atan2(vy, vx)
+        else:
+            p2.aim = float(aim)
+        if self.dialogue is None and not self.over:
+            self.try_fire(bool(inp.get("fire")), p=p2,
+                          edge=bool(inp.get("edge")),
+                          braced=bool(inp.get("braced")))
+        for a in acts:
+            if a == "interact":
+                self.p2_interact()          # 自动搜刮(客户端不开搜刮面板)
+            elif a == "reload":
+                self.p2_reload()
+            elif a == "heal":
+                self.p2_quick_heal()
+            elif a == "drone":
+                # 客户端手里的无人机:左键放出 / F 掌镜,都由主机执行
+                if self.drone is None and self.drone_held(p2):
+                    self.deploy_drone(p2)
+                else:
+                    self.toggle_drone_view(p2)
+            elif a == "drone_recall":
+                self.recall_drone(p2, ok=True)
+
+    def _lan_client_update(self, dt, events):
+        """客户端:应用主机状态(在 net.tick 里做)+ 上传本机操作 + 自己的视角。"""
+        self.now += dt
+        self.frame += 1
+        if self.over:
+            for ev in events:
+                if ev.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN,
+                               pygame.FINGERDOWN):
+                    self.game.to_hideout()
+            return
+        acts = []
+        for ev in events:
+            if ev.type == pygame.KEYDOWN:
+                if ev.key == pygame.K_ESCAPE:
+                    self.paused = not self.paused
+                    continue
+                if self.paused:
+                    continue
+                sd = self.game.save
+                if bindings.key_matches(ev.key, sd, "bag"):
+                    self.inv_open = not self.inv_open       # 只读查看
+                elif ev.key == pygame.K_f:
+                    if self.drone is None:
+                        # 手里没放飞的话,按主机权威走:交给主机判断能不能放
+                        if self.drone_held(self.player):
+                            acts.append("drone")
+                    else:
+                        acts.append("drone")                # 掌镜 / 切回
+                elif bindings.key_matches(ev.key, sd, "interact"):
+                    acts.append("interact")
+                elif bindings.key_matches(ev.key, sd, "reload"):
+                    acts.append("reload")
+                elif bindings.key_matches(ev.key, sd, "heal"):
+                    acts.append("heal")
+            elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                self.lan_edge = True
+                if self.drone is not None:
+                    acts.append("drone_recall")     # 已在飞:左键 = 收回
+                elif self.drone_held(self.player):
+                    acts.append("drone")            # 手里拿着:左键 = 放出
+        try:
+            self.game.net.client_send_input(self._lan_input(acts))
+        except Exception:
+            pass
+        self.lan_edge = False
+        # 自己的视野(用镜像过来的世界数据本地算)+ 镜头跟自己的角色
+        self.refresh_fog(dt)
+        fx, fy = self.cam_anchor()
+        self.cam[0] = max(0, min(self.map.px_w - W, fx - W / 2))
+        self.cam[1] = max(0, min(self.map.px_h - H, fy - H / 2))
+
+    def _lan_input(self, acts):
+        """读本机键鼠 -> 给主机的一帧输入。"""
+        keys = pygame.key.get_pressed()
+        sd = self.game.save
+
+        def held(action):
+            for k in bindings.keys_for(sd, action):
+                try:
+                    if keys[k]:
+                        return True
+                except (IndexError, KeyError, TypeError):
+                    continue
+            return False
+
+        mx = float(held("right")) - float(held("left"))
+        my = float(held("down")) - float(held("up"))
+        p = self.player
+        mpx, mpy = pygame.mouse.get_pos()
+        aim = math.atan2(self.cam[1] + mpy - p.y, self.cam[0] + mpx - p.x)
+        pressed = pygame.mouse.get_pressed()
+        return dict(mx=mx, my=my, aim=aim, fire=bool(pressed[0]),
+                    braced=bool(pressed[2]), walk=held("walk"),
+                    edge=bool(self.lan_edge), acts=acts)
 
     def _update_p2(self, dt, keys):
         """P2:方向键移动 + 自动瞄准最近可见敌人 + 动作键(全程不用鼠标)。"""
@@ -3114,6 +3975,8 @@ class Raid:
             self.game.request_quit()
 
     def _handle_inv_click(self, ev):
+        if self._lan_readonly():
+            return
         import raid_ui
         p = self.player
         lay = raid_ui.inv_layout(p.bag.w, p.bag.h, p.safe.w, p.safe.h)
@@ -3163,28 +4026,42 @@ class Raid:
             else:
                 self.add_toast("背包空间不足", COL["bad"])
             return
-        # 装备槽点击 = 卸下(丢弃模式下直接丢地上)
-        if lay["weapon"].collidepoint(pos) and p.weapon is not None:
-            old = p.weapon
+        # 装备槽点击:4 个武器位和藏身处一致 —— 点别的位 = 切枪,点手上这位 = 卸下
+        # (丢弃模式下点哪个位就把那位上的枪丢在地上)
+        from settings import LOADOUT_SLOTS, LOADOUT_SLOT_NAMES
+        for slot in LOADOUT_SLOTS:
+            if not lay[slot].collidepoint(pos):
+                continue
+            it = loadout_get(self.game.save, slot)
+            if it is None:
+                self.add_toast(f"{LOADOUT_SLOT_NAMES[slot]} 是空的(局内不能从背包装枪到空位)",
+                               COL["text_dim"], 2.4)
+                return
+            held = (getattr(p, "cur_slot", "main1") == slot)
             if self.drop_mode:
-                p.weapon = None
+                # 丢弃模式:点哪个位就把那位上的枪丢在地上
+                self._clear_slot(p, slot, held)
                 p.reloading = False
                 p.reload_t = 0
-                self.drop_to_ground(old)
+                self.drop_to_ground(it)
                 audio.play("click")
-                self.add_toast(f"丢弃 {old.name}", COL["text_dim"])
-            elif p.bag.add_item(old):
-                p.weapon = None
-                p.reloading = False   # 卸枪取消装填
-                p.reload_t = 0
+                self.add_toast(f"丢弃 {it.name}", COL["text_dim"])
+                return
+            if not held:
+                self.switch_weapon(p, slot)     # 点别的位 = 切枪(状态写回旧槽)
+                return
+            # 点的是手上这把 -> 卸下(和以前单武器槽的行为一致)
+            self._clear_slot(p, slot, True)
+            p.reloading = False
+            p.reload_t = 0
+            if p.bag.add_item(it):
                 audio.play("click")
-            elif self.drop_to_ground(old):
-                p.weapon = None
-                p.reloading = False
-                p.reload_t = 0
+            elif self.drop_to_ground(it):
                 audio.play("click")
-                self.add_toast(f"{old.name} 放不进背包,已丢在脚边", COL["accent"], 3.0)
+                self.add_toast(f"{it.name} 放不进背包,已丢在脚边", COL["accent"], 3.0)
             else:
+                # 放不下就放回去,别把枪弄没
+                self._put_slot(p, slot, it, True)
                 self.add_toast("背包空间不足", COL["bad"])
             return
         if lay["armor"].collidepoint(pos) and p.armor is not None:
@@ -3226,6 +4103,11 @@ class Raid:
             else:
                 self.add_toast("背包空间不足", COL["bad"])
             return
+        if lay["pack"].collidepoint(pos):
+            self.add_toast("战局内不能换背包(容量已按进图时那只包算好)",
+                           COL["text_dim"], 2.4)
+            return
+            return
         placed = raid_ui.grid_hit_px(p.bag, lay["bag"], pos)
         if placed is None:
             return
@@ -3252,6 +4134,8 @@ class Raid:
                                COL["text_dim"], 1.8)
 
     def _handle_loot_click(self, ev):
+        if self._lan_readonly():
+            return
         import raid_ui
         p = self.player          # 必须在两个分支前绑定:点背包侧也要用
         lay = raid_ui.loot_layout(self.loot_target.container.w,
@@ -3332,9 +4216,12 @@ class Raid:
                 continue
             if ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
                 if self.hold.consume_release():
-                    # 普通点按:重放成一次按下(原逻辑照常)
-                    out.append(pygame.event.Event(pygame.MOUSEBUTTONDOWN,
-                                                  pos=ev.pos, button=1))
+                    # 普通点按:重放成一次按下(原逻辑照常)。
+                    # 坐标用**按下点**:手指点一下总会漂移几像素,用抬起点
+                    # 会滑到隔壁格子/按钮边缘外,变成"点了没反应"或点错东西。
+                    out.append(pygame.event.Event(
+                        pygame.MOUSEBUTTONDOWN,
+                        pos=self.hold.click_pos() or ev.pos, button=1))
                 else:
                     out.append(ev)
                 continue
@@ -3371,9 +4258,19 @@ class Raid:
             pl = raid_ui.grid_hit_px(p.safe, lay["safe"], pos)
             if pl is not None:
                 return pl.item, (p.safe, pl)
-            for key in ("weapon", "armor", "helmet"):
+            from settings import LOADOUT_SLOTS, loadout_get as _lg
+            for slot in LOADOUT_SLOTS:
+                if lay[slot].collidepoint(pos):
+                    it = _lg(self.game.save, slot)
+                    if it is not None:
+                        return it, None
+            for key in ("armor", "helmet", "pack"):
                 if lay[key].collidepoint(pos):
-                    it = getattr(p, key)
+                    if key == "pack":
+                        it = (getattr(p, "pack", None)
+                              or getattr(self.game.save, "pack", None))
+                    else:
+                        it = getattr(p, key, None)
                     if it is not None:
                         return it, None
             return None

@@ -674,15 +674,15 @@ def run():
         assert len(h.trade_goods()) == len(TRADE_GOODS)
         # 购买 AK74
         h.trade_scroll = 0.0
-        goods, per, row_h = h.trade_rows()
+        goods = h.trade_goods()
         idx = next(i for i, (iid, _c) in enumerate(goods) if iid == "ak74")
         price = trade_buy_price("ak74", 1)
-        h._trade_click(h.trade_row_rect(idx, per, row_h).center)
+        h._trade_click(h._trade_cell_rect(idx).center)
         assert sd.rubles == 100000 - price
         assert any(p.item.iid == "ak74" for p in sd.stash.items)
         # 余额不足买不起
         sd.rubles = 10
-        h._trade_click(h.trade_row_rect(idx, per, row_h).center)
+        h._trade_click(h._trade_cell_rect(idx).center)
         assert sd.rubles == 10
         # 点击仓库物品出售
         placed = next(p for p in sd.stash.items if p.item.iid == "ak74")
@@ -699,9 +699,9 @@ def run():
         h.update(1 / 60, [pygame.event.Event(pygame.MOUSEWHEEL, x=0, y=-5)])
         assert h.trade_scroll > 0
         h.trade_scroll = ms
-        goods, per, row_h = h.trade_rows()
+        goods = h.trade_goods()
         last_i = len(goods) - 1
-        r_last = h.trade_row_rect(last_i, per, row_h)
+        r_last = h._trade_cell_rect(last_i)
         assert r_last.bottom <= h.trade_view_bottom + 1, (r_last, h.trade_view_bottom)
         sid, scount = goods[last_i]
         s_price = trade_buy_price(sid, scount)
@@ -712,9 +712,10 @@ def run():
         h.update(1 / 60, [pygame.event.Event(pygame.MOUSEWHEEL, x=0, y=5)])
         assert h.trade_scroll < ms
         # 分区标签点击
-        h._trade_click(h.trade_tab_rects[1].center)
-        assert h.trade_cat == "weapon" and h.trade_scroll == 0.0
-        h._trade_click(h.trade_tab_rects[0].center)
+        rows = h._trade_cat_rows()
+        h._trade_click(rows[1][2].center)          # 第 2 个分类 = 枪械
+        assert h.trade_cat == "weapon" and h.trade_scroll == 0.0, h.trade_cat
+        h._trade_click(h._trade_cat_rows()[0][2].center)   # 第 1 个 = 全部
         assert h.trade_cat is None
         # 存档往返保留余额
         sd.rubles = 12345
@@ -1118,7 +1119,7 @@ def run():
     def t_minigun():
         """M139 装轮机枪:500 弹容 / 7.62×45 / 需 6 级甲 / 架枪收拢散布。"""
         from game import Game
-        from settings import ITEMS, armor_allows
+        from settings import ITEMS, armor_allows, loadout_weapons
         d = ITEMS["m139"]
         assert d["mag"] == 500 and d["ammo"] == "a762x45"
         assert d["req_armor_level"] == 6
@@ -1139,13 +1140,20 @@ def run():
         placed = next(p for p in sd.stash.items if p.item.iid == "m139")
         pos = (66 + placed.x * 40 + 5, 176 + placed.y * 40 + 5)
         g.hideout._click(pos)
-        assert sd.weapon is None or sd.weapon.iid != "m139", "低级甲不该能装备 M139"
+        assert not any(w.iid == "m139" for w in loadout_weapons(sd)), \
+            "低级甲不该能装备 M139"
         sd.armor = Item("b45")
         g.hideout._click(pos)
-        assert sd.weapon is not None and sd.weapon.iid == "m139"
-        # 带着机枪不能脱 6 级甲
+        assert any(w.iid == "m139" for w in loadout_weapons(sd)), \
+            "6 级甲应该能装备 M139"
+        # 多武器位下:备用位上的机枪不该把玩家锁死在 6 级甲上(手里拿的是 pm)
         g.hideout._click(g.hideout.lay["armor"].center)
-        assert sd.armor is not None
+        assert sd.armor is None
+        # 但手里真拿着重武器时,脱甲要被拦住
+        sd.weapon = Item.weapon("m139", mag=500)
+        sd.armor = Item("b45")
+        g.hideout._click(g.hideout.lay["armor"].center)
+        assert sd.armor is not None, "手里拿着 M139 时不该能脱 6 级甲"
         # 战局:腰射 vs 架枪的散布统计
         g2 = Game()
         g2.save = save_mod.reset_data()
@@ -1188,7 +1196,7 @@ def run():
         for iid, d in ITEMS.items():
             if d.get("cat") != "weapon":
                 continue
-            if weapon_class(iid) == "狙击步枪":
+            if weapon_class(iid) in ("狙击步枪", "反器材步枪", "近战武器"):
                 assert "spread_braced" not in d, f"{iid} 狙击枪不参与架枪"
             else:
                 assert d.get("spread_braced") is not None, iid
@@ -1352,6 +1360,200 @@ def run():
         assert g2.save.map_key == "port"
 
     check("头目-三图5级甲与专属枪械掉落", t_boss)
+
+    def t_ak50():
+        """AK-50 + M966 高穿弹:打穿一堵墙、两堵墙挡住、有概率炸膛。"""
+        from game import Game
+        from enemy import Scav
+        from settings import (ITEMS, TILE, TRADE_GOODS, MISFIRE_JAM_TIME,
+                              trade_cat_match, weapon_params)
+        d = ITEMS["ak50"]
+        a = ITEMS["m966"]
+        assert d["cat"] == "weapon" and d["auto"] is False and d["mag"] == 10
+        assert d["ammo"] == "m966"
+        assert a["cat"] == "ammo" and a["wall_pen"] == 1
+        assert a["misfire"] > 0
+        # 上架 + 归入「特殊枪械」分区
+        assert any(i == "ak50" for i, _ in TRADE_GOODS)
+        assert any(i == "m966" for i, _ in TRADE_GOODS)
+        assert trade_cat_match("ak50", "special")
+        # 单发伤害 = 165 × 1.25(弹药) × 1.08(天赋)
+        raw = weapon_params(Item.weapon("ak50", mag=10))[0]
+        assert abs(raw - 165 * 1.25 * 1.08) < 1e-6, raw
+        # 普通枪械不受影响:没有穿墙、没有炸膛
+        wp = weapon_params(Item.weapon("ak74", mag=30))
+        assert wp[8] == 0 and wp[10] == 0.0
+
+        def make_raid(walls, dist=330):
+            """摆一条弹道:walls 是「玩家往右第几格放墙」。靶子血厚,方便读单次伤害。"""
+            g = Game()
+            g.save = save_mod.reset_data()
+            g.save.armor = None
+            g.save.weapon = Item.weapon("ak50", mag=200)
+            g.start_raid()
+            r = g.raid
+            r.scavs = []
+            p = r.player
+            p.fire_cd = 0.0
+            p.jam_t = 0.0
+            tgt = Scav("pistol", p.x + dist, p.y, r.diff)
+            tgt.speed = 0.0
+            tgt.max_hp = tgt.hp = 99999.0
+            r.scavs = [tgt]
+            t0x, t0y = int(p.x // TILE), int(p.y // TILE)
+            for off in walls:
+                r.map.tiles[t0y][t0x + off] = "#"
+                r.map.solid[t0y][t0x + off] = 1
+            return r, p, tgt
+
+        def shoot(r, p, tgt, tries=25):
+            """打一发并推进到子弹落地。子弹有随机散布 + 12% 炸膛,所以多试几发。
+
+            返回 (这一发造成的伤害, 出膛时的穿深)。
+            """
+            for _ in range(tries):
+                p.aim = math.atan2(tgt.y - p.y, tgt.x - p.x)
+                p.fire_cd = 0.0
+                p.jam_t = 0.0
+                r.bullets = []
+                r.fire_edge = True
+                r.try_fire(True)
+                r.fire_edge = False
+                if not r.bullets:
+                    continue                    # 炸膛,换下一发
+                pen0 = r.bullets[0]["pen"]
+                hp0 = tgt.hp
+                for _ in range(45):
+                    p.aim = math.atan2(tgt.y - p.y, tgt.x - p.x)
+                    r.update(1 / 60.0, [])
+                if tgt.hp < hp0:
+                    return hp0 - tgt.hp, pen0
+            return 0.0, None
+
+        # 1) 一堵墙:打穿(伤害 ×0.75),人被打到
+        r, p, tgt = make_raid((4,))
+        lost, pen0 = shoot(r, p, tgt)
+        assert pen0 == 1, pen0
+        assert abs(lost - raw * 0.75) < 1e-6, lost
+        # 2) 两堵墙:第二堵就打不穿,人碰不到
+        r, p, tgt = make_raid((4, 8))
+        lost, _pen = shoot(r, p, tgt)
+        assert lost == 0.0, lost
+        # 3) 水面:不可穿,人碰不到
+        r, p, tgt = make_raid(())
+        ty = int(p.y // TILE)
+        r.map.tiles[ty][int((p.x + 128) // TILE)] = "W"
+        r.map.solid[ty][int((p.x + 128) // TILE)] = 1
+        lost, _pen = shoot(r, p, tgt, tries=8)
+        assert lost == 0.0, lost
+        # 4) 炸膛:这一发不出去、自己掉血、枪膛卡死;卡壳期间扣不动扳机
+        r, p, tgt = make_raid(())
+        hp0 = p.hp
+        mag0 = p.weapon.state["mag"]
+        real_random = random.random
+        random.random = lambda: 0.0          # 强制触发炸膛
+        try:
+            p.fire_cd = 0.0
+            r.fire_edge = True
+            r.try_fire(True)
+            r.fire_edge = False
+        finally:
+            random.random = real_random
+        assert not r.bullets, "炸膛不该出弹"
+        assert p.hp < hp0, (hp0, p.hp)
+        assert p.weapon.state["mag"] == mag0 - 1, "炸膛也要消耗这一发"
+        assert abs(p.jam_t - MISFIRE_JAM_TIME) < 1e-9, p.jam_t
+        p.fire_cd = 0.0
+        r.fire_edge = True
+        r.try_fire(True)
+        r.fire_edge = False
+        assert not r.bullets and p.weapon.state["mag"] == mag0 - 1, "卡壳时不该能开火"
+
+    check("特殊枪械-AK50(穿一堵墙/炸膛卡壳)", t_ak50)
+
+    def t_loadout():
+        """装备位:2 主武器 + 副武器 + 近战(装/卸/换位/存档往返/战局切枪/挥刀)。"""
+        from game import Game
+        from enemy import Scav
+        from settings import (ITEMS, LOADOUT_SLOTS, loadout_all, loadout_get,
+                              loadout_weapons, loadout_free_slot, loadout_set,
+                              is_melee, WEAPON_CLASS)
+        import settings as _S
+        assert LOADOUT_SLOTS == ("main1", "main2", "side", "melee")
+        # 刀:近战武器、没有弹种
+        kn = ITEMS["knife"]
+        assert kn["cat"] == "weapon" and kn.get("melee") is True
+        assert is_melee(Item("knife")) and not is_melee(Item.weapon("ak74"))
+        assert WEAPON_CLASS["knife"] == "近战武器"
+        assert _S.weapon_ammo_ids(Item("knife")) == []
+        # 分类规则:步枪 -> 主武器位;手枪/冲锋枪 -> 副武器位;刀 -> 近战位
+        assert _S.slot_for_weapon(Item.weapon("ak74")) == "main1"
+        assert _S.slot_for_weapon(Item.weapon("mp5")) == "side"
+        assert _S.slot_for_weapon(Item("knife")) == "melee"
+
+        # 装备:两把主武器 + 副武器 + 刀,各自的位子要对
+        g = Game()
+        g.save = save_mod.reset_data()
+        sd = g.save
+        sd.weapon = None
+        loadout_set(sd, "main1", Item.weapon("ak74", mag=30))
+        loadout_set(sd, "main2", Item.weapon("m700", mag=5))
+        loadout_set(sd, "side", Item.weapon("pm", mag=8))
+        loadout_set(sd, "melee", Item("knife"))
+        got = {s: (w.iid if w else None) for s, w in loadout_all(sd).items()}
+        assert got == {"main1": "ak74", "main2": "m700",
+                       "side": "pm", "melee": "knife"}, got
+        assert len(loadout_weapons(sd)) == 4
+        # 主武器位满了 -> 新步枪没地方放
+        assert loadout_free_slot(sd, Item.weapon("akm")) is None
+        # 卸载一把主武器 -> 空出来的位子又可用
+        loadout_set(sd, "main2", None)
+        assert loadout_get(sd, "main2") is None
+        assert loadout_free_slot(sd, Item.weapon("akm")) == "main2"
+
+        # 存档往返:四个位子要原样回来(存在 sd.weapon.state["x_slots"] 里)
+        save_mod.save_data(sd)
+        sd2 = save_mod.load_data()
+        got2 = {s: (w.iid if w else None) for s, w in loadout_all(sd2).items()}
+        assert got2 == {"main1": "ak74", "main2": None,
+                        "side": "pm", "melee": "knife"}, got2
+        assert loadout_get(sd2, "melee").def_.get("melee") is True
+
+        # 战局:数字键切枪 / 点 HUD 方块 / 挥刀
+        g2 = Game()
+        g2.save = save_mod.reset_data()
+        sd3 = g2.save
+        sd3.weapon = Item.weapon("ak74", mag=30)
+        loadout_set(sd3, "side", Item.weapon("pm", mag=8))
+        loadout_set(sd3, "melee", Item("knife"))
+        g2.start_raid()
+        r = g2.raid
+        r.scavs = []
+        p = r.player
+        assert p.weapon.iid == "ak74" and p.cur_slot == "main1"
+        r.switch_slot_key(p, pygame.K_3)                 # 3 = 副武器
+        assert p.weapon.iid == "pm" and p.cur_slot == "side"
+        # 打了半匣再切走,状态要写回那个槽
+        p.weapon.state["mag"] = 3
+        r.switch_slot_key(p, pygame.K_1)
+        assert p.weapon.iid == "ak74" and p.cur_slot == "main1"
+        assert loadout_get(sd3, "side").state["mag"] == 3, "副武器弹匣状态没写回"
+        # 4 = 近战:左键挥刀(打死边上的人,不消耗子弹)
+        r.switch_slot_key(p, pygame.K_4)
+        assert p.weapon.iid == "knife" and is_melee(p.weapon)
+        tgt = Scav("pistol", p.x + 20, p.y, r.diff)
+        tgt.hp = 10.0
+        r.scavs = [tgt]
+        p.fire_cd = 0.0
+        p.jam_t = 0.0
+        r.fire_edge = True
+        r.try_fire(True)
+        r.fire_edge = False
+        assert tgt.dead, "刀应该能一下带走残血守军"
+        assert not r.bullets, "刀不该打出子弹"
+        assert p.weapon.state.get("mag", 0) == 0, "刀没有弹匣"
+
+    check("装备位-两主武器/副武器/近战(切枪+挥刀)", t_loadout)
 
     def t_rpg():
         """隐藏头目「作者」+ RPG:右键架枪更准;火箭弹穿6甲半血、无6甲阵亡。"""
@@ -1519,10 +1721,10 @@ def run():
         h.view = "trade"
         h.trade_cat = "med"
         h.trade_scroll = 0.0
-        gs, per, row_h = h.trade_rows()
+        gs = h.trade_goods()
         i = next(i for i, (iid, _c) in enumerate(gs) if iid == "surgery")
         before = sd.rubles
-        h._trade_click(h.trade_row_rect(i, per, row_h).center)
+        h._trade_click(h._trade_cell_rect(i).center)
         assert any(p.item.iid == "surgery" for p in sd.stash.items)
         assert sd.rubles < before
 
@@ -1988,8 +2190,11 @@ def run():
         assert w is not None and w.iid in ISSUE_WEAPONS, w.iid
         slots = weapon_slots(w.iid)
         att = w.state.get("attach") or {}
-        assert slots and set(att) == set(slots), (w.iid, att, slots)
-        for slot in slots:
+        # 配发装备只装 ISSUE_ATTACH 里有的槽 —— 「全自动扳机组件」是教官专属,
+        # 绝不会随突袭配发(否则就违反了"只能从教官那里获得")。
+        issued = [s for s in slots if s in ISSUE_ATTACH]
+        assert issued and set(att) == set(issued), (w.iid, att, slots)
+        for slot in issued:
             assert att[slot] == ISSUE_ATTACH[slot], (slot, att[slot])
         assert w.state["mag"] == weapon_capacity(w), w.state["mag"]
         assert r.player.armor.def_["level"] >= 5
@@ -2000,7 +2205,9 @@ def run():
         assert any(pl.item.cat == "med" for pl in r.player.bag.items)
         rng = random.Random(7)
         for wp, ar, pk, its in (assault.build(rng) for _ in range(8)):
-            assert set(wp.state.get("attach") or {}) == set(weapon_slots(wp.iid))
+            # 同样:只核对配发清单里有的槽(教官专属的扳机组不在其列)
+            want = {s for s in weapon_slots(wp.iid) if s in ISSUE_ATTACH}
+            assert set(wp.state.get("attach") or {}) == want, wp.iid
             assert wp.state["mag"] == weapon_capacity(wp)
         assert len({k[0].iid for k in (assault.build(rng) for _ in range(8))}) >= 2, \
             "配发武器应该随机"
@@ -3681,10 +3888,10 @@ def run():
                                              pos=(track.centerx, track.bottom))])
         assert not h5.trade_drag
         # 滚到底后,最后一行的商品落在可见范围内(点得到)
-        goods, per, row_h = h5.trade_rows()
-        r_last = h5.trade_row_rect(len(goods) - 1, per, row_h)
-        assert (h5.trade_view_top - row_h <= r_last.y
-                <= h5.trade_view_bottom), r_last
+        goods = h5.trade_goods()
+        r_last = h5._trade_cell_rect(len(goods) - 1)
+        _gv = h5._trade_goods_view()
+        assert r_last.bottom <= _gv.bottom + 1, (r_last, _gv)
 
         # 7) 枪械分类:每把枪都有分类,提示里也会标出来
         from settings import ITEMS as _ITEMS, weapon_class as _wcls
@@ -3936,7 +4143,7 @@ def run():
         from game import Game
         from inventory import rotate_in_place, Container, Placed
         from settings import (SAFE_CONTRACT, SAFE_BASE, SAFE_UPGRADED,
-                              STASH_VIEW_ROWS, W as SW, H as SH)
+                              STASH_VIEW_ROWS, W as SW, H as SH, loadout_weapons)
         import quests
         import uikit as _uk
         import raid_ui as _rui
@@ -4072,7 +4279,7 @@ def run():
                                              pos=pos, button=1)])
         h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONUP,
                                              pos=pos, button=1)])
-        assert sdg.weapon is not None and sdg.weapon.iid == "mp5", \
+        assert any(w.iid == "mp5" for w in loadout_weapons(sdg)), \
             "触屏普通点按要照常装备(延迟到抬起)"
         assert not h.hold.active()
         g2.save.touch = False
@@ -4702,6 +4909,35 @@ def run():
         hint = coop_mod.key_hint(short=True)
         assert "." in hint and "," in hint, hint
         assert "小" not in hint, hint
+        # 15) 局内背包面板 = 大厅「出战配置」那套装备位:
+        #     4 个武器位(两个主武器)+ 护甲/头盔/背包,不再"只有一个主武器"
+        import raid_ui as _rui
+        from settings import (LOADOUT_SLOTS as _LS, loadout_put, loadout_get)
+        lay = _rui.inv_layout(6, 4, 2, 1)
+        for _slot in _LS:
+            assert _slot in lay and lay[_slot].w >= 140, (_slot, lay.get(_slot))
+        assert "main1" in lay and "main2" in lay and "pack" in lay
+        assert lay["weapon"] is lay["main1"], "旧调用 lay['weapon'] 要还能用"
+        # 第二个主武器位:装一把枪 -> 点面板上的「主武器 2」应该切过去
+        sd = g.save
+        loadout_put(sd, "main2", Item.weapon("ak74", mag=30))
+        r.player.cur_slot = "main1"
+        r.player.weapon = loadout_get(sd, "main1")
+        assert loadout_get(sd, "main2") is not None, "主武器 2 没装上"
+        r.inv_open = True
+        r.update(1 / 60, [pygame.event.Event(
+            pygame.MOUSEBUTTONDOWN, pos=lay["main2"].center, button=1)])
+        assert r.player.cur_slot == "main2", r.player.cur_slot
+        assert r.player.weapon.iid == "ak74", r.player.weapon.iid
+        g.draw(screen)                 # 新面板(4 个武器位 + 背包)
+        # 点手上那把(主武器 2)= 卸回背包
+        n_bag = r.player.bag.item_count()
+        r.update(1 / 60, [pygame.event.Event(
+            pygame.MOUSEBUTTONDOWN, pos=lay["main2"].center, button=1)])
+        assert r.player.weapon is None and loadout_get(sd, "main2") is None
+        assert r.player.bag.item_count() >= n_bag, "卸下的枪要进背包"
+        r.inv_open = False
+        g.draw(screen)
         # 玩法简介每页都要能整页画完(行距自适应,最多 25 行)
         import intro as _intro
         for title, lines in _intro.PAGES:
@@ -4715,8 +4951,650 @@ def run():
         g.to_hideout()
         pygame.display.flip()
 
+    def t_lan():
+        """局域网联机:回环握手 -> 主机开局 -> 客户端上传输入 -> 状态镜像。
+
+        这一条同时也是打包后的冒烟测试:Tarkov2D.exe --selftest 能跑通,
+        就说明冻结环境里的 socket / threading / zlib 和 net.py 都没问题。
+        """
+        import net as net_mod
+        from game import Game
+        from settings import W as SW, H as SH
+        import bindings
+        screen = pygame.display.set_mode((SW, SH))
+        port = 27611                       # 换个端口,别和正在玩的联机局撞车
+
+        # 1) 主机开房
+        host = Game()
+        host.save = save_mod.reset_data()
+        host.save.seen_intro = True
+        host.save.mode = "raid"
+        host.save.touch = False
+        assert host.net.host_room("自检房", port=port), host.net.error
+        assert host.net.role == "host"
+        assert "房间已开" in host.net.status_text()
+
+        # 2) 客户端连上并握手
+        client = Game()
+        client.save = save_mod.reset_data()
+        client.save.seen_intro = True
+        client.save.mode = "raid"
+        client.save.touch = False
+        assert client.net.join("127.0.0.1", port), client.net.error
+        t0 = time.time()
+        while time.time() - t0 < 8 and not host.net._client_ready:
+            host.update(1 / 60.0, [])
+            client.update(1 / 60.0, [])
+            time.sleep(1 / 240.0)
+        assert host.net._client_ready, "握手失败:%s" % host.net.status_text()
+        assert host.lan_host_ready()
+
+        # 3) 主机开局,客户端跟着进战局(地图/敌人数量结构一致)
+        assert host.lan_start_raid()
+        t0 = time.time()
+        while time.time() - t0 < 10 and client.phase != "raid":
+            host.update(1 / 60.0, [])
+            client.update(1 / 60.0, [])
+            time.sleep(1 / 240.0)
+        assert client.phase == "raid" and client.raid is not None, "客户端没进战局"
+        hr, cr = host.raid, client.raid
+        assert hr.lan == "host" and cr.lan == "client"
+        assert cr.map_key == hr.map_key, "两边地图不一致"
+        assert len(cr.scavs) == len(hr.scavs), "两边敌人数量不一致"
+        assert cr.coop and hr.coop
+
+        # 4) 客户端按住「上」:主机侧的 P2 应该往北走(输入真的过网了)
+        y_before = hr.player2.y
+        real_get = pygame.key.get_pressed
+        up_keys = set(bindings.keys_for(client.save, "up"))
+
+        class _K:
+            def __getitem__(self, k):
+                return k in up_keys
+        pygame.key.get_pressed = lambda: _K()
+        try:
+            t0 = time.time()
+            while time.time() - t0 < 1.5:
+                host.update(1 / 60.0, [])
+                client.update(1 / 60.0, [])
+                time.sleep(1 / 60.0)
+        finally:
+            pygame.key.get_pressed = real_get
+        assert hr.player2.y < y_before - 30, \
+            "客户端的方向键没有驱动主机侧的 P2(%.0f -> %.0f)" % (y_before, hr.player2.y)
+
+        # 5) 镜像:客户端看到的自己 = 主机的 P2,看到的队友 = 主机的 P1
+        d_self = math.hypot(cr.player.x - hr.player2.x, cr.player.y - hr.player2.y)
+        d_mate = math.hypot(cr.player2.x - hr.player.x, cr.player2.y - hr.player.y)
+        assert d_self < 60, "客户端自己的位置和主机差 %.0f px" % d_self
+        assert d_mate < 60, "客户端看到的队友位置差 %.0f px" % d_mate
+        assert len(cr.scavs) == len(hr.scavs), "镜像后敌人数量又不一致了"
+        # 5aa) 同步安全:共享的不可变值(提示条颜色 = 同一个元组对象)不能被编码成
+        #       {"__r__": 路径} —— 列表一挪位路径就失效,颜色变 None 后客户端
+        #       Font.render 抛 TypeError("invalid color argument") 直接闪退。
+        shared_col = (222, 226, 232)
+        hr.toasts = [["a", 3.0, 3.0, shared_col], ["b", 3.0, 3.0, shared_col],
+                     ["c", 3.0, 3.0, shared_col]]
+        tree = net_mod.encode_state(hr, ("toasts",))
+        raw = repr(tree["toasts"])
+        assert "__r__" not in raw, "共享颜色被编码成了路径引用:%s" % raw[:120]
+        cr.toasts = [["b", 3.0, 3.0, (1, 1, 1)]]      # 客户端列表已经挪过位
+        val = net_mod.decode_value(tree["toasts"], cr)
+        assert all(isinstance(row[3], tuple) and len(row[3]) == 3
+                   for row in val), val
+        # 路径引用真的失效时要保留本地旧值,而不是把字段写成 None
+        assert net_mod.decode_value({"__r__": ["toasts", 9, 3]}, cr, 0,
+                                    (9, 9, 9)) == (9, 9, 9)
+        from raid_ui import as_color
+        from settings import COL as _COL
+        assert as_color(None) == _COL["text"] and as_color("bad") == _COL["text"]
+        assert as_color([1, 2, 3]) == (1, 2, 3)
+        hr.toasts = []
+        cr.toasts = []
+        # 5b) 侦察无人机:主机模拟 -> 客户端镜像(位置/电量/标记)+ 两边都能渲染
+        from inventory import Item as _It
+        hr.player2.weapon = _It.weapon("drone")
+        hr.player2.piloting = False
+        hr.drone_cd = 0.0
+        assert hr.deploy_drone(hr.player2), "主机侧放出无人机失败"
+        t0 = time.time()
+        while time.time() - t0 < 3 and getattr(cr, "drone", None) is None:
+            host.update(1 / 60.0, [])
+            client.update(1 / 60.0, [])
+            time.sleep(1 / 240.0)
+        assert cr.drone is not None, "客户端没镜像到无人机"
+        assert abs(cr.drone["x"] - hr.drone["x"]) < 80, "客户端无人机位置不对"
+        assert abs(cr.drone["battery"] - hr.drone["battery"]) < 1.0, "电量没同步"
+        assert cr.piloting(), "客户端应跟着进入掌镜(看无人机视角)"
+        fx, fy = cr.cam_anchor()
+        assert abs(fx - cr.drone["x"]) < 1e-6 and abs(fy - cr.drone["y"]) < 1e-6, \
+            "客户端掌镜时镜头要跟无人机"
+        assert cr.drone_held(cr.player), "客户端应能看出自己手里是无人机"
+        host.draw(screen)              # 两边都渲染一次(无人机 + 标记)
+        client.draw(screen)
+        # 客户端侧视野:无人机那块亮区要能算出来(本地重算,不靠主机传多边形)
+        cr.refresh_fog(0.0, force=True)
+        assert cr.drone_view_poly and len(cr.drone_view_poly) >= 3, \
+            "客户端拿不到无人机视野多边形"
+        client.draw(screen)
+        # 收回也要镜像过去
+        hr.recall_drone(hr.player2, ok=True)
+        t0 = time.time()
+        while time.time() - t0 < 3 and getattr(cr, "drone", None) is not None:
+            host.update(1 / 60.0, [])
+            client.update(1 / 60.0, [])
+            time.sleep(1 / 240.0)
+        assert cr.drone is None, "收回后客户端还挂着无人机"
+        host.draw(screen)
+        client.draw(screen)
+
+        # 7) 第二轮:回藏身处后还能接着再开一局(联机状态保持)
+        r1 = client.raid
+        host.to_hideout()
+        client.to_hideout()
+        assert host.phase == "hideout" and client.phase == "hideout"
+        assert host.lan_start_raid(), "第二局开不起来"
+        t0 = time.time()
+        while time.time() - t0 < 10 and (client.phase != "raid"
+                                         or client.raid is r1):
+            host.update(1 / 60.0, [])
+            client.update(1 / 60.0, [])
+            time.sleep(1 / 240.0)
+        assert client.phase == "raid" and client.raid is not r1, "第二局客户端没跟上"
+        assert len(client.raid.scavs) == len(host.raid.scavs), "第二局敌人数不一致"
+        assert client.raid.map_key == host.raid.map_key
+        # 6) 断开:客户端应该回到藏身处
+        host.net.close()
+        t0 = time.time()
+        while time.time() - t0 < 3 and client.phase == "raid":
+            host.update(1 / 60.0, [])
+            client.update(1 / 60.0, [])
+            time.sleep(1 / 240.0)
+        assert client.phase == "hideout", "主机断开后客户端应该回藏身处"
+        client.net.close()
+        assert client.net.role is None and host.net.role is None
+
+    def t_drone():
+        """非常规武器-侦察无人机:获取/装备位/放出/掌镜/自动标记/电量/信号/夜战/存档。
+
+        一件装备 = 一架无人机:左键朝准星放出,F 掌镜(WASD 操纵),电量耗尽后
+        离得近自动回收、离得远坠毁;飞离操作者超过信号距离直接失联自毁。
+        侦察 = 以无人机为圆心的大圆照亮迷雾(夜战同样有效)+ 自动标记圈内有
+        视线的守军。
+        """
+        import math as _m
+        from game import Game
+        from settings import (ITEMS, TALENTS, TRADE_GOODS, trade_cat_match,
+                              weapon_class, is_drone, drone_cfg, loadout_add,
+                              loadout_get, DRONE)
+        from enemy import Scav
+
+        # 1) 物品定义:占主武器位(2×2)+ 天赋 + 上架「特殊枪械」分区
+        d = ITEMS["drone"]
+        assert is_drone(d) and not d.get("melee"), "无人机应标记 drone=True"
+        assert d["cat"] == "weapon", d["cat"]
+        assert weapon_class("drone"), "无人机要有武器分类"
+        assert "drone" in TALENTS, "无人机缺天赋"
+        assert d["price"] > 0 and d["w"] > 0 and d["h"] > 0
+        assert d.get("spread_braced") is not None, "非狙击武器要参与架枪判定"
+        assert trade_cat_match("drone", "special"), "无人机要进「特殊枪械」分区"
+        assert any(iid == "drone" for iid, _c in TRADE_GOODS), "无人机要上架"
+
+        cfg = drone_cfg()
+        assert cfg["battery"] > DRONE["battery"], "天赋「长续航」应加成电量"
+
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        g.save.mode = "raid"
+        g.save.weapon = Item.weapon("ak74", mag=30)
+        # 2) 装备位:加进第二个主武器位
+        ok, why = loadout_add(g.save, Item.weapon("drone"))
+        assert ok, why
+        assert loadout_get(g.save, "main2") is not None, "无人机该进主武器 2"
+        g.start_raid()
+        r = g.raid
+        r.scavs = []
+        p = r.player
+        assert r.switch_weapon(p, "main2"), "切不到无人机位"
+        assert is_drone(p.weapon), "手上应该是无人机"
+        assert r.drone_held(p), "drone_held 应为真"
+
+        # 3) 左键放出 + 掌镜:镜头跟无人机,人不动
+        p.aim = 0.0
+        assert r.drone is None
+        r.try_fire(False, edge=True)
+        assert r.drone is not None, "左键应该放出无人机"
+        assert abs(r.drone["battery"] - cfg["battery"]) < 1e-6
+        assert r.drone["owner"] == r.player_name(p)
+        assert r.piloting(), "放出后应处于掌镜状态"
+        ax, ay = r.cam_anchor()
+        assert abs(ax - r.drone["x"]) < 1e-6 and abs(ay - r.drone["y"]) < 1e-6, \
+            "掌镜时镜头要跟无人机"
+        assert _m.hypot(r.drone["x"] - p.x, r.drone["y"] - p.y) <= DRONE["deploy_dist"] + 8
+
+        # 4) 掌镜飞行:按住 ←/→ 无人机就左右飞,
+        #    而**操作者本人不许跟着走**(这是上一版的回归:当时方向键/WASD 会带着人一起动)
+        bx, by = r.drone["x"], r.drone["y"]
+        px0, py0 = p.x, p.y
+        real_kp = pygame.key.get_pressed
+        real_mp = pygame.mouse.get_pressed
+
+        class _Fly:
+            def __getitem__(self, k):
+                return k in (pygame.K_RIGHT, pygame.K_LEFT)   # 只按 ←/→
+
+            def __len__(self):
+                return 512
+        pygame.key.get_pressed = lambda: _Fly()
+        pygame.mouse.get_pressed = lambda: (False, False, False)   # 不碰鼠标
+        try:
+            for _ in range(30):
+                r.update(1 / 60.0, [])
+        finally:
+            pygame.key.get_pressed = real_kp
+            pygame.mouse.get_pressed = real_mp
+        # 同时按住 ← 和 → 应该互相抵消(原地不动)
+        assert abs(r.drone["x"] - bx) < 1.0 and abs(r.drone["y"] - by) < 1.0, \
+            "同时按 ←/→ 应该抵消(实际 dx=%.1f dy=%.1f)" % (
+                r.drone["x"] - bx, r.drone["y"] - by)
+
+        class _Right:
+            def __getitem__(self, k):
+                return k == pygame.K_RIGHT
+
+            def __len__(self):
+                return 512
+        bx, by = r.drone["x"], r.drone["y"]
+        pygame.key.get_pressed = lambda: _Right()
+        try:
+            for _ in range(30):
+                r.update(1 / 60.0, [])
+        finally:
+            pygame.key.get_pressed = real_kp
+        assert r.drone["x"] > bx + 20 and abs(r.drone["y"] - by) < 1.0, \
+            "按住 → 无人机应该向右飞(实际 dx=%.1f dy=%.1f)" % (
+                r.drone["x"] - bx, r.drone["y"] - by)
+        # 松开方向键之后无人机应该停下(不再位移)
+        hx, hy = r.drone["x"], r.drone["y"]
+
+        class _None:
+            def __getitem__(self, k):
+                return False
+
+            def __len__(self):
+                return 512
+        pygame.key.get_pressed = lambda: _None()
+        try:
+            for _ in range(20):
+                r.update(1 / 60.0, [])
+        finally:
+            pygame.key.get_pressed = real_kp
+        assert _m.hypot(r.drone["x"] - hx, r.drone["y"] - hy) < 1.0, \
+            "松开方向键后无人机不该继续飞"
+        # 回归:掌镜时的人不许跟着走(←/→ 默认也是玩家的左右移动键)
+        moved_p = _m.hypot(p.x - px0, p.y - py0)
+        assert moved_p < 1.0, \
+            "掌镜时操作者不应该跟着走(实际移动了 %.1f px)" % moved_p
+
+        # 5) 自动标记:圈内、有视线、站着不动的守军必须被标记(并且可见)
+        dx, dy = r.drone["x"], r.drone["y"]
+        target = None
+        for rad in (40, 70, 100, 140, 200, 260):
+            for ang in range(0, 360, 30):
+                sx = dx + _m.cos(_m.radians(ang)) * rad
+                sy = dy + _m.sin(_m.radians(ang)) * rad
+                if r.map.collides(sx, sy, 12):
+                    continue
+                if not r.map.los_clear(dx, dy, sx, sy):
+                    continue
+                target = Scav("melee", sx, sy, r.diff, custom=dict(speed=0))
+                break
+            if target is not None:
+                break
+        assert target is not None, "无人机周围找不到能放守军的空地"
+        r.scavs = [target]
+        r._drone_scan_t = 0.0
+        for _ in range(6):
+            r.update(1 / 60.0, [])
+        assert id(target) in r.drone_marks, "圈内守军应被无人机标记"
+        r.refresh_fog(0.0, force=True)
+        assert id(target) in r.fog_vis, "被无人机照到的守军应可见"
+        assert r.drone_view_poly and len(r.drone_view_poly) >= 3, "缺无人机视野多边形"
+        assert len(r.fog_polys) >= 2, "白天迷雾里应有无人机那块亮区"
+
+        # 6) 远处(超出标记半径)的守军不该被标记
+        far = Scav("melee", dx + cfg["mark_radius"] + 400, dy, r.diff,
+                   custom=dict(speed=0))
+        r.scavs.append(far)
+        r._drone_scan_t = 0.0
+        for _ in range(3):
+            r.update(1 / 60.0, [])
+        assert id(far) not in r.drone_marks, "超出标记半径的守军不该被标记"
+
+        # 7) 标记会过期(无人机看不到之后几秒掉)
+        assert r.recall_drone(p, ok=True), "收回应该成功"
+        r.drone_cd = 0.0                      # 自检不等那 2 秒整备时间
+        assert r.deploy_drone(p), "重新放出应该成功"
+        r._drone_scan_t = 0.0
+        for _ in range(3):
+            r.update(1 / 60.0, [])
+        assert id(target) in r.drone_marks, "重新放出后应重新标记"
+        r._drone_scan_t = 999.0
+        for _ in range(int(3.6 * 60)):
+            r.update(1 / 60.0, [])
+        assert id(target) not in r.drone_marks, "标记应该在几秒后过期"
+
+        # 8) 电量耗尽:离得近自动回收
+        assert r.recall_drone(p, ok=True)
+        r.drone_cd = 0.0
+        assert r.deploy_drone(p)
+        r.drone["x"], r.drone["y"] = p.x + 40, p.y
+        r.drone["battery"] = 0.02
+        for _ in range(10):
+            r.update(1 / 60.0, [])
+        assert r.drone is None and not r.piloting(), "电量耗尽且离得近应自动回收"
+
+        # 9) 电量耗尽 + 离得远 = 坠毁(同样回收,但无人机没了)
+        #    (第 8 步已经自动回收过,这里直接重新放出)
+        r.recall_drone(p, ok=True)          # 兜底:万一还挂着
+        r.drone_cd = 0.0
+        assert r.deploy_drone(p)
+        r.drone["x"], r.drone["y"] = p.x + 900, p.y
+        r.drone["battery"] = 0.02
+        for _ in range(10):
+            r.update(1 / 60.0, [])
+        assert r.drone is None, "电量耗尽飞太远应坠毁"
+
+        # 10) 信号中断:超过 max_dist 直接失联自毁
+        r.recall_drone(p, ok=True)          # 兜底
+        r.drone_cd = 0.0
+        assert r.deploy_drone(p)
+        r.drone["x"], r.drone["y"] = p.x + cfg["max_dist"] + 200, p.y
+        for _ in range(3):
+            r.update(1 / 60.0, [])
+        assert r.drone is None, "超出信号距离应失联坠毁"
+
+        # 11) F 掌镜 / 切回 / 收回
+        r.recall_drone(p, ok=True)          # 兜底(第 10 步已坠毁)
+        r.drone_cd = 0.0
+        assert r.deploy_drone(p) and r.piloting()
+        r.toggle_drone_view(p)
+        assert not r.piloting(), "F 应能切回操作者视角"
+        r.toggle_drone_view(p)
+        assert r.piloting(), "F 应能再次掌镜"
+        r.recall_drone(p, ok=True)
+        assert r.drone is None and not r.piloting(), "收回后无人机应消失"
+        assert r.drone_marks == {}, "收回后标记应清空"
+
+        # 12) 夜战:无人机是自带光源(圈内算被照亮)
+        g2 = Game()
+        g2.save = save_mod.reset_data()
+        g2.save.seen_intro = True
+        g2.save.mode = "night"
+        g2.save.weapon = Item.weapon("drone")
+        g2.start_raid()
+        r2 = g2.raid
+        r2.scavs = []
+        p2 = r2.player
+        assert r2.deploy_drone(p2)
+        r2.refresh_fog(0.0, force=True)
+        assert r2.in_light(r2.drone["x"] + 200, r2.drone["y"], p2), \
+            "夜战里无人机圈内应算亮区"
+        assert not r2.in_light(r2.drone["x"] + 3000, r2.drone["y"], p2)
+        assert any(sh[0] == "circle" and len(sh[1]) >= 3
+                   and abs(sh[1][2] - cfg["view_radius"]) < 1
+                   for sh in r2.light_shapes), "夜战光照层应含无人机圆"
+
+        # 13) 渲染:放飞 / 收回都不许炸
+        screen = pygame.display.set_mode((1, 1))
+        import raid_ui as _rui
+        r2.refresh_fog(0.0, force=True)
+        _rui.draw_raid(r2, screen)
+        r2.recall_drone(ok=True)
+        _rui.draw_raid(r2, screen)
+        if r.drone is not None:
+            r.recall_drone(p, ok=True)
+        r.drone_cd = 0.0
+        assert r.deploy_drone(p)
+        r.refresh_fog(0.0, force=True)
+        _rui.draw_raid(r, screen)
+        r.recall_drone(ok=True)
+        _rui.draw_raid(r, screen)
+
+        # 14) 存档往返:无人机对象序列化后仍然认得出来
+        back = Item.from_dict(Item("drone").serialize())
+        assert back.iid == "drone" and is_drone(back)
+
+        # 15) 双人合作:一个人掌镜,另一个人必须还能照常走
+        #     (按人判定,不能因为"有人在掌镜"就把两位都冻住)
+        g3 = Game()
+        g3.save = save_mod.reset_data()
+        g3.save.seen_intro = True
+        g3.save.mode = "raid"
+        g3.save.coop = True
+        g3.save.weapon = Item.weapon("drone")
+        g3.start_raid()
+        r3 = g3.raid
+        r3.scavs = []
+        assert r3.player2 is not None, "双人合作要有 P2"
+        r3.player2.weapon = Item.weapon("ak74", mag=30)
+        assert r3.deploy_drone(r3.player)          # P1(本机)掌镜
+        assert r3.piloting(r3.player)
+        assert not r3.piloting(r3.player2), "P2 没掌镜,不该被算成掌镜"
+        assert r3.drone_ctl(r3.player) is r3.player
+        assert r3.drone_ctl(r3.player2) is r3.player2
+
+        # P2 在双人合作里用方向键走(所以这里按 →):
+        # 掌镜的 P1 不许被带着走,没掌镜的 P2 必须照常走
+        class _Walk:
+            def __getitem__(self, k):
+                return k == pygame.K_RIGHT
+
+            def __len__(self):
+                return 512
+        pygame.key.get_pressed = lambda: _Walk()
+        try:
+            qx0, qy0 = r3.player.x, r3.player.y
+            wx0, wy0 = r3.player2.x, r3.player2.y
+            for _ in range(30):
+                r3.update(1 / 60.0, [])
+        finally:
+            pygame.key.get_pressed = real_kp
+        assert _m.hypot(r3.player.x - qx0, r3.player.y - qy0) < 1.0, \
+            "掌镜的 P1 不该跟着走"
+        assert r3.player2.x > wx0 + 20, \
+            "没掌镜的 P2 应该照常能走(实际 %.1f px)" % (r3.player2.x - wx0)
+
+    def t_drone_recall():
+        """无人机回收:掌镜时按左键必须真的收回来(回归测试)。
+
+        旧版 raid.update 里有一句 `not self.piloting(p)` 把 try_fire 整个跳过,
+        而 try_fire 里那句"掌镜时左键=收回"又只是 return —— 两头都没接线,
+        结果玩家在掌镜时点左键完全没反应。这个用例专门盯住这条路径。
+        """
+        from game import Game
+        from settings import is_drone, loadout_add
+
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        g.save.mode = "raid"
+        g.save.weapon = Item.weapon("ak74", mag=30)
+        ok, why = loadout_add(g.save, Item.weapon("drone"))
+        assert ok, why
+        g.start_raid()
+        r = g.raid
+        r.scavs = []
+        p = r.player
+        assert r.switch_weapon(p, "main2")
+        assert is_drone(p.weapon)
+
+        # 放出
+        assert r.try_fire(False, edge=True) is None
+        assert r.drone is not None, "左键应该放出无人机"
+        assert r.piloting(), "放出后自动进入掌镜状态"
+
+        # 掌镜中点左键 = 收回(这正是以前失效的那一步)
+        r.try_fire(False, edge=True)
+        assert r.drone is None, "掌镜时左键必须把无人机收回来(旧版这里是死代码)"
+        assert not r.piloting(), "收回后不该还在掌镜"
+        assert is_drone(p.weapon), "回收是收进包里,不该把无人机弄没了"
+
+        # 走完整的一帧输入路径(update)也要能用:再放一次,再用 update+左键收回
+        r.drone_cd = 0.0                     # 收回后有 2s 自检冷却,这里直接跳过
+        assert r.try_fire(False, edge=True) is None
+        assert r.drone is not None, "冷却过后应该能再放一次"
+        real_mp = pygame.mouse.get_pressed
+        pygame.mouse.get_pressed = lambda: (True, False, False)
+        try:
+            ev = pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(640, 360))
+            r.update(1 / 60.0, [ev])
+        finally:
+            pygame.mouse.get_pressed = real_mp
+        assert r.drone is None, "update() 里的左键也要能收回(输入分支以前直接跳过了)"
+
+    def t_kamikaze_drone():
+        """自杀式无人机:放出 / 掌镜 / 左键俯冲自爆 / 机体损毁(一次性)。"""
+        from game import Game
+        from settings import (ITEMS, TALENTS, TRADE_GOODS, trade_cat_match,
+                              weapon_class, is_drone, is_kamikaze, drone_cfg,
+                              drone_kind, loadout_add, loadout_get, KAMIKAZE, DRONE)
+
+        d = ITEMS["drone_kam"]
+        assert is_drone(d) and is_kamikaze(d), "自杀无人机要 drone=True + kamikaze=True"
+        assert drone_kind(d) == "kamikaze" and drone_kind(ITEMS["drone"]) == "recon"
+        assert d["cat"] == "weapon" and weapon_class("drone_kam")
+        assert "drone_kam" in TALENTS, "自杀无人机缺天赋"
+        assert trade_cat_match("drone_kam", "special"), "要能在特殊枪械分区买到"
+        assert any(iid == "drone_kam" for iid, _c in TRADE_GOODS), "自杀无人机要上架"
+
+        ck, cr = drone_cfg("kamikaze"), drone_cfg("recon")
+        assert ck["dmg"] > 0 and ck["blast_radius"] > 0, "自杀机必须有自爆伤害"
+        assert ck["battery"] < cr["battery"], "自杀机航时该比侦察机短"
+        assert cr["mark_radius"] > 0 and ck["mark_radius"] == 0, "自杀机不做侦察标记"
+
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        g.save.mode = "raid"
+        g.save.weapon = Item.weapon("ak74", mag=30)
+        ok, why = loadout_add(g.save, Item.weapon("drone_kam"))
+        assert ok, why
+        g.start_raid()
+        r = g.raid
+        r.scavs = []
+        p = r.player
+        assert r.switch_weapon(p, "main2"), "切到自杀无人机那一格"
+        assert is_kamikaze(p.weapon)
+
+        # 放出:机型要记进去
+        r.try_fire(False, edge=True)
+        assert r.drone is not None and r.drone.get("kind") == "kamikaze", \
+            "放出的应该是自杀机型"
+        assert r.piloting()
+
+        # 左键 = 俯冲自爆:把 explode 换掉,确认参数用的是自杀机配置
+        seen = []
+        real_explode = r.explode
+        r.explode = lambda *a, **k: seen.append((a, k))
+        try:
+            r.try_fire(False, edge=True)
+        finally:
+            r.explode = real_explode
+        assert r.drone is None, "自爆后无人机应该没了"
+        assert not r.piloting(), "自爆后不该还在掌镜"
+        assert seen, "自爆必须调用 explode"
+        _args, _kw = seen[0]
+        assert _kw.get("radius") == KAMIKAZE["blast_radius"], _kw
+        assert _args[2] == KAMIKAZE["dmg"], "自爆伤害要用 KAMIKAZE 的配置"
+        # 机体是一次性的:装备位那一架要没掉
+        assert loadout_get(g.save, "main2") is None, "自爆后机体应当损毁(消耗掉)"
+        assert p.weapon is None, "操作者手里不该还留着已损毁的机体"
+
+    def t_auto_trigger():
+        """教官专属「全自动扳机组件」:槽位 / 射击模式 / 任务链解锁 / 商店买不到。"""
+        from settings import (ITEMS, ATTACH_SLOTS, TRADE_GOODS, TASKS,
+                              AUTO_TRIGGER_IID, AUTO_TRIGGER_CLASSES,
+                              weapon_slots, weapon_fire_modes,
+                              weapon_default_fire_mode, weapon_fire_mode,
+                              cycle_fire_mode, is_drone)
+        from quests import task_by_id, task_state, claim
+
+        a = ITEMS[AUTO_TRIGGER_IID]
+        assert a["cat"] == "attach" and a["slot"] == "trigger", a
+        assert ATTACH_SLOTS.get("trigger"), "扳机组要有中文槽名"
+        assert a.get("auto_convert"), "配件要标记成「能改成全自动」"
+        assert a.get("hip_mul", 1.0) > 1.0 and a.get("brace_mul", 1.0) > 1.0, \
+            "既然是白送全自动,散布必须有代价"
+
+        # 教官限定:商店里绝对不能有
+        assert not any(iid == AUTO_TRIGGER_IID for iid, _c in TRADE_GOODS), \
+            "全自动扳机组只能从教官任务拿,不能上架"
+
+        # 只有 精确射手/狙击/反器材 三类枪有 trigger 槽
+        for iid in ("m700", "m110", "svds", "mosin", "ak50", "m14"):
+            assert "trigger" in weapon_slots(iid), f"{iid} 应该有扳机组槽"
+        for iid in ("ak74", "mp5", "pm", "m139"):
+            assert "trigger" not in weapon_slots(iid), f"{iid} 不该有扳机组槽"
+        for cls in AUTO_TRIGGER_CLASSES:
+            assert cls in ("精确射手步枪", "狙击步枪", "反器材步枪")
+
+        # 半自动 -> 装上后多出全自动,默认就是全自动;拆掉又变回单发
+        w = Item.weapon("m700", mag=5)
+        assert weapon_fire_modes(w) == ["semi"], weapon_fire_modes(w)
+        assert weapon_default_fire_mode(w) == "semi"
+        w.state["attach"] = {"trigger": AUTO_TRIGGER_IID}
+        assert weapon_fire_modes(w) == ["semi", "auto"], weapon_fire_modes(w)
+        assert weapon_default_fire_mode(w) == "auto", "装上就该是全自动"
+        assert weapon_fire_mode(w) == "auto"
+        assert cycle_fire_mode(w) == "semi", "按 G 能切回单发"
+        assert weapon_fire_mode(w) == "semi"
+        assert cycle_fire_mode(w) == "auto", "再按 G 回到全自动"
+        # 步枪装上没用(槽都没有,更不该生效)
+        w2 = Item.weapon("ak74", mag=30)
+        w2.state["attach"] = {"trigger": AUTO_TRIGGER_IID}
+        assert weapon_fire_modes(w2) == ["semi", "burst", "auto"] or \
+            weapon_fire_modes(w2) == ["semi"], "ak74 本来就是全自动,不受影响"
+        # 全自动枪装上也别出岔子
+        assert not is_drone(a)
+
+        # 任务链:t8 -> t9 -> t10,最后一条才给配件,且必须按顺序解锁
+        t8, t9, t10 = task_by_id("t8"), task_by_id("t9"), task_by_id("t10")
+        assert t8 and t9 and t10, "教官专属长线要存在"
+        assert t9.get("req") == "t8" and t10.get("req") == "t9", "链子要串起来"
+        assert AUTO_TRIGGER_IID in t10["reward"].get("attachments", []), \
+            "最后一条的奖励才是全自动扳机组"
+
+        sd = save_mod.reset_data()
+        assert task_state(sd, t9)[0] == "locked", "t8 没领之前 t9 必须锁着"
+        assert task_state(sd, t10)[0] == "locked"
+        ok, why = claim(sd, t9)
+        assert not ok and "解锁" in why, f"锁着的任务不该能领:{why}"
+        # 按顺序领完,最后拿到配件
+        for tk in (t8, t9):
+            sd.tasks[tk["id"]] = tk["need"]
+            assert task_state(sd, tk)[0] == "ready", tk["id"]
+            ok, why = claim(sd, tk)
+            assert ok, f"{tk['id']}: {why}"
+        assert task_state(sd, t10)[0] in ("ready", "doing"), "t10 应已解锁"
+        sd.tasks["t10"] = t10["need"]
+        assert task_state(sd, t10)[0] == "ready"
+        ok, why = claim(sd, t10)
+        assert ok, why
+        assert any(p.item.iid == AUTO_TRIGGER_IID for p in sd.stash.items), \
+            "领奖后仓库里应该有全自动扳机组"
+
+    check("非常规武器-侦察无人机(放出/掌镜/自动标记/电量回收/失联坠毁/夜战/渲染)",
+          t_drone)
+
+    check("无人机-掌镜时左键回收(回归:旧版点了没反应)", t_drone_recall)
+    check("非常规武器-自杀式无人机(放出/掌镜/俯冲自爆/机体损毁)", t_kamikaze_drone)
+    check("配件-教官专属全自动扳机组(射击模式/任务链解锁/不上架)", t_auto_trigger)
+
     check("账号-名字+密码多档登录/老存档并入/登录界面", t_accounts)
     check("双人合作-P2键盘操作/双人可见性/战利品并仓/单独阵亡", t_coop)
+    check("局域网联机-回环握手/开局/输入上传/状态镜像/断开", t_lan)
 
     ok = all(r[1] for r in results)
     report = ["Tarkov2D selftest " + ("PASS" if ok else "FAIL"), ""]

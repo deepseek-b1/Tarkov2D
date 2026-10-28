@@ -19,7 +19,10 @@ from settings import (W, H, COL, fmt_rub, get_font, DIFF_ORDER, DIFFICULTIES,
                       MODE_DIFF, DEPTS, TASKS, SAFE_CONTRACT,
                       MYSTERY_STARS, MYSTERY_KITS,
                       armor_allows, MAPS, MAP_ORDER, MODES, MODE_ORDER, MODE_MAP,
-                      weapon_class, WEAPON_CLASS_COL, COOP_MODES)
+                      weapon_class, WEAPON_CLASS_COL, COOP_MODES, to_display,
+                      LOADOUT_SLOTS, LOADOUT_SLOT_NAMES, loadout_get, loadout_set,
+                      loadout_add, loadout_all, loadout_weapons, loadout_limits,
+                      loadout_free_slot, is_melee)
 from inventory import Item, Placed, organize, try_move
 import accounts
 import coop as coop_mod
@@ -27,16 +30,36 @@ import uikit
 from uikit import draw_grid, draw_button, draw_slot, draw_tooltip
 
 
+# 全屏暗幕缓存:每帧新建 (W,H) SRCALPHA 表面 + fill + 逐像素 alpha blit 是
+# 这条路径上最贵的一笔(见 ANDROID-BUILD.md §9 的 SDL 实测表)。按 key 复用,
+# 和 raid_ui._overlay 同一套做法。
+_dark_cache = {}
+
+
+def _overlay(key, size, color):
+    surf = _dark_cache.get(key)
+    if surf is None:
+        surf = to_display(pygame.Surface(size, pygame.SRCALPHA), True)
+        _dark_cache[key] = surf
+    surf.fill(color)
+    return surf
+
+
 def _layout():
+    # 出战配置面板:4 个武器位(2 主武器 + 副武器 + 近战)排成 2×2,下面一行放
+    # 护甲/头盔/背包,再下面是出战背包网格。
     return dict(
         stash_panel=pygame.Rect(30, 100, 470, 430),
         loadout_panel=pygame.Rect(516, 100, 390, 430),
         side_panel=pygame.Rect(922, 100, 330, 438),
-        weapon=pygame.Rect(542, 146, 86, 84),
-        armor=pygame.Rect(634, 146, 86, 84),
-        helmet=pygame.Rect(726, 146, 86, 84),
-        pack=pygame.Rect(818, 146, 86, 84),
-        bag_origin=(542, 262),      # 出战背包网格原点(cell 动态)
+        weapon=pygame.Rect(542, 146, 86, 46),
+        main2=pygame.Rect(630, 146, 86, 46),
+        side=pygame.Rect(542, 196, 86, 46),
+        melee=pygame.Rect(630, 196, 86, 46),
+        armor=pygame.Rect(542, 246, 86, 46),
+        helmet=pygame.Rect(634, 246, 86, 46),
+        pack=pygame.Rect(726, 246, 86, 46),
+        bag_origin=(542, 302),      # 出战背包网格原点(cell 动态)
         intro_btn=pygame.Rect(542, 484, 170, 34),
         touch_btn=pygame.Rect(722, 484, 160, 34),
         start=pygame.Rect(542, 548, 340, 54),
@@ -53,7 +76,7 @@ def _layout():
     )
 
 
-BAG_MAX_CELL = 46      # 出战背包网格最大格子边长
+BAG_MAX_CELL = 42      # 出战背包网格最大格子边长(要给上面 4 个武器位腾地方)
 BAG_AREA_W = 340       # 可用于背包网格的宽度
 
 
@@ -77,6 +100,20 @@ class Hideout:
                            for i in range(len(MODE_ORDER))]
         # 双人合作开关(同一台电脑两人玩;搜打撤 / 夜战都能开,见 coop.py)
         self.coop_rect = pygame.Rect(sp.x + 220, sp.y + 146, 92, 26)
+        # 局域网联机小节(创建房间 / 搜索并加入 / 断开 / 手动 IP;内核见 net.py)。
+        # 底部按钮(548~602)下面正好空着一条带,整块放这儿,不动别的布局。
+        self.net_panel = pygame.Rect(30, 606, 1226, 72)
+        self.net_host_btn = pygame.Rect(48, 636, 96, 28)
+        self.net_join_btn = pygame.Rect(152, 636, 120, 28)
+        self.net_off_btn = pygame.Rect(280, 636, 72, 28)
+        self.net_ip_box = pygame.Rect(372, 636, 168, 28)
+        self.net_ip_go = pygame.Rect(548, 636, 64, 28)
+        self.net_start_btn = pygame.Rect(620, 636, 132, 28)   # 主机开局
+        self.net_ip = ""             # 手动输入的房主 IP(可选项)
+        self.net_ip_edit = False     # 正在输入 IP(这期间键盘归输入框)
+        self.net_hosts = []          # 最近一次扫描到的房间:[{ip,name,port}, ...]
+        self.net_scan_t = 0.0        # >0 = 还在扫描(时间到再决定连谁)
+        self.net_mod_ok = None       # net.py 在不在(只为把提示说准,查一次就缓存)
         self.diff_rects = [pygame.Rect(sp.x + 18 + i * 100, sp.y + 248, 92, 30)
                            for i in range(3)]
         # 仓库滚轮(仓库格子变多了,面板只显示一部分)
@@ -101,18 +138,18 @@ class Hideout:
         self.task_close = pygame.Rect(1140, 76, 100, 36)
         # 礼品页:神秘人的收集清单 + 交付按钮
         self.gift_btn = pygame.Rect(560, 578, 660, 44)
-        # 交易所:仓库网格 66,150 / 分区标签 / 商品行(双列可滚动) / 返回按钮
+        # 交易所:一页 —— 左边你的仓库(点物品出售 / 批量出售),右边分区 + 商品。
+        # 分区标签横排一行、商品网格在右半屏:这样「点仓库物品」和「点分区标签」
+        # 各占一块地方,谁也不会盖住谁(分成购买/出售两页时两块都落在左面板上)。
         self.trade_stash_grid = (66, 150)
         self.trade_stash_view_h = 9 * 40      # 交易所左侧仓库可见高度(其余滚轮翻)
         self.trade_cat = None            # 当前分区(None = 全部)
-        self.trade_scroll = 0.0          # 滚轮偏移(像素)
-        self.trade_tab_rects = [
-            pygame.Rect(548 + i * 86, 132, 80, 30) for i in range(len(TRADE_TABS))]
-        self.trade_view_top = 178        # 商品区可见范围
+        self.trade_scroll = 0.0          # 商品网格的滚动偏移
+        self.trade_view_top = 178        # 商品网格可见范围(与 trade_view_bottom 一对)
         self.trade_view_bottom = 178 + TRADE_PAGE_H
-        self.trade_close = pygame.Rect(1140, 76, 100, 36)
+        self.trade_close = pygame.Rect(W - 130, 22, 100, 40)
         self.trade_drag = False          # 正在拖商品列表的滚动条
-        self.trade_slider = None         # 本帧的 (轨道, 手柄),画的时候填
+        self.trade_slider = None         # 本帧商品滚动条 (轨道, 手柄),画的时候填
         # 批量出售:开关 / 快捷选择 / 出售 / 清空 + 确认框
         self.sell_mode = False
         self.sell_sel = []                    # 选中的 Placed(按点击顺序)
@@ -140,6 +177,11 @@ class Hideout:
         self.opt_sel = None         # 触屏布局:选中的按钮名
         self.opt_drag = None        # 触屏布局:正在拖动的按钮名
         self.opt_layout = {}        # 触屏布局工作副本:{name: dict(rx,ry,r,label)}
+        # 拖动判定:手指按下时先不算拖动,移动超过阈值才真拖 ——
+        # 否则"点一下选中"会顺手把按钮挪走几个像素(手机上很难操作)
+        self.opt_drag_from = (0, 0)     # 按下时的位置
+        self.opt_drag_moved = False     # 本次是否真的拖动过
+        self.opt_drag_space = "screen"  # 拖动按哪套坐标算:"screen" 屏幕 / "preview" 缩略图
         self.opt_bind_rects = [pygame.Rect(852, 184 + i * 28, 240, 26)
                                for i in range(len(bindings.ACTIONS))]
         self.opt_fps_rects = [pygame.Rect(772 + i * 108, 214, 98, 34)
@@ -147,8 +189,10 @@ class Hideout:
         self.opt_fps_toggle = pygame.Rect(772, 274, 98, 34)
         self.opt_filter_rects = [pygame.Rect(772 + i * 134, 334, 124, 34)
                                  for i in range(2)]
-        self.opt_minus = pygame.Rect(1000, 552, 44, 30)
-        self.opt_plus = pygame.Rect(1052, 552, 44, 30)
+        # +/- 改大小。原来是 44x30 —— 在手机上折算下来只有约 3mm,
+        # 远小于可点中的最小尺寸(7~9mm),屏幕稍微一点就点空/点错,所以放大。
+        self.opt_minus = pygame.Rect(1040, 548, 84, 52)
+        self.opt_plus = pygame.Rect(1132, 548, 84, 52)
         self.opt_save = pygame.Rect(548, 616, 200, 40)
         self.opt_defaults = pygame.Rect(770, 616, 200, 40)
         # 账号:显示当前存档属于谁 + 回登录界面换账号(见 accounts.py)
@@ -157,7 +201,50 @@ class Hideout:
         self.scroll_btns = {}
         self.rscroll_btns = {}
 
-    # ---- 设置:触屏布局编辑工作副本 ----
+    # ---- 交易所:布局 ----
+    # 所有几何一律从这里出,绘制和命中共用同一份 —— 设置页的触屏编辑器
+    # 就吃过「画在一处、点在另一处」的亏,这里不再给它机会。
+    TRADE_COLS = 4           # 商品每行列数
+    TRADE_CELL_H = 64        # 商品格高
+    TRADE_PAD = 6
+    TRADE_TAB_H = 30         # 分区标签高
+    TRADE_TAB_PAD = 6        # 分区标签间距
+
+    def _trade_panels(self):
+        """(左面板, 右面板):左 = 你的仓库,右 = 分区标签 + 商品。"""
+        lay = self.lay
+        return (lay["trade_stash"], lay["trade_goods"])
+
+    def _trade_cat_rows(self):
+        """分区标签 [(label, cat, rect)]:横排一行,全都在右面板顶上。"""
+        p = self._trade_panels()[1]
+        n = max(1, len(TRADE_TABS))
+        w = (p.w - 24 - self.TRADE_TAB_PAD * (n - 1)) // n
+        x0 = p.x + 12
+        y = p.y + 44                       # 让开面板标题那一行
+        return [(label, cat,
+                 pygame.Rect(x0 + i * (w + self.TRADE_TAB_PAD), y, w,
+                             self.TRADE_TAB_H))
+                for i, (label, cat) in enumerate(TRADE_TABS)]
+
+    def _trade_goods_view(self):
+        """右侧商品网格的可见范围(上面留给分区标签,右边留给滚动条)。"""
+        p = self._trade_panels()[1]
+        x = p.x + 18
+        return pygame.Rect(x, self.trade_view_top,
+                           p.right - 36 - x, TRADE_PAGE_H)
+
+    def _trade_cell_rect(self, i):
+        """第 i 个商品的格子(网格排布,已应用滚动偏移)。"""
+        view = self._trade_goods_view()
+        cols = self.TRADE_COLS
+        cw = (view.w - self.TRADE_PAD * (cols - 1)) // cols
+        col, row = i % cols, i // cols
+        return pygame.Rect(view.x + col * (cw + self.TRADE_PAD),
+                           view.y + row * (self.TRADE_CELL_H + self.TRADE_PAD)
+                           - int(self.trade_scroll),
+                           cw, self.TRADE_CELL_H)
+
     def _opt_layout_base(self):
         base = {}
         for name, label, (rx, ry), r in touch_mod.BUTTONS + touch_mod.SUPPORT_BUTTONS:
@@ -255,14 +342,84 @@ class Hideout:
             elif ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
                 self.opt_drag = None
 
+    # ---- 触屏布局:预览框 ----
+    # 预览框是整屏按 16:9 缩小的"缩略图";存档里的 rx/ry 始终是**整屏比例**
+    # (touch.py 按 rx*W, ry*H 摆按钮,战局里用的就是它,设置页的 +/- 也按它算)。
+    # 所以命中判定先把点落回整屏坐标再比距离:点缩略图里 = 换算回去,
+    # 点框外 = 就是屏幕上的真实位置。画出来什么样,就点什么。
+    def _opt_touch_frame(self):
+        """预览框。
+
+        宽高比必须和游戏画面一致(1280:720 = 16:9):原来框是 660x340(≈1.94),
+        横向被拉伸了 9%,照着预览摆出来的位置和实战对不上。
+        604x340 正好把 16:9 装进这块地方。
+        """
+        return pygame.Rect(560, 206, 604, 340)
+
+    def _opt_touch_pos(self, name):
+        """按钮名 -> (预览框内的 x, y, 显示半径)。只给预览框绘制用。"""
+        d = self.opt_layout[name]
+        f = self._opt_touch_frame()
+        return (f.x + d["rx"] * f.w,
+                f.y + d["ry"] * f.h,
+                max(10, int(d["r"] * f.h / float(H))))
+
+    def _opt_touch_pick(self, pos):
+        """点选:先把点落回整屏坐标,再取**最近**的按钮,不是字典里第一个。
+
+        返回 (按钮名, 这次操作在哪套坐标里 —— "preview" 缩略图 / "screen" 屏幕)。
+        以前是遍历到第一个命中的就 break,按钮一重叠就永远只能选到
+        排在前面的那个。顺带:如果点到的正是当前已选中的按钮,就轮到下一个,
+        这样被压住的按钮也选得中。
+        """
+        f = self._opt_touch_frame()
+        if f.collidepoint(pos):              # 点的缩略图:换算回整屏坐标
+            x = (pos[0] - f.x) / float(f.w) * W
+            y = (pos[1] - f.y) / float(f.h) * H
+            space = "preview"
+        else:                                # 点的就是屏幕真实位置
+            x, y = pos[0], pos[1]
+            space = "screen"
+        cands = []
+        for name in self.opt_layout:
+            d = self.opt_layout[name]
+            px, py = d["rx"] * W, d["ry"] * H
+            r = max(22, d["r"])              # 手指的最小命中半径
+            dist = math.hypot(x - px, y - py)
+            if dist <= r:
+                cands.append((dist, name))
+        if not cands:
+            return None, space
+        cands.sort()
+        names = [n for _d, n in cands]
+        if len(names) > 1 and self.opt_sel in names:
+            return names[(names.index(self.opt_sel) + 1) % len(names)], space
+        return names[0], space
+
     def _options_drag_to(self, pos):
-        """触屏布局:把正在拖动的按钮挪到手指/鼠标位置(比例坐标,边界留 3%)。"""
+        """触屏布局:把正在拖动的按钮挪到手指位置(比例坐标 = 整屏比例)。"""
         name = self.opt_drag
         d = self.opt_layout.get(name)
         if d is None:
             return
-        d["rx"] = min(0.97, max(0.03, pos[0] / float(W)))
-        d["ry"] = min(0.97, max(0.03, pos[1] / float(H)))
+        # 没超过阈值就还不算拖动 —— 单纯点一下不会把按钮蹭走几个像素
+        if not self.opt_drag_moved:
+            sx, sy = self.opt_drag_from
+            if math.hypot(pos[0] - sx, pos[1] - sy) < 8:
+                return
+            self.opt_drag_moved = True
+        f = self._opt_touch_frame()
+        if self.opt_drag_space == "preview":   # 在缩略图里拖:换算回整屏比例
+            rx = (pos[0] - f.x) / float(f.w)
+            ry = (pos[1] - f.y) / float(f.h)
+        else:                                  # 直接按屏幕位置拖
+            rx = pos[0] / float(W)
+            ry = pos[1] / float(H)
+        # 按半径留边:至少让大半个按钮留在屏幕里(拖出去了就再也点不到)
+        mx = min(0.45, d["r"] * 0.5 / float(W))
+        my = min(0.45, d["r"] * 0.5 / float(H))
+        d["rx"] = min(1.0 - mx, max(mx, rx))
+        d["ry"] = min(1.0 - my, max(my, ry))
 
     def _options_click(self, pos):
         sd = self.game.save
@@ -311,15 +468,15 @@ class Hideout:
                     d = self.opt_layout[self.opt_sel]
                     d["r"] = min(110, d["r"] + 6)
                     return
-            hit = None
-            for name, d in self.opt_layout.items():
-                px, py = d["rx"] * W, d["ry"] * H
-                if math.hypot(pos[0] - px, pos[1] - py) <= max(22, d["r"]):
-                    hit = name
-                    break
+            hit, space = self._opt_touch_pick(pos)
             if hit is not None:
                 self.opt_sel = hit
                 self.opt_drag = hit
+                # 记下按下点和这次操作在哪套坐标里:拖动时按这个点算"有没有
+                # 真的动过",并沿同一套坐标换算(见 _options_drag_to)
+                self.opt_drag_space = space
+                self.opt_drag_from = pos
+                self.opt_drag_moved = False
                 return
             self.opt_sel = None
             return
@@ -444,7 +601,7 @@ class Hideout:
             "拖动按钮改位置 · 选中后用 − / + 改大小 · 左半屏摇杆区固定不可移",
             True, COL["text_dim"])
         screen.blit(tip, (548, 176))
-        frame = pygame.Rect(560, 206, 660, 340)
+        frame = self._opt_touch_frame()
         pygame.draw.rect(screen, (16, 18, 22), frame, border_radius=8)
         pygame.draw.rect(screen, COL["border"], frame, 1, border_radius=8)
         sx = frame.x + frame.w * 0.22
@@ -452,10 +609,10 @@ class Hideout:
         pygame.draw.circle(screen, (48, 52, 62), (int(sx), int(sy)), 44, 2)
         tt = get_font(12).render("摇杆区(固定)", True, (110, 118, 132))
         screen.blit(tt, tt.get_rect(center=(int(sx), int(sy) + 58)))
-        for name, d in self.opt_layout.items():
-            px = frame.x + d["rx"] * frame.w
-            py = frame.y + d["ry"] * frame.h
-            r = max(10, int(d["r"] * frame.h / float(H)))
+        # 一律走 _opt_touch_pos:缩略图里的位置和存档里的整屏比例是同一套(见该函数说明)
+        for name in self.opt_layout:
+            px, py, r = self._opt_touch_pos(name)
+            d = self.opt_layout[name]
             sel = name == self.opt_sel
             pygame.draw.circle(screen, (72, 92, 120) if sel else (40, 46, 58),
                                (int(px), int(py)), r)
@@ -467,14 +624,14 @@ class Hideout:
             d = self.opt_layout[self.opt_sel]
             info = get_font(15, bold=True).render(
                 f"已选中「{d['label']}」 · 直径 {d['r']}px", True, COL["accent"])
-            screen.blit(info, (548, 556))
+            screen.blit(info, (548, 562))
             draw_button(screen, self.opt_minus, "−",
-                        self.opt_minus.collidepoint(mx, my), small=True)
+                        self.opt_minus.collidepoint(mx, my))
             draw_button(screen, self.opt_plus, "+",
-                        self.opt_plus.collidepoint(mx, my), small=True)
+                        self.opt_plus.collidepoint(mx, my))
         else:
             t = get_font(15).render("点一个按钮选中它", True, COL["text_dim"])
-            screen.blit(t, (548, 560))
+            screen.blit(t, (548, 566))
 
     def _draw_options_video(self, screen, mx, my):
         """画质页:帧率上限 / 显示帧率 / 缩放滤镜。"""
@@ -579,8 +736,7 @@ class Hideout:
 
     def _draw_sell_ask(self, screen):
         """批量出售确认框。"""
-        dark = pygame.Surface((W, H), pygame.SRCALPHA)
-        dark.fill((0, 0, 0, 130))
+        dark = _overlay("sell_ask_dark", (W, H), (0, 0, 0, 130))
         screen.blit(dark, (0, 0))
         panel = self.sell_ask_panel
         uikit.draw_panel(screen, panel, "批量出售")
@@ -606,37 +762,22 @@ class Hideout:
         draw_button(screen, self.sell_ask_no, "取消",
                     self.sell_ask_no.collidepoint(mx, my))
 
-    # ---- 交易站:分区商品与滚动 ----
+    # ---- 交易站:商品网格与滚动 ----
     def trade_goods(self):
         """当前分区的商品列表(「特殊枪械」= 头目专属枪械)。"""
         from settings import trade_cat_match
         return [g for g in TRADE_GOODS if trade_cat_match(g[0], self.trade_cat)]
 
-    def trade_rows(self):
-        """返回 (商品列表, 每列行数, 行高)。"""
-        goods = self.trade_goods()
-        n = max(1, len(goods))
-        per = (n + 1) // 2
-        row_h = 30 if per > 11 else 36
-        return goods, per, row_h
-
-    def trade_row_rect(self, i, per, row_h):
-        col, row = divmod(i, per)
-        # 右列窄一点,给右边的滚动条让位(否则点商品会误触滑块)
-        return pygame.Rect(548 + col * 346,
-                           self.trade_view_top + row * (row_h + 4) - int(self.trade_scroll),
-                           338, row_h)
-
     def trade_max_scroll(self):
-        goods, per, row_h = self.trade_rows()
-        rows = (len(goods) + 1) // 2
-        content_bottom = self.trade_view_top + rows * (row_h + 4)
-        return max(0.0, float(content_bottom - self.trade_view_bottom))
+        goods = self.trade_goods()
+        rows = (len(goods) + self.TRADE_COLS - 1) // self.TRADE_COLS
+        content = rows * (self.TRADE_CELL_H + self.TRADE_PAD)
+        return max(0.0, float(content - self._trade_goods_view().h))
 
-    # ---- 交易所滚动条(可拖动) ----
+    # ---- 滚动条(可拖动;手机上没滚轮时靠它) ----
     def trade_slider_track(self):
-        return pygame.Rect(self.lay["trade_goods"].right - 18,
-                           self.trade_view_top, 14, TRADE_PAGE_H)
+        p = self._trade_panels()[1]
+        return pygame.Rect(p.right - 18, self.trade_view_top, 14, TRADE_PAGE_H)
 
     def _trade_drag_to(self, y):
         """把手柄拖到某个 y:换算成滚动位置。"""
@@ -707,13 +848,20 @@ class Hideout:
         stash = Container.deserialize(sd.stash.w, sd.stash.h, sd.stash.serialize())
         carry = list(sd.bag.items)
         slots = []
-        for name in ("weapon", "armor", "helmet", "pack"):
+        for name in ("armor", "helmet", "pack"):
             it = getattr(sd, name)
             if it is None:
                 continue
             clone = self._clone_item(it)
             if clone.state.get("rolled"):
                 clone.state.pop("rolled", None)      # 放回仓库时按展开尺寸算空间
+            slots.append((name, clone))
+        for name, it in loadout_all(sd).items():
+            if it is None:
+                continue
+            clone = self._clone_item(it)
+            if clone.state.get("rolled"):
+                clone.state.pop("rolled", None)
             slots.append((name, clone))
         blocked = []
         for placed in carry:
@@ -733,7 +881,10 @@ class Hideout:
         for placed in carry:
             sd.bag.remove_placed(placed)
         for name, _clone in slots:
-            setattr(sd, name, None)
+            if name in LOADOUT_SLOTS:
+                loadout_set(sd, name, None)
+            else:
+                setattr(sd, name, None)
         sd.stash = stash
         if sd.pack is None:
             sd.apply_pack()          # 背包已空,安全退回口袋容量
@@ -861,9 +1012,12 @@ class Hideout:
                 continue
             if ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
                 if self.hold.consume_release():
-                    # 普通点按:重放成一次按下(所有原逻辑照常)
-                    out.append(pygame.event.Event(pygame.MOUSEBUTTONDOWN,
-                                                  pos=ev.pos, button=1))
+                    # 普通点按:重放成一次按下(所有原逻辑照常)。
+                    # 坐标用**按下点**(见 uikit.HoldInfo.click_pos):手抖时
+                    # 用抬起点会滑到隔壁商品格上,变成买错东西。
+                    out.append(pygame.event.Event(
+                        pygame.MOUSEBUTTONDOWN,
+                        pos=self.hold.click_pos() or ev.pos, button=1))
                 else:
                     out.append(ev)
                 continue
@@ -891,10 +1045,10 @@ class Hideout:
             placed = self.trade_stash_hit(pos)
             if placed is not None:
                 return placed.item, (sd.stash, placed)
-            goods, per, row_h = self.trade_rows()
-            for i, (iid, _c) in enumerate(goods):
-                if (iid in ITEMS
-                        and self.trade_row_rect(i, per, row_h).collidepoint(pos)):
+            gview = self._trade_goods_view()
+            for i, (iid, _c) in enumerate(self.trade_goods()):
+                r = self._trade_cell_rect(i)
+                if (iid in ITEMS and gview.contains(r) and r.collidepoint(pos)):
                     it = (Item.weapon(iid) if ITEMS[iid]["cat"] == "weapon"
                           else Item(iid))
                     return it, None
@@ -1021,10 +1175,323 @@ class Hideout:
         except Exception:
             pass
 
+    # ---------- 局域网联机 ----------
+    # 联机内核(net.py / Game.net)只在调用点上依赖:net.py 缺失、Game 上还没挂
+    # Net、Net 内部抛异常,都只能在状态行里说一句 —— 单机游戏不能因此崩。
+    # 全部延迟 import / getattr,启动路径上一行都不多花。
+    def _net(self):
+        """取联机对象;拿不到返回 None(由调用方给中文提示)。"""
+        n = getattr(self.game, "net", None)
+        if n is not None:
+            return n
+        try:
+            import net as net_mod
+        except Exception:
+            return None
+        # net.py 在、只是 Game 上还没挂(并行开发期常见):自己兜一个 Net,
+        # 顺手挂回 game,免得每帧新建一个。
+        make = getattr(net_mod, "Net", None)
+        if not callable(make):
+            return None
+        try:
+            n = make(self.game)
+        except Exception:
+            return None
+        try:
+            self.game.net = n
+        except Exception:
+            pass
+        return n
+
+    def _net_status(self, n):
+        """状态行文字:直接用 net.status_text() 的返回;读不到给兜底文案。"""
+        if n is None:
+            if self.net_mod_ok is None:
+                try:
+                    import net as net_mod       # noqa: F401  只为把提示说准
+                    self.net_mod_ok = True
+                except Exception:
+                    self.net_mod_ok = False
+            return ("联机内核没接上:net.py 在,但 Game.net 是空的"
+                    if self.net_mod_ok else "联机不可用:缺少 net.py")
+        try:
+            txt = str(n.status_text() or "").strip()
+        except Exception:
+            return "联机状态读取失败(联机内核报错)"
+        return txt or "联机:空闲"
+
+    def _net_role(self, n):
+        """当前角色:None / "host" / "client"(读不到当没联机)。"""
+        if n is None:
+            return None
+        try:
+            role = getattr(n, "role", None)
+        except Exception:
+            return None
+        return role if role in ("host", "client") else None
+
+    def _net_host_label(self, host):
+        """「房间名 · ip:port」—— 扫描结果里字段缺了也要显示得出来。"""
+        if not isinstance(host, dict):
+            return str(host)
+        name = str(host.get("name") or "未命名房间")
+        ip = str(host.get("ip") or "?")
+        port = host.get("port")
+        return f"{name} · {ip}:{port}" if port else f"{name} · {ip}"
+
+    def _net_host_rects(self):
+        """扫描结果的可点击行。绘制与命中共用这一份(画一处点一处是老毛病)。"""
+        out = []
+        x = self.net_panel.x + 738
+        w = max(80, self.net_panel.right - 12 - x)
+        y = self.net_panel.y + 6
+        for host in self.net_hosts[:3]:
+            out.append((host, pygame.Rect(x, y, w, 20)))
+            y += 21
+        return out
+
+    def _net_scan_begin(self, n):
+        """点「搜索并加入」:请求一次扫描,留 2 秒收结果(结果进 found_hosts)。"""
+        try:
+            n.request_scan()
+        except Exception:
+            self.say("扫描局域网失败:联机内核报错(看状态行)", COL["bad"], 3.6)
+            return
+        self.net_hosts = []
+        self.net_scan_t = 2.0
+        self.say("正在扫描局域网…", COL["accent"], 2.0)
+
+    def _net_poll(self, dt):
+        """扫描期间每帧收结果,时间到再决定:1 个直接连 / 多个列出来点。"""
+        if self.net_scan_t <= 0:
+            return
+        n = self._net()
+        if n is None:
+            self.net_scan_t = 0.0
+            return
+        try:
+            hosts = n.found_hosts() or []
+        except Exception:
+            hosts = []
+        if hosts:
+            self.net_hosts = [h for h in hosts if isinstance(h, dict)] or list(hosts)
+        self.net_scan_t -= dt
+        if self.net_scan_t > 0:
+            return
+        self.net_scan_t = 0.0
+        if not self.net_hosts:
+            self.say("没找到房间，确认两台电脑在同一局域网、且房主已点创建房间",
+                     COL["bad"], 6.0)
+        elif len(self.net_hosts) == 1:
+            # 只发现一个:不用再点一下,直接连
+            self._net_join(self.net_hosts[0])
+        else:
+            self.say(f"发现 {len(self.net_hosts)} 个房间,点右边的房间名直接加入",
+                     COL["accent"], 5.0)
+
+    def _net_join(self, host):
+        """按 ip 连一个房间(host = found_hosts() 里的一项)。"""
+        n = self._net()
+        if n is None:
+            self.say("联机不可用:缺少 net.py / Game.net", COL["bad"], 3.6)
+            return
+        ip = str(host.get("ip") or "") if isinstance(host, dict) else ""
+        try:
+            ok = bool(n.join(ip or None))
+        except Exception:
+            ok = False
+        if ok:
+            self.say(f"已加入房间「{self._net_host_label(host)}」", COL["good"], 5.0)
+        else:
+            self.say("加入失败:" + self._net_status(n), COL["bad"], 5.0)
+
+    def _net_join_ip(self):
+        """手动 IP:填了就按这个地址连,没填就提示。"""
+        ip = self.net_ip.strip()
+        self.net_ip_edit = False
+        if not ip:
+            self.say("还没填 IP:点左边的输入框敲房主地址(例如 192.168.1.5)",
+                     COL["bad"], 4.0)
+            return
+        self._net_join({"ip": ip, "name": ip})
+
+    def _net_host_ready(self):
+        """主机且对方已连上 = 可以开局(game.lan_host_ready 没接上就按不能算)。"""
+        fn = getattr(self.game, "lan_host_ready", None)
+        if not callable(fn):
+            return False
+        try:
+            return bool(fn())
+        except Exception:
+            return False
+
+    def _net_start(self):
+        """「开始联机战局」:只有房主(且对方已连上)能开局,其余人只给提示。"""
+        role = self._net_role(self._net())
+        if role != "host":
+            self.say("等房主开局(自己开房请点「创建房间」)" if role == "client"
+                     else "先点「创建房间」当房主,等对方连上再开局",
+                     COL["bad"], 4.2)
+            return
+        start = getattr(self.game, "lan_start_raid", None)
+        if not callable(start):
+            self.say("联机开局还没接上(game.lan_start_raid 不存在)",
+                     COL["bad"], 4.0)
+            return
+        ok = False
+        try:
+            ok = bool(start())          # 开局成功后 game 自己切战局,这里不用管
+        except Exception:
+            ok = False
+        if not ok:
+            self.say("还没人和你连上：让对方点「搜索并加入」", COL["bad"], 4.6)
+
+    def _net_off(self, n=None):
+        """断开:关掉监听 / 连接,顺手清掉扫描状态。"""
+        n = n if n is not None else self._net()
+        if n is None:
+            self.say("联机不可用:缺少 net.py / Game.net", COL["bad"], 3.6)
+            return
+        try:
+            n.close()
+        except Exception:
+            pass
+        self.net_hosts = []
+        self.net_scan_t = 0.0
+        self.net_ip_edit = False
+        self.say("已断开联机", COL["text_dim"], 3.0)
+
+    def _net_click(self, pos):
+        """底部联机小节的点击。返回 True = 这次点击已被吃掉。"""
+        if self.net_ip_box.collidepoint(pos):
+            self.net_ip_edit = True
+            audio.play("pickup")
+            self.say("输入房主 IP(回车连接 · ESC 取消)", COL["accent"], 4.0)
+            return True
+        if self.net_ip_go.collidepoint(pos):
+            self._net_join_ip()
+            return True
+        n = self._net()
+        if self.net_host_btn.collidepoint(pos):
+            if n is None:
+                self.say("联机不可用:缺少 net.py / Game.net", COL["bad"], 3.6)
+                return True
+            try:
+                ok = bool(n.host_room())
+            except Exception:
+                ok = False
+            if ok:
+                self.say("房间已创建,等对方点「搜索并加入」· " + self._net_status(n),
+                         COL["good"], 6.0)
+            else:
+                self.say("创建房间失败:" + self._net_status(n), COL["bad"], 5.0)
+            return True
+        if self.net_join_btn.collidepoint(pos):
+            if n is None:
+                self.say("联机不可用:缺少 net.py / Game.net", COL["bad"], 3.6)
+                return True
+            self._net_scan_begin(n)
+            return True
+        if self.net_off_btn.collidepoint(pos):
+            self._net_off(n)
+            return True
+        if self.net_start_btn.collidepoint(pos):
+            self._net_start()
+            return True
+        for host, r in self._net_host_rects():      # 扫描到的房间:点名字直接进
+            if r.collidepoint(pos):
+                self._net_join(host)
+                return True
+        return False
+
+    def _net_key(self, ev):
+        """手动 IP 输入框吃键盘。返回 True = 这个按键已被吃掉。"""
+        if not self.net_ip_edit:
+            return False
+        if ev.key == pygame.K_ESCAPE:
+            self.net_ip_edit = False
+            self.say("已取消输入 IP", COL["text_dim"], 2.4)
+            return True
+        if ev.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            self._net_join_ip()
+            return True
+        if ev.key == pygame.K_BACKSPACE:
+            self.net_ip = self.net_ip[:-1]
+            return True
+        ch = getattr(ev, "unicode", "") or ""
+        if ch and (ch.isdigit() or ch in ".:") and len(self.net_ip) < 21:
+            self.net_ip += ch
+        # 输入期间的其它按键一律吞掉:别让 WASD/ESC 漏给别的界面
+        return True
+
+    def _draw_net(self, screen, mx, my):
+        """底部「局域网联机」小节:一行状态 + 创建/搜索/断开 + 手动 IP + 房间列表。"""
+        r = self.net_panel
+        uikit.draw_panel(screen, r, None)
+        n = self._net()
+        # 标题带上角色(房主 / 客户端),一眼看得出自己是哪边
+        role = self._net_role(n)
+        tag = {"host": "房主", "client": "客户端"}.get(role, "未联机")
+        t = get_font(15, bold=True).render("局域网联机 · " + tag, True, COL["accent"])
+        screen.blit(t, (r.x + 18, r.y + 8))
+        # 状态行:net.status_text() 原样显示(太长就截断,别顶到右边的房间列表)
+        ft = get_font(14)
+        txt = self._net_status(n)
+        tx = r.x + 24 + t.get_width()
+        room = r.x + 700
+        if tx + ft.size(txt)[0] > room:
+            while txt and tx + ft.size(txt + "…")[0] > room:
+                txt = txt[:-1]
+            txt += "…"
+        screen.blit(ft.render(txt, True,
+                              COL["text"] if n is not None else COL["bad"]),
+                    (tx, r.y + 9))
+        # 三个按钮(沿用这页的老写法:draw_button + small)
+        draw_button(screen, self.net_host_btn, "创建房间",
+                    self.net_host_btn.collidepoint(mx, my), small=True)
+        draw_button(screen, self.net_join_btn, "搜索并加入",
+                    self.net_join_btn.collidepoint(mx, my), small=True)
+        draw_button(screen, self.net_off_btn, "断开",
+                    self.net_off_btn.collidepoint(mx, my), small=True)
+        # 可选手动 IP:点框开始输,回车连(输入中框变橙)
+        box = self.net_ip_box
+        hov = box.collidepoint(mx, my)
+        pygame.draw.rect(screen,
+                         COL["panel_hi"] if (hov or self.net_ip_edit)
+                         else COL["grid_bg"], box, border_radius=6)
+        pygame.draw.rect(screen, COL["accent"] if self.net_ip_edit else COL["border"],
+                         box, 2 if self.net_ip_edit else 1, border_radius=6)
+        if self.net_ip_edit:
+            label, col = self.net_ip + "|", COL["text"]
+        elif self.net_ip:
+            label, col = self.net_ip, COL["text"]
+        else:
+            label, col = "手动输入 IP", COL["text_dim"]
+        it = get_font(14, bold=bool(self.net_ip_edit)).render(label, True, col)
+        screen.blit(it, it.get_rect(center=box.center))
+        draw_button(screen, self.net_ip_go, "连接",
+                    self.net_ip_go.collidepoint(mx, my), small=True)
+        # 主机开局:房主且对方已连上才亮(灰着也能点 —— 点了会说明为什么还不能开)
+        draw_button(screen, self.net_start_btn, "开始联机战局",
+                    self.net_start_btn.collidepoint(mx, my),
+                    enabled=self._net_host_ready(), small=True)
+        # 扫描到的房间:房间名 + IP,点一下直接加入(最多列 3 个)
+        for host, hr in self._net_host_rects():
+            hover = hr.collidepoint(mx, my)
+            pygame.draw.rect(screen, COL["panel_hi"] if hover else COL["panel"],
+                             hr, border_radius=6)
+            pygame.draw.rect(screen, COL["accent"] if hover else COL["border"], hr,
+                             1, border_radius=6)
+            ht = get_font(13, bold=hover).render(
+                self._net_host_label(host), True,
+                COL["accent"] if hover else COL["text"])
+            screen.blit(ht, ht.get_rect(midleft=(hr.x + 8, hr.centery)))
+
     def update(self, dt, events):
         self.msg_t -= dt
         self.reset_armed = max(0.0, self.reset_armed - dt)
         self._prewarm_selected_map()
+        self._net_poll(dt)
         # 玩法简介:先读完再进游戏
         if self.show_intro:
             for ev in events:
@@ -1056,19 +1523,16 @@ class Hideout:
                 continue
             if ev.type == pygame.MOUSEWHEEL:
                 if self.view == "trade":
-                    # 鼠标压在左边仓库上 -> 翻仓库;否则翻商品
-                    st = self.trade_stash_grid
-                    stash_area = pygame.Rect(st[0], st[1],
-                                             self.game.save.stash.w * 40,
-                                             self.trade_stash_view_h)
-                    if stash_area.collidepoint(pygame.mouse.get_pos()):
+                    # 滚轮翻「鼠标压在哪个面板」那一边 —— 左仓库 / 右商品各自独立
+                    lp, _rp = self._trade_panels()
+                    if lp.collidepoint(pygame.mouse.get_pos()):
                         self.stash_scroll -= ev.y * 40
-                        self.stash_scroll = max(0.0, min(self.stash_scroll,
-                                                         self.trade_stash_max_scroll()))
+                        self.stash_scroll = max(0.0, min(
+                            self.stash_scroll, self.trade_stash_max_scroll()))
                     else:
                         self.trade_scroll -= ev.y * 48
-                        self.trade_scroll = max(0.0, min(self.trade_scroll,
-                                                         self.trade_max_scroll()))
+                        self.trade_scroll = max(
+                            0.0, min(self.trade_scroll, self.trade_max_scroll()))
                 elif self.view == "stash":
                     self.stash_scroll -= ev.y * 40
                     self.stash_scroll = max(0.0, min(self.stash_scroll,
@@ -1078,6 +1542,8 @@ class Hideout:
                     self.task_scroll = max(0.0, min(self.task_scroll,
                                                     self.task_max_scroll()))
             elif ev.type == pygame.KEYDOWN:
+                if self._net_key(ev):      # 正在手输联机 IP:键盘先归输入框
+                    continue
                 if ev.key == pygame.K_ESCAPE and self.hold.active():
                     self.hold.hide()
                     continue
@@ -1230,6 +1696,10 @@ class Hideout:
                 self.say("双人合作已关闭(恢复单人)", COL["text_dim"], 3.2)
             return
 
+        # 局域网联机小节(创建房间 / 搜索并加入 / 断开 / 手动 IP;内核见 net.py)
+        if self._net_click(pos):
+            return
+
         # 难度选择(突袭/人质/剧情是固定强度,没有难度档)
         if sd.mode in ("assault", "story") or sd.mode in MODE_DIFF:
             fixed_txt = ("突袭模式是固定强度,不适用难度档(系统会配发满配装备)"
@@ -1296,7 +1766,7 @@ class Hideout:
             ok, msg = self.stash_all_and_organize()
             self.say(msg, COL["good"] if ok else COL["bad"], 3.6)
             return
-        if lay["supply"].collidepoint(pos) and not sd.any_weapon():
+        if lay["supply"].collidepoint(pos) and not loadout_weapons(sd):
             sd.weapon = Item.weapon("pm", mag=8)
             if sd.pack is None:
                 sd.pack = Item("pack_mid")
@@ -1316,26 +1786,50 @@ class Hideout:
                 self.say("再次点击按钮确认清空存档!", COL["bad"])
             return
 
-        # 装备槽:卸下
-        if lay["weapon"].collidepoint(pos):
-            if sd.weapon is not None:
-                old = sd.weapon
+        # 装备槽:卸下(4 个武器位 + 护甲/头盔/背包)
+        for slot in LOADOUT_SLOTS:
+            rect = lay["weapon"] if slot == "main1" else lay.get(slot)
+            if rect is None or not rect.collidepoint(pos):
+                continue
+            old = loadout_get(sd, slot)
+            if old is not None:
                 if sd.stash.add_item(old):
-                    sd.weapon = None
+                    loadout_set(sd, slot, None)
+                    # main1 卸空后要是有别的武器,把它顶到 main1 —— 否则存档里
+                    # 的 weapon 为空,另外两个槽就跟着丢了。
+                    if slot == "main1" and sd.weapon is None:
+                        rest = [w for s, w in loadout_all(sd).items()
+                                if s != "main1" and w is not None]
+                        if rest:
+                            loadout_set(sd, "main1", rest[0])
+                            for s, w in loadout_all(sd).items():
+                                if w is rest[0] and s != "main1":
+                                    loadout_set(sd, s, None)
                     save_mod.save_data(sd)
+                    self.say(f"已卸下 {old.name}")
                 else:
                     self.say("仓库空间不足", COL["bad"])
             return
         if lay["armor"].collidepoint(pos):
             if sd.armor is not None:
-                if sd.weapon is not None and not armor_allows(None, sd.weapon.def_):
-                    self.say(f"手里的 {sd.weapon.name} 需要 6 级甲,先换掉武器",
-                             COL["bad"], 3.2)
+                # 手里正拿着的枪需要护甲 -> 不能脱(备用的枪不影响换甲)
+                cur = sd.weapon
+                if cur is not None and not armor_allows(None, cur.def_):
+                    self.say(f"手里的 {cur.name} 需要 {cur.def_['req_armor_level']} "
+                             f"级护甲,先换上别的枪再脱甲", COL["bad"], 3.2)
                     return
+                # 备用位上还压着重武器 -> 提醒,但仍允许脱甲(它可以留在包里不拿)
+                heavy = next((w for w in loadout_weapons(sd)
+                              if w.def_.get("req_armor_level", 0)
+                              > (sd.armor.def_.get("level", 0))), None)
                 old = sd.armor
                 if sd.stash.add_item(old):
                     sd.armor = None
                     save_mod.save_data(sd)
+                    if heavy is not None:
+                        self.say(f"已脱下 {old.name};{heavy.name} 需要 "
+                                 f"{heavy.def_['req_armor_level']} 级护甲,"
+                                 f"拿它之前先穿回甲", COL["accent"], 3.4)
                 else:
                     self.say("仓库空间不足", COL["bad"])
             return
@@ -1389,15 +1883,15 @@ class Hideout:
                         self.say(f"需先穿上 {item.def_['req_armor_level']} 级护甲,"
                                  f"才拿得动 {item.name}", COL["bad"], 3.2)
                         return
-                    old = sd.weapon
-                    sd.stash.remove_placed(placed)
-                    if old is not None and not sd.stash.add_item(old):
-                        sd.stash.items.append(placed)
-                        self.say("仓库空间不足", COL["bad"])
+                    free = loadout_free_slot(sd, item)
+                    if free is None:
+                        self.say("武器位满了(2 主武器 + 副武器 + 近战),"
+                                 "先卸下一件再拿", COL["bad"], 3.2)
                         return
-                    sd.weapon = item
+                    sd.stash.remove_placed(placed)
+                    loadout_set(sd, free, item)
                     save_mod.save_data(sd)
-                    self.say(f"装备武器 {item.name}")
+                    self.say(f"装备武器 {item.name} → {LOADOUT_SLOT_NAMES[free]}")
                 elif item.cat == "armor":
                     old = sd.armor
                     sd.stash.remove_placed(placed)
@@ -1538,9 +2032,23 @@ class Hideout:
 
     # ---------- 交易所 ----------
     def _trade_click(self, pos):
+        """交易所点击:返回 / 滚动条 / 确认框 / 批量出售按钮 / 仓库物品 / 购买。
+
+        一页式,顺序照「确认框 → 按钮 → 分区标签 → 仓库 → 商品」来:
+        点仓库里的东西 = 出售(批量模式 = 选中/取消),点商品格 = 购买。
+        """
         sd = self.game.save
         audio.play("click")
-        # 商品列表右边的滚动条:点手柄/轨道就开始拖
+
+        # 顶栏:返回
+        if self.trade_close.collidepoint(pos):
+            self.view = "stash"
+            self.sell_mode = False
+            self.sell_sel = []
+            save_mod.save_data(sd)
+            return
+
+        # 商品滚动条优先(否则点轨道会误触商品格)
         if self.trade_slider is not None:
             track, handle = self.trade_slider
             if handle.collidepoint(pos):
@@ -1550,7 +2058,8 @@ class Hideout:
                 self.trade_drag = True
                 self._trade_drag_to(pos[1])
                 return
-        # 批量出售的确认框最优先
+
+        # 批量出售的确认框最优先(没确认完不能点别的)
         if self.sell_ask is not None:
             if self.sell_ask_yes.collidepoint(pos):
                 ok, msg = self._sell_do()
@@ -1559,82 +2068,37 @@ class Hideout:
                 self.sell_ask = None
                 self.say("已取消批量出售", COL["text_dim"])
             return
-        if self.trade_close.collidepoint(pos):
-            self.view = "stash"
-            self.sell_mode = False
-            self.sell_sel = []
-            save_mod.save_data(sd)
+
+        if self._trade_click_sell(pos):        # 批量出售按钮 / 点仓库物品
             return
-        # 批量出售的按钮
-        if self.sell_toggle.collidepoint(pos):
-            self.sell_mode = not self.sell_mode
-            if not self.sell_mode:
-                self.sell_sel = []
-            return
-        if self.sell_mode:
-            if self.sell_junk.collidepoint(pos):
-                n = self._sell_pick(("misc", "valuable"))
-                self.say(f"已选中 {n} 件杂物/值钱货" if self.sell_selected()
-                         else f"已取消 {n} 件杂物/值钱货", COL["accent"], 2.4)
-                return
-            if self.sell_ammo.collidepoint(pos):
-                n = self._sell_pick(("ammo",))
-                self.say(f"已选中 {n} 组子弹" if self.sell_selected()
-                         else f"已取消 {n} 组子弹", COL["accent"], 2.4)
-                return
-            if self.sell_clear.collidepoint(pos):
-                self.sell_sel = []
-                self.say("已清空选择", COL["text_dim"], 2.0)
-                return
-            if self.sell_go.collidepoint(pos):
-                sel = self.sell_selected()
-                if not sel:
-                    self.say("先在左边点选要卖的物品(或点快捷选择)", COL["bad"], 3.0)
-                    return
-                self.sell_ask = dict(items=list(sel), total=self.sell_total())
-                return
+        self._trade_click_buy(pos)             # 分区标签 / 点商品购买
+
+    def _trade_click_buy(self, pos):
+        """购买侧:点分区标签选分区,点商品格买。"""
+        sd = self.game.save
         # 分区标签
-        for i, (label, cat) in enumerate(TRADE_TABS):
-            if self.trade_tab_rects[i].collidepoint(pos):
+        for label, cat, r in self._trade_cat_rows():
+            if r.collidepoint(pos):
                 self.trade_cat = cat
-                self.trade_scroll = 0.0
+                self.trade_scroll = 0.0          # 换分区回到顶部
                 return
-        # 点仓库物品:批量模式下 = 选中/取消;普通模式 = 直接卖掉
-        placed = self.trade_stash_hit(pos)
-        if placed is not None:
-            if self.sell_mode:
-                sel = self.sell_selected()
-                if placed in sel:
-                    sel.remove(placed)
-                else:
-                    sel.append(placed)
-                self.sell_sel = sel
-                return
-            price = trade_sell_price(placed.item)
-            name = placed.item.name
-            sd.stash.remove_placed(placed)
-            sd.rubles += price
-            save_mod.save_data(sd)
-            self.say(f"出售 {name} +{fmt_rub(price)}", COL["good"])
-            return
-        # 购买:点击商品行(按分区过滤,支持滚轮偏移)
-        goods, per, row_h = self.trade_rows()
+        # 商品格
+        view = self._trade_goods_view()
+        goods = self.trade_goods()
         for i, (iid, count) in enumerate(goods):
-            r = self.trade_row_rect(i, per, row_h)
+            r = self._trade_cell_rect(i)
             if not r.collidepoint(pos):
                 continue
-            # 超出可见区间的行不接受点击(避免点在看不见的商品上)
-            if r.top < self.trade_view_top - row_h or r.bottom > self.trade_view_bottom:
+            # 被裁掉一半的格子不接受点击(否则会点在看不见的格子上)
+            if not view.contains(r):
                 continue
             price = trade_buy_price(iid, count)
             if sd.rubles < price:
                 self.say("余额不足!", COL["bad"])
                 return
             d = ITEMS[iid]
-            if d["cat"] == "weapon":
-                item = Item.weapon(iid, mag=d["mag"])
-            else:
-                item = Item(iid, count=count)
+            item = (Item.weapon(iid, mag=d["mag"]) if d["cat"] == "weapon"
+                    else Item(iid, count=count))
             if not sd.stash.add_item(item):
                 self.say("仓库空间不足!", COL["bad"])
                 return
@@ -1643,7 +2107,59 @@ class Hideout:
             self.say(f"购买 {item.name} -{fmt_rub(price)}", COL["accent"])
             return
 
-    # ---------- 渲染 ----------
+    def _trade_click_sell(self, pos):
+        """出售侧:批量出售按钮 + 点仓库物品。返回 True = 这次点击已处理。"""
+        sd = self.game.save
+        if self.sell_toggle.collidepoint(pos):
+            self.sell_mode = not self.sell_mode
+            if not self.sell_mode:
+                self.sell_sel = []
+            self.say("批量出售:开(左键点物品选中/取消)" if self.sell_mode
+                     else "批量出售:关(左键点物品直接卖)", COL["accent"], 2.6)
+            return True
+        if self.sell_mode:
+            if self.sell_junk.collidepoint(pos):
+                n = self._sell_pick(("misc",))
+                self.say(f"已选中 {n} 件杂物" if n else "仓库里没有杂物",
+                         COL["accent"], 2.4)
+                return True
+            if self.sell_ammo.collidepoint(pos):
+                n = self._sell_pick(("ammo",))
+                self.say(f"已选中 {n} 组子弹" if self.sell_selected()
+                         else f"已取消 {n} 组子弹", COL["accent"], 2.4)
+                return True
+            if self.sell_clear.collidepoint(pos):
+                self.sell_sel = []
+                self.say("已清空选择", COL["text_dim"], 2.0)
+                return True
+            if self.sell_go.collidepoint(pos):
+                sel = self.sell_selected()
+                if not sel:
+                    self.say("先在左边点选要卖的物品(或点快捷选择)",
+                             COL["bad"], 3.0)
+                    return True
+                self.sell_ask = dict(items=list(sel), total=self.sell_total())
+                return True
+        # 仓库物品:批量模式下 = 选中/取消;普通模式 = 直接卖掉
+        placed = self.trade_stash_hit(pos)
+        if placed is None:
+            return False
+        if self.sell_mode:
+            sel = self.sell_selected()
+            if placed in sel:
+                sel.remove(placed)
+            else:
+                sel.append(placed)
+            self.sell_sel = sel
+            return True
+        price = trade_sell_price(placed.item)
+        name = placed.item.name
+        sd.stash.remove_placed(placed)
+        sd.rubles += price
+        save_mod.save_data(sd)
+        self.say(f"出售 {name} +{fmt_rub(price)}", COL["good"])
+        return True
+
     def draw(self, screen):
         if self.show_intro:
             intro.draw(screen, self.intro_page)
@@ -1706,8 +2222,13 @@ class Hideout:
         uikit.draw_panel(screen, lay["loadout_panel"], "出战配置")
         draw_button(screen, lay["stash_all"], "一键放回仓库并整理",
                     lay["stash_all"].collidepoint(mx, my), small=True)
-        draw_slot(screen, lay["weapon"], sd.weapon, "武器",
-                  hover=lay["weapon"].collidepoint(mx, my))
+        for slot in LOADOUT_SLOTS:
+            r = lay["weapon"] if slot == "main1" else lay[slot]
+            it = loadout_get(sd, slot)
+            draw_slot(screen, r, it,
+                      LOADOUT_SLOT_NAMES[slot] if it is not None
+                      else LOADOUT_SLOT_NAMES[slot] + "(空)",
+                      hover=r.collidepoint(mx, my))
         draw_slot(screen, lay["armor"], sd.armor, "护甲",
                   hover=lay["armor"].collidepoint(mx, my))
         draw_slot(screen, lay["helmet"], sd.helmet, "头盔",
@@ -1849,6 +2370,9 @@ class Hideout:
         draw_button(screen, lay["reset"], reset_text,
                     lay["reset"].collidepoint(mx, my), small=True)
 
+        # ---- 局域网联机(底部空带:状态 + 创建/搜索/断开 + 手动 IP + 房间列表) ----
+        self._draw_net(screen, mx, my)
+
         # ---- 提示行 ----
         if self.msg_t > 0 and self.msg:
             t = get_font(17, bold=True).render(self.msg, True, self.msg_col)
@@ -1868,8 +2392,13 @@ class Hideout:
             placed = sd.bag.at(gx, gy)
             if placed:
                 hover_item = placed.item
-        if hover_item is None and lay["weapon"].collidepoint(mx, my) and sd.weapon:
-            hover_item = sd.weapon
+        if hover_item is None:
+            for slot in LOADOUT_SLOTS:
+                r = lay["weapon"] if slot == "main1" else lay[slot]
+                it = loadout_get(sd, slot)
+                if it is not None and r.collidepoint(mx, my):
+                    hover_item = it
+                    break
         if hover_item is None and lay["armor"].collidepoint(mx, my) and sd.armor:
             hover_item = sd.armor
         if hover_item is None and lay["helmet"].collidepoint(mx, my) and sd.helmet:
@@ -1991,14 +2520,20 @@ class Hideout:
                 task, (state, p, need) = entry
                 done = state == "done"
                 ready = state == "ready"
+                locked = state == "locked"
                 name = f"{task['name']}  ({min(p, need)}/{need})"
                 if task.get("repeat"):
                     name += "  [可重复]"
+                pre = quests.task_by_id(task.get("req") or "") if locked else None
                 right = ("已结算" if done else
-                         ("点击领取" if ready else "进行中"))
+                         ("未解锁" if locked else
+                          ("点击领取" if ready else "进行中")))
                 sub = f"{task['desc']}   奖励:{quests.reward_text(task['reward'])}"
+                if locked:
+                    sub = (f"需先完成并领取「{pre['name'] if pre else task.get('req')}」"
+                           f"   奖励:{quests.reward_text(task['reward'])}")
                 col = (COL["good"] if ready else
-                       (COL["text_dim"] if done else COL["text"]))
+                       (COL["text_dim"] if (done or locked) else COL["text"]))
             else:
                 barter = entry[0]
                 miss = quests.missing_materials(sd, barter)
@@ -2102,43 +2637,143 @@ class Hideout:
 
     # ---------- 交易所渲染 ----------
     def _draw_trade(self, screen):
+        """交易所:左边你的仓库(点物品出售 / 批量出售),右边分区标签 + 商品。
+
+        一页式:左面板点仓库物品 = 卖(批量模式 = 选中/取消),右面板点商品 = 买。
+        分区标签横排在右面板顶上,以后往 TRADE_TABS / TRADE_GOODS 里加东西,
+        标签宽度和商品网格自动适应,不用再算坐标。
+        """
         sd = self.game.save
-        lay = self.lay
         mx, my = pygame.mouse.get_pos()
         screen.fill(COL["bg"])
+        left_p, right_p = self._trade_panels()
 
+        # ---- 顶栏:标题 / 余额 / 返回 ----
         t = get_font(34, bold=True).render("交易所", True, COL["accent"])
-        screen.blit(t, t.get_rect(center=(W // 2, 44)))
-        bal = get_font(24, bold=True).render(f"余额 {fmt_rub(sd.rubles)}", True, COL["accent"])
-        screen.blit(bal, (W - bal.get_width() - 30, 36))
+        screen.blit(t, (30, 22))
+        bal = get_font(24, bold=True).render(f"余额 {fmt_rub(sd.rubles)}",
+                                             True, COL["accent"])
+        screen.blit(bal, (self.trade_close.x - bal.get_width() - 24, 32))
+        draw_button(screen, self.trade_close, "返回",
+                    self.trade_close.collidepoint(mx, my))
 
-        # ---- 左:仓库(点击出售 / 批量出售;格子多了用滚轮翻) ----
+        # ---- 左:你的仓库;右:分区标签 + 商品网格 ----
+        self._draw_trade_sell(screen, mx, my, left_p, right_p)
+        self._draw_trade_buy(screen, mx, my, left_p, right_p)
+
+        # ---- 触屏长按信息面板 ----
+        uikit.draw_hold(screen, self.hold)
+        if self.sell_ask is not None:
+            self._draw_sell_ask(screen)
+
+    def _draw_vscroll(self, screen, track, scroll, maxs, content_h):
+        """竖直滚动条;放得下就不画。返回 (轨道, 手柄) 供拖动判定。"""
+        if maxs <= 0:
+            return None
+        pygame.draw.rect(screen, (26, 29, 35), track, border_radius=5)
+        hh = max(30, int(track.h * min(1.0, track.h / float(max(1, content_h)))))
+        span = track.h - hh
+        pos = int((scroll / maxs) * span) if maxs > 0 and span > 0 else 0
+        handle = pygame.Rect(track.x, track.y + pos, track.w, hh)
+        pygame.draw.rect(screen, COL["accent"], handle, border_radius=5)
+        return track, handle
+
+    def _draw_trade_buy(self, screen, mx, my, left_p, right_p):
+        """购买侧:右面板顶上横排分区标签,下面是商品网格(可滚)。"""
+        sd = self.game.save
+
+        # ---- 分区标签 ----
+        uikit.draw_panel(screen, right_p, "商品 — 点击购买")
+        for label, cat, r in self._trade_cat_rows():
+            sel = self.trade_cat == cat
+            hover = r.collidepoint(mx, my)
+            pygame.draw.rect(screen, COL["panel_hi"] if (hover or sel)
+                             else COL["panel"], r, border_radius=7)
+            pygame.draw.rect(screen, COL["accent"] if sel else COL["border"],
+                             r, 2 if sel else 1, border_radius=7)
+            ft = get_font(14, bold=True).render(
+                label, True, COL["accent"] if sel else COL["text"])
+            screen.blit(ft, ft.get_rect(center=r.center))
+
+        # ---- 商品网格 ----
+        goods = self.trade_goods()
+        view = self._trade_goods_view()
+        screen.set_clip(view)             # 滚到一半的格子不许画到面板标题上
+        for i, (iid, count) in enumerate(goods):
+            r = self._trade_cell_rect(i)
+            if r.bottom <= view.y or r.top >= view.bottom:
+                continue                      # 完全在可见区外,连画都不画
+            d = ITEMS[iid]
+            price = trade_buy_price(iid, count)
+            afford = sd.rubles >= price
+            inside = view.contains(r)         # 被裁掉一半的格子不接受点击
+            hover = inside and r.collidepoint(mx, my)
+            pygame.draw.rect(screen, COL["panel_hi"] if (hover and afford)
+                             else COL["panel"], r, border_radius=6)
+            pygame.draw.rect(screen,
+                             COL["accent"] if (hover and afford) else COL["border"],
+                             r, 2 if (hover and afford) else 1, border_radius=6)
+            pygame.draw.rect(screen, d["color"], (r.x + 8, r.y + 9, 8, 24),
+                             border_radius=2)
+            name = d["name"] + (f" ×{count}" if d["cat"] == "ammo" else "")
+            nt = get_font(15, bold=True).render(
+                name, True, COL["text"] if afford else (108, 108, 114))
+            screen.blit(nt, (r.x + 24, r.y + 9))
+            cls = weapon_class(iid)
+            if cls:
+                sub = get_font(12).render(cls, True, COL["text_dim"])
+                screen.blit(sub, (r.x + 24, r.y + 32))
+            pt = get_font(14, bold=True).render(
+                fmt_rub(price), True, COL["accent"] if afford else COL["bad"])
+            screen.blit(pt, (r.right - pt.get_width() - 10, r.bottom - 24))
+        screen.set_clip(None)
+        rows = (len(goods) + self.TRADE_COLS - 1) // self.TRADE_COLS
+        self.trade_slider = self._draw_vscroll(
+            screen, self.trade_slider_track(), self.trade_scroll,
+            self.trade_max_scroll(),
+            rows * (self.TRADE_CELL_H + self.TRADE_PAD))
+        tip = get_font(13).render(
+            "本类共 %d 件 · 左键购买 · 滚轮 / 拖右边条翻看" % len(goods),
+            True, COL["text_dim"])
+        screen.blit(tip, (right_p.x + 14, right_p.bottom - 16))
+
+        # 悬停提示
+        for i, (iid, count) in enumerate(goods):
+            r = self._trade_cell_rect(i)
+            if view.contains(r) and r.collidepoint(mx, my):
+                d = ITEMS[iid]
+                preview = (Item.weapon(iid, mag=d["mag"]) if d["cat"] == "weapon"
+                           else Item(iid, count=count))
+                draw_tooltip(screen, mx, my, preview)
+                break
+
+    def _draw_trade_sell(self, screen, mx, my, left_p, right_p):
+        """出售侧:左面板 = 你的仓库(点物品直接卖 / 批量模式选中),下面是出售按钮。"""
+        sd = self.game.save
         sel = self.sell_selected()
-        uikit.draw_panel(screen, lay["trade_stash"],
+        uikit.draw_panel(screen, left_p,
                          "你的仓库 — 点物品选中(批量出售)" if self.sell_mode
                          else "你的仓库 — 点击物品出售")
-        gx0, gy0 = self.trade_stash_grid
-        draw_grid(screen, gx0, gy0, sd.stash, 40,
+        ox, oy = self.trade_stash_grid
+        draw_grid(screen, ox, oy, sd.stash, 40,
                   scroll=self.stash_scroll, view_h=self.trade_stash_view_h)
-        # 批量模式:被选中的物品描边高亮
         if self.sell_mode:
             for p in sel:
                 w, h = p.item.size()
-                r = pygame.Rect(gx0 + p.x * 40,
-                                gy0 + p.y * 40 - int(self.stash_scroll),
+                r = pygame.Rect(ox + p.x * 40,
+                                oy + p.y * 40 - int(self.stash_scroll),
                                 w * 40, h * 40)
-                if r.bottom < gy0 or r.top > gy0 + self.trade_stash_view_h:
+                if r.bottom < oy or r.top > oy + self.trade_stash_view_h:
                     continue
-                hl = pygame.Surface(r.size, pygame.SRCALPHA)
-                hl.fill((120, 220, 120, 80))
+                hl = _overlay("sell_hl", r.size, (120, 220, 120, 80))
                 screen.blit(hl, r)
                 pygame.draw.rect(screen, COL["good"], r, 3)
-        t = get_font(14).render(
-            ("批量出售:左键点物品 选中/取消  ·  回收价 60%"
-             if self.sell_mode else "出售价 = 原价 60%,卖错了只能高价买回")
+        t = get_font(13).render(
+            ("批量出售:左键点物品 选中/取消 · 回收价 60%" if self.sell_mode
+             else "出售价 = 原价 60%,卖错了只能高价买回")
             + ("  (滚轮翻仓库)" if self.trade_stash_max_scroll() > 0 else ""),
             True, COL["text_dim"])
-        screen.blit(t, (gx0, gy0 + self.trade_stash_view_h + 10))
+        screen.blit(t, (ox, oy + self.trade_stash_view_h + 10))
         draw_button(screen, self.sell_toggle,
                     "批量出售:开" if self.sell_mode else "批量出售:关",
                     self.sell_toggle.collidepoint(mx, my), small=True)
@@ -2151,125 +2786,13 @@ class Hideout:
             total = self.sell_total()
             draw_button(screen, self.sell_go,
                         f"出售选中 {n} 件 · {fmt_rub(total)}" if n
-                        else "出售选中(先点物品)",
-                        self.sell_go.collidepoint(mx, my) and n > 0,
-                        small=True)
+                        else "出售选中(先点左边物品)",
+                        self.sell_go.collidepoint(mx, my) and n > 0, small=True)
             if n:
                 draw_button(screen, self.sell_clear, f"清空选择({n})",
                             self.sell_clear.collidepoint(mx, my), small=True)
-
-        # ---- 右:商品(分区 + 滚轮翻看) ----
-        uikit.draw_panel(screen, lay["trade_goods"], "商品 — 点击购买")
-        # 分区标签
-        for i, (label, cat) in enumerate(TRADE_TABS):
-            r = self.trade_tab_rects[i]
-            sel = self.trade_cat == cat
-            base = COL["panel_hi"] if r.collidepoint(mx, my) else COL["panel"]
-            pygame.draw.rect(screen, base, r, border_radius=7)
-            pygame.draw.rect(screen, COL["accent"] if sel else COL["border"],
-                             r, 2 if sel else 1, border_radius=7)
-            ft = get_font(15, bold=True).render(
-                label, True, COL["accent"] if sel else COL["text"])
-            screen.blit(ft, ft.get_rect(center=r.center))
-        goods, per, row_h = self.trade_rows()
-        t = get_font(13).render("左键购买 · 滚轮翻看更多" if self.trade_max_scroll() > 0
-                                else "左键购买", True, COL["text_dim"])
-        screen.blit(t, (556, 166))
-        # 商品行(超出可见区间的裁剪掉)
-        f16 = get_font(15, bold=True)
-        view = pygame.Rect(530, self.trade_view_top - row_h, 720,
-                           TRADE_PAGE_H + row_h * 2)
-        for i, (iid, count) in enumerate(goods):
-            d = ITEMS[iid]
-            price = trade_buy_price(iid, count)
-            rect = self.trade_row_rect(i, per, row_h)
-            if not view.colliderect(rect):
-                continue
-            afford = sd.rubles >= price
-            visible = (rect.top >= self.trade_view_top - row_h
-                       and rect.bottom <= self.trade_view_bottom)
-            hover = rect.collidepoint(mx, my) and visible
-            base = COL["panel_hi"] if hover and afford else COL["panel"]
-            pygame.draw.rect(screen, base, rect, border_radius=6)
-            pygame.draw.rect(screen, COL["accent"] if (hover and afford) else COL["border"],
-                              rect, 2 if (hover and afford) else 1, border_radius=6)
-            # 类别色块
-            pygame.draw.rect(screen, d["color"], (rect.x + 6, rect.y + 6, 7, 24),
-                             border_radius=2)
-            name = d["name"] + (f" ×{count}" if d["cat"] == "ammo" else "")
-            t = f16.render(name, True, COL["text"] if afford else (110, 110, 116))
-            screen.blit(t, (rect.x + 20, rect.y + 7))
-            # 枪械分类标签(暗区式:突击步枪/冲锋枪/狙击步枪/轻机枪/霰弹枪…)
-            cls = weapon_class(iid)
-            if cls:
-                tag = get_font(12, bold=True).render(
-                    cls, True, WEAPON_CLASS_COL.get(cls, COL["text_dim"]))
-                tx = rect.x + 26 + t.get_width()
-                if tx + tag.get_width() + 12 < rect.right - 90:
-                    pygame.draw.rect(screen, (46, 50, 58),
-                                     (tx, rect.y + 9, tag.get_width() + 10, 18),
-                                     border_radius=4)
-                    pygame.draw.rect(screen, WEAPON_CLASS_COL.get(cls, COL["border"]),
-                                     (tx, rect.y + 9, tag.get_width() + 10, 18),
-                                     1, border_radius=4)
-                    screen.blit(tag, (tx + 5, rect.y + 11))
-            tp = get_font(15, bold=True).render(fmt_rub(price), True,
-                                                COL["accent"] if afford else COL["text_dim"])
-            screen.blit(tp, (rect.right - tp.get_width() - 10, rect.y + 7))
-        # 滚动条(可以用鼠标拖着走;手机用 ▲▼)
-        ms = self.trade_max_scroll()
-        self.trade_slider = None
-        if ms > 0:
-            track = self.trade_slider_track()
-            pygame.draw.rect(screen, COL["grid_bg"], track, border_radius=5)
-            ratio = TRADE_PAGE_H / (TRADE_PAGE_H + ms)
-            h = max(30, int(track.h * ratio))
-            pos = int((self.trade_scroll / ms) * (track.h - h))
-            handle = pygame.Rect(track.x, track.y + pos, track.w, h)
-            hover = handle.collidepoint(mx, my) or self.trade_drag
-            pygame.draw.rect(screen, COL["accent"] if hover else (120, 128, 142),
-                             handle, border_radius=5)
-            for i in range(3):     # 手柄上的三道纹,一眼能看出可以拖
-                yy = handle.centery - 6 + i * 6
-                pygame.draw.line(screen, (32, 36, 44),
-                                 (handle.x + 3, yy), (handle.right - 3, yy), 2)
-            self.trade_slider = (track, handle)
-        t = get_font(14).render("买满弹药再进战局;搜刮到的贵重物拿回来卖钱",
-                                True, COL["text_dim"])
-        screen.blit(t, (556, lay["trade_goods"].bottom - 34))
-
-        # 关闭按钮
-        draw_button(screen, self.trade_close, "返回",
-                    self.trade_close.collidepoint(mx, my), small=True)
-
-        # ---- 提示行 ----
-        if self.msg_t > 0 and self.msg:
-            t = get_font(17, bold=True).render(self.msg, True, self.msg_col)
-            screen.blit(t, t.get_rect(center=(W // 2, H - 26)))
-
-        # ---- 悬浮提示 ----
-        hover_item = None
-        if lay["trade_stash"].collidepoint(mx, my):
-            placed = self.trade_stash_hit((mx, my))     # 要算上滚轮偏移
+        # 悬停提示
+        if left_p.collidepoint(mx, my):
+            placed = self.trade_stash_hit((mx, my))
             if placed:
-                hover_item = placed.item
-        if hover_item is not None:
-            draw_tooltip(screen, mx, my, hover_item)
-        else:
-            goods, per, row_h = self.trade_rows()
-            for i, (iid, count) in enumerate(goods):
-                r = self.trade_row_rect(i, per, row_h)
-                visible = (r.top >= self.trade_view_top - row_h
-                           and r.bottom <= self.trade_view_bottom)
-                if visible and r.collidepoint(mx, my):
-                    d = ITEMS[iid]
-                    if d["cat"] == "weapon":
-                        preview = Item.weapon(iid, mag=d["mag"])
-                    else:
-                        preview = Item(iid, count=count)
-                    draw_tooltip(screen, mx, my, preview)
-                    break
-        # ---- 触屏长按信息面板 ----
-        uikit.draw_hold(screen, self.hold)
-        if self.sell_ask is not None:
-            self._draw_sell_ask(screen)
+                draw_tooltip(screen, mx, my, placed.item)

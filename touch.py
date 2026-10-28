@@ -9,7 +9,7 @@ import math
 
 import pygame
 
-from settings import W, H, TOUCH, COL, get_font
+from settings import W, H, TOUCH, COL, get_font, to_display
 
 BUTTONS = [
     # (按键名, 显示文字, 屏幕坐标比例(x, y), 半径)
@@ -75,15 +75,36 @@ def merged_layout(support=False):
 
 
 def hit_test(pos, support=False):
-    """屏幕坐标 -> 按钮名(编辑器与 TouchUI 共用的命中判定)。"""
+    """屏幕坐标 -> 按钮名(编辑器与 TouchUI 共用的命中判定)。
+
+    取**最近**的那个,而不是字典里第一个命中的:玩家可以把按钮拖到重叠,
+    原来的写法(命中就 return)会永远只选中排在前面的那个,后面那个怎么点
+    都点不到 —— 和设置页里「点下面选中上面」是同一类问题。
+
+    距离打平时(比如小按钮正好在大按钮正中)让**半径小的**优先:
+    否则小按钮被压住之后就永远点不到了。
+    """
+    best = None
+    best_key = None
     for name, d in merged_layout(support).items():
-        if math.hypot(pos[0] - d["pos"][0], pos[1] - d["pos"][1]) <= d["r"]:
-            return name
-    return None
+        dist = math.hypot(pos[0] - d["pos"][0], pos[1] - d["pos"][1])
+        if dist > d["r"]:
+            continue
+        key = (dist, d["r"])
+        if best_key is None or key < best_key:
+            best, best_key = name, key
+    return best
 
 
 # 按钮贴图缓存:底色/描边/文字都不依赖每帧状态,只有 (文字, 半径, 按下) 三种变化
 _button_cache = {}
+
+# 用色键(colorkey)而不是逐像素 alpha —— 真机实测快 53 倍。
+# pygame.draw.circle 本来就是硬边,圆外的角落是纯色,正好拿来做色键;
+# 按钮自身的配色(40,46,58)/(96,104,118)和文字色都不会等于这个纯黑,
+# 所以画面和原来完全一致。逐像素 alpha 在 ARM 上走 SDL 的通用 C 路径,
+# 是这个设备上最慢的 blit(130x130 一张要 2.9ms,9 个按钮就是 26ms)。
+_BTN_KEY = (0, 0, 0)
 
 
 def _button_sprite(label, r, down):
@@ -91,13 +112,16 @@ def _button_sprite(label, r, down):
     s = _button_cache.get(key)
     if s is None:
         d = r * 2 + 8
-        s = pygame.Surface((d, d), pygame.SRCALPHA)
+        s = pygame.Surface((d, d))
+        s.fill(_BTN_KEY)
         base = (72, 92, 120) if down else (40, 46, 58)
         border = COL["accent"] if down else (96, 104, 118)
         pygame.draw.circle(s, base, (d // 2, d // 2), r)
         pygame.draw.circle(s, border, (d // 2, d // 2), r, 3)
-        t = get_font(16, bold=True).render(label, True, COL["text"])
+        # 文字仍然抗锯齿:它叠在按钮的实心底色上,和原来的合成结果一致
+        t = get_font(16, bold=True).render(label, True, COL["text"], base)
         s.blit(t, t.get_rect(center=(d // 2, d // 2)))
+        s.set_colorkey(_BTN_KEY)
         if len(_button_cache) > 160:
             _button_cache.clear()
         _button_cache[key] = s

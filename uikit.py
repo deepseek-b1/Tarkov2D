@@ -5,7 +5,8 @@ import pygame
 from settings import (get_font, COL, fmt_rub, ITEMS, ATTACH_SLOTS,
                       weapon_params, weapon_capacity, weapon_ammo_ids,
                       weapon_slots, weapon_attach, weapon_talent, weapon_class,
-                      weapon_fire_modes, weapon_fire_mode, fire_mode_name)
+                      weapon_fire_modes, weapon_fire_mode, fire_mode_name,
+                      MISFIRE_JAM_TIME)
 from inventory import Container, Placed
 
 CELL = 40  # 界面格子像素
@@ -75,7 +76,16 @@ def draw_item_icon(surface, item, x, y, cell=CELL):
     cx, cy = rect.center
     inner = rect.inflate(-8, -8)
     cat = item.cat
-    if cat == "weapon":
+    if item.def_.get("drone"):
+        # 侦察无人机:四旋翼 + 中央机身 + 摄像头(和枪形区分开)
+        for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
+            rx, ry = cx + dx * 11, cy + dy * 6
+            pygame.draw.line(surface, (34, 40, 44), (cx, cy), (rx, ry), 3)
+            pygame.draw.circle(surface, (34, 40, 44), (rx, ry), 4)
+        pygame.draw.rect(surface, (34, 40, 44),
+                         (cx - 7, cy - 5, 14, 11), border_radius=3)
+        pygame.draw.circle(surface, (240, 230, 150), (cx, cy + 1), 2)
+    elif cat == "weapon":
         # 枪管 + 枪身
         pygame.draw.line(surface, (40, 40, 46), (inner.left, cy), (inner.right, cy), 4)
         pygame.draw.rect(surface, (50, 50, 58),
@@ -142,7 +152,7 @@ def draw_item_icon(surface, item, x, y, cell=CELL):
     if item.is_stackable() and item.count > 1:
         t = get_font(13, bold=True).render(f"x{item.count}", True, (255, 255, 255))
         surface.blit(t, (rect.right - t.get_width() - 6, rect.bottom - t.get_height() - 3))
-    if cat == "weapon":
+    if cat == "weapon" and not item.def_.get("drone"):
         mag = item.state.get("mag", 0)
         t = get_font(13, bold=True).render(f"{mag}", True,
                                            (120, 255, 120) if mag else (255, 120, 110))
@@ -187,11 +197,29 @@ def item_info_lines(item):
     lines = [d["name"]]
     w, h = item.base_size()
     sub = [f"{w}×{h} 格  {fmt_rub(d['price'])}"]
-    if item.cat == "weapon":
+    if item.cat == "weapon" and d.get("drone"):
+        # 侦察无人机:不是枪,只报侦察参数(伤害/弹匣这些没意义)
+        from settings import drone_cfg
+        cfg = drone_cfg()
+        sub.append("左键放出 · F 掌镜(WASD 操纵)· 左键/F 收回")
+        sub.append(f"侦察半径 {int(cfg['view_radius'])}  标记半径 "
+                   f"{int(cfg['mark_radius'])}  标记保留 {cfg['mark_hold']:.0f}s")
+        sub.append(f"电量 {cfg['battery']:.0f}s  飞行 {int(cfg['speed'])}/s  "
+                   f"信号 {int(cfg['max_dist'])}")
+        sub.append("★ 大范围照亮战争迷雾(夜战同样有效)")
+        sub.append("★ 自动标记圈内守军,把位置同步给队友")
+        sub.append(("★ 电量耗尽:离得近自动回收,离得远直接坠毁"
+                    if cfg["crash_dmg"] <= 0 else
+                    f"★ 失联坠毁自伤 {cfg['crash_dmg']:.0f}"))
+        tal = weapon_talent(item.iid)
+        if tal:
+            sub.append(f"天赋·{tal['name']}:{tal.get('desc', '')}")
+    elif item.cat == "weapon":
         cls = weapon_class(item.iid)
         if cls:
             sub.insert(0, f"分类: {cls}")
-        dmg, pellets, hip, braced_s, rng, rl_t, _loud, burn = weapon_params(item)
+        (dmg, pellets, hip, braced_s, rng, rl_t, _loud, burn,
+         wall_pen, wall_decay, misfire, misfire_dmg) = weapon_params(item)
         cap = weapon_capacity(item)
         sub.append(f"伤害 {dmg:.0f}×{pellets}  射速 {d['rof']}s  "
                    f"弹匣 {item.state.get('mag', 0)}/{cap}")
@@ -202,6 +230,12 @@ def item_info_lines(item):
                       if len(modes) > 1 else ""))
         if burn:
             sub.append(f"★ 燃烧伤害 {burn:.0f}/秒")
+        if wall_pen:
+            sub.append(f"★ 特殊弹:可穿透 {int(wall_pen)} 层墙"
+                       f"(每层伤害 ×{wall_decay:.2f})")
+        if misfire:
+            sub.append(f"★ 炸膛概率 {misfire * 100:.0f}%"
+                       f"(自伤 {misfire_dmg:.0f},卡壳 {MISFIRE_JAM_TIME:.1f}s)")
         if d.get("spread_braced") is not None:
             sub.append(f"散布:腰射 ±{hip:.3f} → 架枪 ±{braced_s:.3f}")
             if d.get("braced_immobile"):
@@ -300,14 +334,32 @@ def draw_tooltip(surface, mx, my, item):
 
 # ---------- 触屏长按(显示物品详情;可附「旋转」按钮) ----------
 class HoldInfo:
-    """触屏长按提示:按住物品 0.45s 弹出信息面板;指头移动超过阈值即取消。
+    """触屏长按提示:按住物品 0.45s 弹出信息面板。
 
     用法:按下时 press(pos),移动时 move(pos),抬起时 consume_release(),
     每帧 update(dt, query)。query(pos) -> (item, action_cb) 或 None。
     面板下方按钮的文案按物品类型变(旋转 / 卷起展开 / 打开全装包)。
+
+    **这个类只决定"要不要弹信息面板",绝不能顺手把点按也吃掉。**
+    面板打开时调用方会把所有左键按下吞掉、只在抬起时重放一次点击
+    (见 raid._filter_hold_events / hideout._hold_filter)。所以只要
+    consume_release() 返回 False,那次点击就凭空消失了 —— 玩家看到的是
+    "点了没反应"。
+
+    踩过的两个坑(都会让点按彻底失效):
+      1) 原来 MOVE_TOL=14(曼哈顿距离,等于每轴只有 7px)。真机上正常点
+         一下手指漂移 15~25px 很常见,一过阈值就 reset(),连点按一起没了。
+         现在移动只让"不弹长按面板",点按照常重放。
+      2) 原来按住超过 0.45s 而 query 返回 None(点在空白处,或点在**未知
+         物品**上 —— 未知物品故意不泄底)时会把 holding 清掉,于是抬起
+         既不弹面板、也不重放点击。搜刮窗口里点"?"格子想开始搜索,
+         按久一点就完全没反应。现在只跳过弹面板,点按仍然有效。
     """
     DELAY = 0.45
-    MOVE_TOL = 14
+    # 手抖 vs 划动的分界(曼哈顿距离)。正常点按漂移通常在 20px 以内,
+    # 刻意划动一般 60px 以上,48 正好卡在中间。这个阈值只决定"算不算点按",
+    # 绝不能再像以前那样顺手把点按也取消掉。
+    MOVE_TOL = 48          # 只用于"要不要弹长按面板 / 算不算点按"
 
     def __init__(self):
         self.reset()
@@ -317,6 +369,7 @@ class HoldInfo:
         self.t = 0.0
         self.pos = None
         self.fired = False
+        self.dragged = False   # 手指移动超过阈值:不弹面板(但点按仍然有效)
         self.item = None
         self.action_cb = None
         self.btn_label = None
@@ -330,26 +383,43 @@ class HoldInfo:
         self.pos = tuple(pos)
 
     def move(self, pos):
-        if (self.holding and self.pos is not None
+        if (self.holding and not self.fired and self.pos is not None
                 and abs(pos[0] - self.pos[0]) + abs(pos[1] - self.pos[1])
                 > self.MOVE_TOL):
-            self.reset()      # 移动了:这是拖动/滑动,不算长按
+            # 手指移动了:不弹长按面板。但**不取消这次点按** ——
+            # 面板里没有拖拽移动物品的操作,漂移只是手抖,抬起照样算点击。
+            self.dragged = True
 
     def consume_release(self):
-        """抬起:返回 True = 普通点按(调用方需要重放这次点击)。"""
-        tap = self.holding and not self.fired and self.pos is not None
+        """抬起:返回 True = 这次点按没被长按面板消费,调用方要重放一次点击。
+
+        手指划动超过 MOVE_TOL 时算"划动",不重放(避免误点)。
+        另外:**只有 press() 记下的这一次按下才算点按** —— 没有按下就来的
+        抬起(比如在设置页点的关闭按钮,那一帧根本不走长按过滤)绝不能
+        拿上一次的按下点去重放点击,否则会在别的界面上凭空多出一击。
+        """
+        tap = (self.holding and not self.fired and not self.dragged)
         self.holding = False
         return tap
+
+    def click_pos(self):
+        """重放这次点按该用的坐标 —— 用**按下点**,即玩家真正瞄准的位置。
+
+        用抬起点的话,手指点一下漂移十几像素就会滑到隔壁格子上,点错东西。
+        """
+        return self.pos
 
     def update(self, dt, query):
         if not (self.holding and not self.fired):
             return
         self.t += dt
-        if self.t < self.DELAY:
+        if self.t < self.DELAY or self.dragged:
             return
         got = query(self.pos) if query is not None else None
         if got is None:
-            self.holding = False           # 没按在物品上:安静取消
+            # 没按在已知物品上(空白 / 未知物品):不弹面板。
+            # 注意这里**不能**清掉 holding —— 清了的话抬起时既不弹面板、
+            # 也不重放点击,这次点按就彻底丢了。
             return
         self.fired = True
         self.item, self.action_cb = got

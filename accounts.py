@@ -79,11 +79,29 @@ def _read_index():
 
 
 def _write_index(data):
-    os.makedirs(accounts_dir(), exist_ok=True)
-    tmp = index_path() + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, index_path())
+    """写账号索引。**失败不抛异常,返回 False** —— 存档目录不可写时,
+    登录计数这种记账失败绝不能把整个游戏搞崩(旧版就是这么闪退的)。"""
+    try:
+        os.makedirs(accounts_dir(), exist_ok=True)
+        tmp = index_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, index_path())
+        return True
+    except OSError as exc:
+        global LAST_INDEX_ERROR
+        LAST_INDEX_ERROR = f"{exc.__class__.__name__}: {exc}"
+        try:
+            import traceback
+            with open(os.path.join(save_mod.SAVE_DIR, "save_error.log"), "a",
+                      encoding="utf-8") as f:
+                f.write(traceback.format_exc() + "\n")
+        except Exception:
+            pass
+        return False
+
+
+LAST_INDEX_ERROR = ""
 
 
 def _hash_password(password, salt, iterations=ITERATIONS, dklen=32):
@@ -170,7 +188,9 @@ def register(name, password):
         "created": time.time(),
         "logins": 0,
     }
-    _write_index(data)
+    if not _write_index(data):
+        # 账号存不下来就必须明确告诉玩家,不能假装建号成功
+        return False, f"存档目录写不进去,账号无法保存({LAST_INDEX_ERROR})"
     return True, ""
 
 
@@ -244,5 +264,6 @@ def remove(name, password):
             return False, "存档删除失败(文件被占用?)"
     data = _read_index()
     data["accounts"].pop(slug(name), None)
-    _write_index(data)
+    if not _write_index(data):
+        return False, f"账号索引写不进去({LAST_INDEX_ERROR})"
     return True, "账号已删除(存档文件备份为 .deleted-*)"

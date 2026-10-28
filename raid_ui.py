@@ -1,6 +1,7 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """战局渲染:世界+战争迷雾+HUD+背包/搜刮/暂停/结算界面。"""
 import math
+import os
 
 import pygame
 
@@ -9,11 +10,46 @@ import bindings
 from settings import (W, H, COL, BAG_W, BAG_H, RAID_TIME, EXTRACT_TIME,
                       HOSTAGE_RESCUE_TIME, REVIVE_TIME, C4_BLAST_RADIUS,
                       NIGHT_DARK_RGB, NIGHT_BEAM_RGB, PLAYER, COOP,
-                      fmt_rub, get_font,
+                      fmt_rub, get_font, to_display, fog_darken,
                       weapon_beam, helmet_nvg, weapon_fire_mode,
                       weapon_fire_modes, fire_mode_name)
 import uikit
 from uikit import CELL, draw_grid, draw_item_icon, draw_tooltip, draw_button, draw_slot
+
+
+# 白天的迷雾压暗系数(定点 8 位),给 _dim() 调暗视野外的小物件用。
+# 取的是同一个 COL["fog"],所以物件和地图的暗度严格一致。
+_FOG_K = tuple(int(c * 256 / 255) for c in fog_darken(COL["fog"]))
+
+# 快速迷雾:整屏 BLEND_RGB_MULT(166ms) 换成"暗版地图纯拷贝 + 条带覆盖"(1.6ms)。
+# 设 TARKOV2D_SLOW_FOG=1 可退回原实现(画面有疑问时用来对照)。
+_FAST_FOG = os.environ.get("TARKOV2D_SLOW_FOG") != "1"
+_fast_fog_ok = True          # 暗版地图拿不到时自动降级一次
+_fog_fast_active = False     # 本帧快速迷雾是否生效(draw_raid 里设,给 _dim 用)
+_DARK_TINT = fog_darken(COL["fog"])
+
+# ---------- 大面积 alpha 混合:真机上最贵的一类操作 ----------
+# 实测(1280x720,骁龙 6 Gen 4):
+#   逐像素 alpha blit 整屏 = 159ms / 不透明 ADD 整屏 = 16ms / 不透明纯拷贝 = 0.4ms
+# 原因是 ARM 上 SDL 只对"不透明"和"色键"两类 blit 有快路径,逐像素 alpha
+# 走的是通用逐像素 C 代码。下面两项都改走 ADD(加色),观感会变成"发光"而不是
+# "蒙一层",设成 False 即可退回原来的逐像素 alpha 写法。
+_HURT_ADD = os.environ.get("TARKOV2D_ALPHA_HURT") != "1"
+_PARTICLE_ADD = os.environ.get("TARKOV2D_ALPHA_PARTICLE") != "1"
+
+_hurt_cache = {}
+
+
+def _hurt_overlay(c):
+    """受伤红屏用的缓存表面(不透明纯色,配合 BLEND_RGB_ADD)。"""
+    s = _hurt_cache.get(c)
+    if s is None:
+        if len(_hurt_cache) > 64:
+            _hurt_cache.clear()
+        s = pygame.Surface((W, H))
+        s.fill(c)
+        _hurt_cache[c] = s
+    return s
 
 
 # 全屏叠加层缓存:每帧新建 Surface 太贵(1280×720 SRCALPHA),复用一个
@@ -21,12 +57,15 @@ _overlay_cache = {}
 
 
 def _overlay(key, size, color):
+    """全屏级暗幕。同样改用「不透明 + 表面级 set_alpha」(见 _hud_bg 说明)。"""
     key = (key, size)
     surf = _overlay_cache.get(key)
     if surf is None:
-        surf = pygame.Surface(size, pygame.SRCALPHA)
+        surf = pygame.Surface(size)
         _overlay_cache[key] = surf
-    surf.fill(color)
+    a = color[3] if len(color) > 3 else 255
+    surf.set_alpha(None if a >= 255 else a)
+    surf.fill(color[:3])
     return surf
 
 
@@ -42,7 +81,7 @@ _rgb_cache = {}
 def _darken_layer(key, size, rgba):
     surf = _rgb_cache.get(key)
     if surf is None:
-        surf = pygame.Surface(size)
+        surf = to_display(pygame.Surface(size))
         _rgb_cache[key] = surf
     a = rgba[3]
     surf.fill(tuple(min(255, (255 - a) + (rgba[i] * a) // 255) for i in range(3)))
@@ -58,14 +97,191 @@ def _mask_surface(key, size):
     """
     surf = _rgb_cache.get(key)
     if surf is None:
-        surf = pygame.Surface(size)
+        # 战争迷雾/夜战压暗层:每帧整屏 BLEND_RGB_MULT blit。
+        # convert() 让它和显示表面同格式 —— BLEND_RGB_MULT 只有在格式一致时
+        # 才走 SDL 的快路径,否则每个像素都要先转换再相乘(安卓上尤其致命)。
+        surf = to_display(pygame.Surface(size))
         _rgb_cache[key] = surf
     return surf
 
 
 def _darken_fill(surf, rgba):
-    a = rgba[3]
-    surf.fill(tuple(min(255, (255 - a) + (rgba[i] * a) // 255) for i in range(3)))
+    surf.fill(fog_darken(rgba))
+
+
+# ---------- 快速迷雾:扫描线条带 ----------
+# 原来每帧整屏 BLEND_RGB_MULT(地图压暗 + 在多边形里打洞),真机实测 166ms/帧。
+# 原因:ARM 上 SDL 的混合 blit 走逐像素通用 C,而 x86 有手写 SSE —— 同一段
+# 代码在 i5-4210U 上只测出 0.8ms,差了 200 倍。这才是「电脑上 162fps、手机上
+# 3.5fps」的真正原因(和 convert() 无关:源/目标格式本来就一致)。
+#
+# 等价替代,逐像素结果完全一致:
+#   1) 纯拷贝「已压暗地图」(world.darkened_map)     0.4~0.8ms
+#   2) 亮区按水平条带切出来,set_clip 后用纯拷贝把正常地图覆盖回去   ~1.6ms
+# 全部走 memcpy,实测 166ms -> 1.6ms。
+#
+# 夜战不走这条路:夜战亮区是带颜色的(NVG 绿 / 手电暖白 / 环境微光),
+# 而"覆盖回正常地图"只能给出本色,会改变观感,所以夜战保持原实现。
+FOG_STRIP = 4                # 条带高度(px):越小越贴合多边形边界,4~6 肉眼已看不出锯齿
+
+_fog_spans = None            # 最近一次算出的 (矩形列表, 每带区间表)
+_fog_spans_key = None
+
+
+def _build_fog_spans(polys, camx, camy):
+    """视野多边形(世界坐标) -> 屏幕条带。
+
+    按边建索引、每条边只投放到它跨越的条带上,避免 条带数×边数 的双重循环。
+    返回 (rects, bands):rects 直接喂 set_clip;bands 给 is_lit() 做点查询。
+    """
+    nbands = (H + FOG_STRIP - 1) // FOG_STRIP
+    buckets = [None] * nbands
+    for pi, poly in enumerate(polys):
+        n = len(poly)
+        if n < 3:
+            continue
+        wx, wy = poly[-1]
+        ex1, ey1 = wx - camx, wy - camy
+        for i in range(n):
+            wx, wy = poly[i]
+            ex2, ey2 = wx - camx, wy - camy
+            if ey1 != ey2:
+                if ey1 < ey2:
+                    x1, y1, x2, y2 = ex1, ey1, ex2, ey2
+                else:
+                    x1, y1, x2, y2 = ex2, ey2, ex1, ey1
+                inv = (x2 - x1) / (y2 - y1)
+                # 这条边只投放到「采样线 ymid 真的落在它 y 范围内」的带。
+                # 原来写的是 int(y1//S)..int(y2//S):一条 y=100..120 的边会被
+                # 算进第 15 带(y=120..128)——它根本够不到那里,再按 ymid=124
+                # 外推求交,交点全是错的。表现就是某几行亮区断裂 ——
+                # 屏幕上横贯一条黑杠(玩家附近最容易出现)。
+                # 半开区间 [y1, y2):采样线正好穿过顶点时,只有「从顶点往下
+                # 开始」的那条边算数。否则同一个顶点会被两条相邻边各算一次,
+                # even-odd 配对随即错位 —— 表现是那一行亮区成片缺失(黑横杠),
+                # 而且会跟着玩家一起移动。
+                half = FOG_STRIP * 0.5
+                b0 = int(math.ceil((y1 - half) / FOG_STRIP))
+                b1 = int(math.ceil((y2 - half) / FOG_STRIP)) - 1
+                if b0 < 0:
+                    b0 = 0
+                if b1 > nbands - 1:
+                    b1 = nbands - 1
+                if b0 <= b1:
+                    for b in range(b0, b1 + 1):
+                        lst = buckets[b]
+                        if lst is None:
+                            lst = buckets[b] = []
+                        lst.append((x1, y1, inv, pi))
+            ex1, ey1 = ex2, ey2
+
+    rects = []
+    bands = {}
+    for b in range(nbands):
+        lst = buckets[b]
+        if not lst:
+            continue
+        ymid = b * FOG_STRIP + FOG_STRIP * 0.5
+        y = b * FOG_STRIP
+        h = FOG_STRIP if y + FOG_STRIP <= H else H - y
+        if h <= 0:
+            continue
+        # 双人合作:两位玩家的视野是**并集**,不是异或。
+        # 交点必须先按「各自的多边形」分别配对,再把各自算出的区间合并;
+        # 如果像原来那样把所有多边形产生的交点混在一起排序配对,等价于
+        # even-odd 填充 —— 两个多边形重叠的那一片会被判成外部。
+        # 表现:双人时两人视野重叠处整片变黑,两人贴在一起时几乎全黑
+        # (实测出生点重叠区占亮区的 94%),而单人时完全正常。
+        per_poly = {}
+        for (x1, y1, inv, pi) in lst:
+            per_poly.setdefault(pi, []).append(x1 + inv * (ymid - y1))
+        ivs = []
+        for xs in per_poly.values():
+            xs.sort()
+            m = len(xs)
+            if m < 2:
+                continue
+            for i in range(0, m - 1, 2):
+                ivs.append((xs[i], xs[i + 1]))
+        if not ivs:
+            continue
+        ivs.sort()
+        merged = []
+        for a0, a1 in ivs:
+            if merged and a0 <= merged[-1][1]:
+                if a1 > merged[-1][1]:
+                    merged[-1][1] = a1
+            else:
+                merged.append([a0, a1])
+        keep = []
+        for a0, a1 in merged:
+            ia = int(a0)
+            ib = int(a1) + 1
+            if ia < 0:
+                ia = 0
+            if ib > W:
+                ib = W
+            if ib - ia < 1:
+                continue
+            rects.append((ia, y, ib - ia, h))
+            keep.append((ia, ib))
+        if keep:
+            bands[b] = keep
+    return rects, bands
+
+
+def fog_spans(raid, camx, camy):
+    """取/建当前亮区条带(按 fog_version + 相机位置缓存)。
+
+    玩家站住不动时 fog_version 不变、相机也不动 -> 直接命中,零计算。
+    移动时每帧重算一次(纯 Python 扫描线,和多边形那 140 条射线比是小头)。
+    """
+    global _fog_spans, _fog_spans_key
+    key = (raid.fog_version, int(camx), int(camy))
+    if _fog_spans_key == key:
+        return _fog_spans
+    polys = getattr(raid, "fog_polys", None) or []
+    if not polys:
+        one = getattr(raid, "fog_polygon", None)
+        polys = [one] if one else []
+    _fog_spans = _build_fog_spans(polys, camx, camy)
+    _fog_spans_key = key
+    return _fog_spans
+
+
+def is_lit(sx, sy):
+    """屏幕坐标点是否落在亮区(fog_spans 之后调用)。
+
+    给视野外的小物件做颜色调暗用 —— 纯整数乘法,不碰逐像素混合,
+    这样"地图压暗、物件也压暗"的观感和原来保持一致。
+    """
+    if not _fog_spans or not _fog_spans[1]:
+        return True
+    b = int(sy) // FOG_STRIP
+    if b < 0:
+        return False
+    ivs = _fog_spans[1].get(b)
+    if not ivs:
+        return False
+    x = int(sx)
+    for x0, x1 in ivs:
+        if x0 <= x <= x1:
+            return True
+    return False
+
+
+def _dim(raid, sx, sy, col):
+    """视野外的物件颜色按迷雾系数调暗(定点整数乘法,零额外开销)。
+
+    只在快速迷雾生效时用:那条路没有整屏 MULT 兜底,物件得自己暗下去,
+    否则会变成"暗地图上浮着一堆全亮的尸体/子弹"。
+    夜战/降级走原实现时整屏 MULT 已经把它们压暗了,这里原样返回。
+    """
+    if not _fog_fast_active or is_lit(sx, sy):
+        return col
+    return (_FOG_K[0] * col[0] >> 8,
+            _FOG_K[1] * col[1] >> 8,
+            _FOG_K[2] * col[2] >> 8)
 
 
 # 撤离区呼吸边框:每帧给每个撤离点新建 Surface + 重画圆角框太浪费。
@@ -78,7 +294,7 @@ def _extract_border(size, rgb, alpha):
     step = alpha // _EXTRACT_STEP
     ent = _extract_cache.get(size)
     if ent is None:
-        ent = [-1, pygame.Surface(size, pygame.SRCALPHA)]
+        ent = [-1, to_display(pygame.Surface(size, pygame.SRCALPHA), True)]
         _extract_cache[size] = ent
     if ent[0] != step:
         s = ent[1]
@@ -92,12 +308,27 @@ def _extract_border(size, rgb, alpha):
 _particle_cache = {}
 
 
+def as_color(c, default=None):
+    """把「可能来自联机补丁」的颜色统一成 pygame 能吃的三元组。
+
+    局域网联机时颜色是随补丁同步过来的,历史上有过路径引用失效(invalid color)
+    让客户端 Font.render 抛 TypeError 直接闪退的事故;渲染这一层统一兜住:
+    取值失败就退回 COL["text"](或调用方给的默认色)。
+    """
+    try:
+        r, g, b = c[0], c[1], c[2]
+        return (int(r), int(g), int(b))
+    except (TypeError, ValueError, IndexError, KeyError):
+        return default or COL["text"]
+
+
 def _particle_sprite(color, radius, alpha):
+    color = as_color(color, (200, 200, 200))
     key = (color, radius, alpha // 16)
     s = _particle_cache.get(key)
     if s is None:
         d = radius * 2 + 2
-        s = pygame.Surface((d, d), pygame.SRCALPHA)
+        s = to_display(pygame.Surface((d, d), pygame.SRCALPHA), True)
         pygame.draw.circle(s, (*color, key[2] * 16), (radius + 1, radius + 1), radius)
         if len(_particle_cache) > 256:
             _particle_cache.clear()
@@ -111,33 +342,60 @@ _hudbg_cache = {}
 
 
 def _hud_bg(w, h, rgba):
+    """HUD 面板底:纯色 + 统一透明度。
+
+    用「不透明表面 + 表面级 set_alpha」而不是 SRCALPHA 逐像素 alpha ——
+    两者对"纯色统一 alpha"的混合结果逐像素完全一致(c*a + dst*(1-a)),
+    但真机实测 200x32 面板 11 次:逐像素 alpha 20.0ms / set_alpha 0.9ms,
+    快 22 倍。原因是 SDL 对表面级 alpha 有专门的混合器,逐像素 alpha 只能
+    走 ARM 上的通用逐像素 C 循环。
+    """
     key = (int(w), int(h))
     s = _hudbg_cache.get(key)
     if s is None:
         if len(_hudbg_cache) > 96:
             _hudbg_cache.clear()
-        s = pygame.Surface(key, pygame.SRCALPHA)
+        s = pygame.Surface(key)
         _hudbg_cache[key] = s
-    s.fill(rgba)
+    a = rgba[3] if len(rgba) > 3 else 255
+    s.set_alpha(None if a >= 255 else a)
+    s.fill(rgba[:3])
     return s
 
 
 # ---------- 布局(与 raid.py 交互命中区) ----------
 def inv_layout(bag_w=6, bag_h=4, safe_w=2, safe_h=1):
-    panel = pygame.Rect(W // 2 - 420, 120, 840, 470)
+    """局内背包面板:装备位和藏身处「出战配置」一致。
+
+    以前这里只有一个「武器」槽(局内看着像"只有一把主武器"),现在按
+    LOADOUT_SLOTS 画 4 个武器位(主武器 1/2、副武器、近战)+ 护甲/头盔/背包,
+    点武器位 = 切枪(局内不能改装配,只能切)。
+    """
+    panel = pygame.Rect(W // 2 - 420, 108, 840, 500)
     cell = 44
-    bag = (pygame.Rect(panel.right - 40 - bag_w * cell, panel.y + 80,
+    bag = (pygame.Rect(panel.right - 40 - bag_w * cell, panel.y + 86,
                        bag_w * cell, bag_h * cell), cell)
-    weapon = pygame.Rect(panel.x + 30, panel.y + 80, 300, 88)
-    armor = pygame.Rect(panel.x + 30, panel.y + 180, 300, 88)
-    helmet = pygame.Rect(panel.x + 30, panel.y + 280, 300, 58)
+    top = panel.y + 46
+    gap = 8
+    col_w = 146
+    half = (col_w * 2 + gap)
+    main1 = pygame.Rect(panel.x + 30, top, col_w, 62)
+    main2 = pygame.Rect(panel.x + 30 + col_w + gap, top, col_w, 62)
+    side = pygame.Rect(panel.x + 30, top + 70, col_w, 62)
+    melee = pygame.Rect(panel.x + 30 + col_w + gap, top + 70, col_w, 62)
+    armor = pygame.Rect(panel.x + 30, top + 140, half, 58)
+    helmet = pygame.Rect(panel.x + 30, top + 206, half, 52)
+    pack = pygame.Rect(panel.x + 30, top + 266, half, 52)
     close = pygame.Rect(panel.right - 50, panel.y + 16, 34, 34)
     merge = pygame.Rect(panel.x + 30, panel.bottom - 104, 168, 38)
     drop = pygame.Rect(panel.x + 208, panel.bottom - 104, 132, 38)
     safe_mode = pygame.Rect(panel.x + 360, panel.bottom - 104, 150, 38)
-    safe = (pygame.Rect(panel.x + 520, panel.bottom - 110, safe_w * 28,
+    safe = (pygame.Rect(panel.x + 566, panel.bottom - 110, safe_w * 28,
                         safe_h * 28), 28)
-    return dict(panel=panel, bag=bag, weapon=weapon, armor=armor, helmet=helmet,
+    return dict(panel=panel, bag=bag,
+                main1=main1, main2=main2, side=side, melee=melee,
+                weapon=main1,          # 兼容旧调用(也就等于主武器 1)
+                armor=armor, helmet=helmet, pack=pack,
                 close=close, merge=merge, drop=drop,
                 safe=safe, safe_mode=safe_mode)
 
@@ -191,13 +449,40 @@ def grid_hit_px(container, rect_cell, pos):
 
 # ---------- 世界绘制 ----------
 def draw_raid(raid, screen):
+    global _fast_fog_ok, _fog_fast_active
     p = raid.player
     ticks = pygame.time.get_ticks()
     shake = raid.shake
     ox = -raid.cam[0] + (math.sin(ticks * 91.0) * shake if shake > 0.2 else 0)
     oy = -raid.cam[1] + (math.cos(ticks * 113.0) * shake if shake > 0.2 else 0)
 
-    screen.blit(raid.map_surf, (ox, oy))
+    # 战争迷雾/夜战光照的合成方式,决定下面怎么画地图:
+    #   白天迷雾 -> 快速路径:纯拷贝暗版地图,再按条带把亮区的正常地图覆盖回去
+    #   夜战     -> 原实现:亮区带颜色(NVG 绿/手电暖白),覆盖回去会变色,所以不动
+    # TARKOV2D_SLOW_FOG=1 可以整体退回原实现(排查画面差异时用)。
+    dark_mode = getattr(raid, "dark", False)
+    fast_fog = _FAST_FOG and not dark_mode and _fast_fog_ok
+    dark_surf = None
+    if fast_fog:
+        try:
+            from world import darkened_map
+            dark_surf = darkened_map(raid.map.map_key, _DARK_TINT)
+        except Exception:
+            dark_surf = None
+        if dark_surf is None:
+            _fast_fog_ok = False        # 只降级一次,之后不再重试
+            fast_fog = False
+    if fast_fog:
+        # 条带用 cam 计算(和原来打洞用的 cx,cy 一致,抖动时不额外偏移)
+        spans = fog_spans(raid, raid.cam[0], raid.cam[1])[0]
+        screen.blit(dark_surf, (ox, oy))
+        for r in spans:
+            screen.set_clip(r)
+            screen.blit(raid.map_surf, (ox, oy))
+        screen.set_clip(None)
+    else:
+        screen.blit(raid.map_surf, (ox, oy))
+    _fog_fast_active = fast_fog
 
     # 撤离区呼吸边框
     pulse = (math.sin(ticks / 400.0) + 1) / 2
@@ -206,22 +491,30 @@ def draw_raid(raid, screen):
         screen.blit(s, (r.x + ox, r.y + oy))
 
     # 动态战利品(普通尸体 / 头目尸体 / 地面堆)
+    # 视野外的小物件按迷雾系数调暗(快速迷雾没有整屏 MULT 兜底,见 _dim)
     for lc in raid.containers:
         if lc.kind == "corpse":
             x, y = lc.rect.centerx + ox, lc.rect.centery + oy
-            pygame.draw.ellipse(screen, (120, 40, 40), (x - 14, y - 8, 28, 16))
-            pygame.draw.line(screen, (60, 24, 24), (x - 8, y - 4), (x + 8, y + 4), 3)
+            pygame.draw.ellipse(screen, _dim(raid, x, y, (120, 40, 40)),
+                                (x - 14, y - 8, 28, 16))
+            pygame.draw.line(screen, _dim(raid, x, y, (60, 24, 24)),
+                             (x - 8, y - 4), (x + 8, y + 4), 3)
         elif lc.kind == "boss_corpse":
             # 头目尸体:更大 + 金边,保证看得见
             x, y = lc.rect.centerx + ox, lc.rect.centery + oy
-            pygame.draw.ellipse(screen, (128, 44, 44), (x - 20, y - 12, 40, 24))
-            pygame.draw.ellipse(screen, COL["accent"], (x - 20, y - 12, 40, 24), 2)
-            pygame.draw.line(screen, (70, 26, 26), (x - 12, y - 6), (x + 12, y + 6), 4)
-            pygame.draw.line(screen, (70, 26, 26), (x - 12, y + 6), (x + 12, y - 6), 4)
+            pygame.draw.ellipse(screen, _dim(raid, x, y, (128, 44, 44)),
+                                (x - 20, y - 12, 40, 24))
+            pygame.draw.ellipse(screen, _dim(raid, x, y, COL["accent"]),
+                                (x - 20, y - 12, 40, 24), 2)
+            pygame.draw.line(screen, _dim(raid, x, y, (70, 26, 26)),
+                             (x - 12, y - 6), (x + 12, y + 6), 4)
+            pygame.draw.line(screen, _dim(raid, x, y, (70, 26, 26)),
+                             (x - 12, y + 6), (x + 12, y - 6), 4)
         elif lc.kind == "ground":
             x, y = lc.rect.centerx + ox, lc.rect.centery + oy
-            pygame.draw.circle(screen, (110, 106, 96), (x, y), 9)
-            pygame.draw.circle(screen, (140, 136, 126), (x - 4, y + 3), 6)
+            pygame.draw.circle(screen, _dim(raid, x, y, (110, 106, 96)), (x, y), 9)
+            pygame.draw.circle(screen, _dim(raid, x, y, (140, 136, 126)),
+                               (x - 4, y + 3), 6)
 
     # 子弹(火箭弹画得更大更长)
     for b in raid.bullets:
@@ -229,14 +522,17 @@ def draw_raid(raid, screen):
         if b.get("rpg"):
             nx = bx - b["dx"] * 0.05
             ny = by - b["dy"] * 0.05
-            pygame.draw.line(screen, (255, 170, 70), (nx, ny), (bx, by), 5)
-            pygame.draw.circle(screen, (255, 220, 140), (int(bx), int(by)), 5)
-            pygame.draw.circle(screen, (255, 140, 60), (int(bx), int(by)), 5, 2)
+            pygame.draw.line(screen, _dim(raid, bx, by, (255, 170, 70)),
+                             (nx, ny), (bx, by), 5)
+            pygame.draw.circle(screen, _dim(raid, bx, by, (255, 220, 140)),
+                               (int(bx), int(by)), 5)
+            pygame.draw.circle(screen, _dim(raid, bx, by, (255, 140, 60)),
+                               (int(bx), int(by)), 5, 2)
             continue
         nx = bx - b["dx"] * 0.012
         ny = by - b["dy"] * 0.012
         col = (255, 230, 120) if b["owner"] == "player" else (255, 150, 90)
-        pygame.draw.line(screen, col, (nx, ny), (bx, by), 2)
+        pygame.draw.line(screen, _dim(raid, bx, by, col), (nx, ny), (bx, by), 2)
 
     # 我方弹药库(突袭模式:局内补弹,免得子弹打光)
     for sp in getattr(raid, "supplies", []):
@@ -406,7 +702,8 @@ def draw_raid(raid, screen):
         # 飘字:信任变化 / 选择结果
         for f in getattr(raid, "floaters", []):
             a = max(0.0, 1.0 - f["t"] / f["dur"])
-            txt = get_font(16, bold=True).render(f["text"], True, f["col"])
+            txt = get_font(16, bold=True).render(f["text"], True,
+                                            as_color(f.get("col")))
             bg = _hud_bg(txt.get_width() + 14, 24, (10, 12, 14, int(190 * a)))
             fx, fy = f["x"] + ox, f["y"] + oy - int(f["t"] * 22)
             screen.blit(bg, (fx - bg.get_width() // 2, fy))
@@ -441,18 +738,26 @@ def draw_raid(raid, screen):
         t = get_font(14, bold=True).render(f"{label} {max(0.0, st['t']):.1f}s", True, col)
         screen.blit(t, t.get_rect(center=(sx, sy - rad - 12)))
 
+    # 侦察无人机:机身 + 摄像头视野圈 + 到操作者的信号线
+    _draw_drone(raid, screen, ox, oy)
+
     # 拾荒者(仅玩家视线内可见;无人机侦察期间全图标记)。
     # 可见判定读 raid.fog_vis 缓存(不再每帧每敌人一条射线),先裁掉屏外的。
     recon = getattr(raid, "recon_t", 0.0) > 0
+    marks = getattr(raid, "drone_marks", None) or {}
     vis = raid.fog_vis
     for s in raid.scavs:
-        if not recon and id(s) not in vis:
+        marked = recon or (id(s) in marks)
+        if not marked and id(s) not in vis:
             continue
         x, y = s.x + ox, s.y + oy
         if x < -50 or x > W + 50 or y < -50 or y > H + 50:
             continue
-        if recon:
+        if marked:
             pygame.draw.circle(screen, (90, 200, 220), (int(x), int(y)), s.r + 5, 1)
+            if id(s) in marks:
+                # 无人机标记:加一圈虚线感的小方块 + 距离(方便报点)
+                _drone_mark(screen, x, y, s.r + 12)
         body = COL["scav"] if s.hit_flash <= 0 else (255, 200, 180)
         pygame.draw.circle(screen, body, (int(x), int(y)), s.r)
         pygame.draw.circle(screen, (30, 30, 34), (int(x), int(y)), s.r, 2)
@@ -500,6 +805,8 @@ def draw_raid(raid, screen):
         batch = []
         add = batch.append
         for pt in raid.particles:
+            if pt.get("color") is None:      # 防御:半截镜像的粒子直接不画
+                continue
             a = pt["ttl"] / pt["max_ttl"]
             # 透明度按 16 归档缓存,255*a < 16 时精灵本身就是全透明的:
             # 直接跳过,画面一模一样,少一次合成。
@@ -510,52 +817,65 @@ def draw_raid(raid, screen):
             sy = pt["y"] + oy - rad - 1
             if sx < -8.0 or sy < -8.0 or sx > W + 8.0 or sy > H + 8.0:
                 continue
-            add((_particle_sprite(pt["color"], rad, int(255 * a)), (sx, sy)))
+            add((_particle_sprite(pt["color"], rad, int(255 * a)), (sx, sy))
+                if not _PARTICLE_ADD else
+                (_particle_sprite(pt["color"], rad, int(255 * a)), (sx, sy),
+                 None, pygame.BLEND_RGB_ADD))
         if batch:
             screen.blits(batch, 0)
 
     # 玩家(双人合作时 P2 也画出来:自己的颜色 + 名字牌)
+    # 局域网联机时两台电脑各看各的,名牌写「你 / 队友」比 P1/P2 清楚
     px, py = p.x + ox, p.y + oy
     coop = getattr(raid, "coop", False)
+    lan = getattr(raid, "lan", None)
     _draw_actor(screen, raid, p, px, py, COL["player"],
-                "P1" if coop else None)
+                "你" if lan else ("P1" if coop else None))
     p2 = getattr(raid, "player2", None)
     if p2 is not None:
-        _draw_actor(screen, raid, p2, p2.x + ox, p2.y + oy, COOP["color"], "P2")
+        _draw_actor(screen, raid, p2, p2.x + ox, p2.y + oy, COOP["color"],
+                    "队友" if lan else "P2")
 
-    # 战争迷雾 / 夜战光照(乘性压暗,见文件头的 _mask_surface 说明)。
-    # 缓存表面只在 fog_version 变化(移动/转头)时"填充 + 打洞",
-    # 其它帧只做一次 MULT blit —— 亮区必须保持常亮,不能每帧被填掉。
-    dark_mode = getattr(raid, "dark", False)
-    layer = _mask_surface("night" if dark_mode else "fog", (W, H))
-    if raid._fog_drawn_ver != raid.fog_version:
-        raid._fog_drawn_ver = raid.fog_version
-        _darken_fill(layer, (*NIGHT_DARK_RGB, 255) if dark_mode else COL["fog"])
-        cx, cy = raid.cam[0], raid.cam[1]
-        if dark_mode:
-            for shape in getattr(raid, "light_shapes", ()):
-                if shape[0] == "circle":
-                    _, (sx, sy, r, tint) = shape
-                    pygame.draw.circle(layer, tint,
-                                       (int(sx - cx), int(sy - cy)), int(r))
-                else:
-                    pts = [(x - cx, y - cy) for x, y in shape[1]]
+    # 战争迷雾 / 夜战光照。
+    # 白天走快速路径时,压暗已经在开头用「暗版地图 + 亮区条带」做完了,
+    # 这里什么都不用做 —— 这一条原来是整帧最贵的操作(真机 166ms)。
+    if not fast_fog:
+        # 原实现:缓存表面只在 fog_version 变化(移动/转头)时"填充 + 打洞",
+        # 其它帧只做一次 MULT blit —— 亮区必须保持常亮,不能每帧被填掉。
+        layer = _mask_surface("night" if dark_mode else "fog", (W, H))
+        if raid._fog_drawn_ver != raid.fog_version:
+            raid._fog_drawn_ver = raid.fog_version
+            _darken_fill(layer, (*NIGHT_DARK_RGB, 255) if dark_mode else COL["fog"])
+            cx, cy = raid.cam[0], raid.cam[1]
+            if dark_mode:
+                for shape in getattr(raid, "light_shapes", ()):
+                    if shape[0] == "circle":
+                        _, (sx, sy, r, tint) = shape
+                        pygame.draw.circle(layer, tint,
+                                           (int(sx - cx), int(sy - cy)), int(r))
+                    else:
+                        pts = [(x - cx, y - cy) for x, y in shape[1]]
+                        if len(pts) >= 3:
+                            pygame.draw.polygon(layer, NIGHT_BEAM_RGB, pts)
+            else:
+                # 双人合作:两位玩家的视野多边形都打洞(屏幕上只有一张画面)
+                polys = getattr(raid, "fog_polys", None) or [raid.fog_polygon]
+                for poly in polys:
+                    pts = [(x - cx, y - cy) for x, y in (poly or ())]
                     if len(pts) >= 3:
-                        pygame.draw.polygon(layer, NIGHT_BEAM_RGB, pts)
-        else:
-            # 双人合作:两位玩家的视野多边形都打洞(屏幕上只有一张画面)
-            polys = getattr(raid, "fog_polys", None) or [raid.fog_polygon]
-            for poly in polys:
-                pts = [(x - cx, y - cy) for x, y in (poly or ())]
-                if len(pts) >= 3:
-                    pygame.draw.polygon(layer, (255, 255, 255), pts)
-    screen.blit(layer, (0, 0), special_flags=pygame.BLEND_RGB_MULT)
+                        pygame.draw.polygon(layer, (255, 255, 255), pts)
+        screen.blit(layer, (0, 0), special_flags=pygame.BLEND_RGB_MULT)
 
-    # 受击红屏(保持原来的红色蒙版观感:
-    # 试过改成加色闪光只快 1.3ms,不值得动画面)
+    # 受击红屏。原来的逐像素 alpha 整屏叠加实测 159ms —— 也就是"中弹时最卡",
+    # 恰恰是最不该掉帧的时刻。改成不透明 ADD 后 16ms(10 倍)。
     if p.hurt_flash > 0:
-        vs = _overlay("hurt", (W, H), (180, 20, 20, int(90 * p.hurt_flash)))
-        screen.blit(vs, (0, 0))
+        if _HURT_ADD:
+            k = p.hurt_flash
+            screen.blit(_hurt_overlay((int(64 * k), int(7 * k), int(7 * k))),
+                        (0, 0), special_flags=pygame.BLEND_RGB_ADD)
+        else:
+            vs = _overlay("hurt", (W, H), (180, 20, 20, int(90 * p.hurt_flash)))
+            screen.blit(vs, (0, 0))
 
     # 撤离点方向指示
     for name, r in raid.map.extracts:
@@ -671,6 +991,97 @@ def draw_raid(raid, screen):
         _draw_dialogue(raid, screen)
     if raid.over:
         _draw_result(raid, screen)
+
+
+def _drone_mark(screen, x, y, r):
+    """无人机标出来的守军:四角小括号(和支援侦察的整圈区分开)。"""
+    col = (120, 235, 220)
+    for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
+        px = x + dx * r
+        py = y + dy * r
+        pygame.draw.line(screen, col, (px, py), (px - dx * 5, py), 2)
+        pygame.draw.line(screen, col, (px, py), (px, py - dy * 5), 2)
+
+
+def _draw_drone(raid, screen, ox, oy):
+    """画无人机本体:摄像头视野圈 + 机身 + 到操作者的信号线。"""
+    d = getattr(raid, "drone", None)
+    if d is None:
+        return
+    from settings import drone_cfg
+    kam = d.get("kind") == "kamikaze"
+    cfg = drone_cfg(d.get("kind", "recon"))
+    ring = (232, 150, 88) if kam else (80, 170, 165)
+    ring2 = (170, 104, 58) if kam else (60, 130, 128)
+    x, y = d["x"] + ox, d["y"] + oy
+    # 视野圈(虚线感:内外两个细圆环)
+    pygame.draw.circle(screen, ring, (int(x), int(y)),
+                       int(cfg["view_radius"]), 1)
+    pygame.draw.circle(screen, ring2, (int(x), int(y)),
+                       int(cfg["view_radius"] * 0.55), 1)
+    # 信号线:连到操作者(断了就知道自己飞太远了)
+    who = raid.drone_ctl()
+    ax, ay = who.x + ox, who.y + oy
+    pygame.draw.line(screen, (70, 150, 145), (x, y), (ax, ay), 1)
+    # 机身:十字桨 + 中央球
+    t = pygame.time.get_ticks() / 90.0
+    blade = 15
+    for i in range(4):
+        a = t + i * math.pi / 2
+        rxx, ryy = math.cos(a) * blade, math.sin(a) * blade
+        pygame.draw.line(screen, (210, 240, 235), (x - rxx, y - ryy),
+                         (x + rxx, y + ryy), 2)
+    pygame.draw.circle(screen, (40, 52, 54), (int(x), int(y)), 8)
+    pygame.draw.circle(screen, (236, 160, 96) if kam else (130, 225, 205),
+                       (int(x), int(y)), 8, 2)
+    # 摄像头朝哪边(掌镜时看得到朝向)
+    pygame.draw.line(screen, (255, 220, 120), (x, y),
+                     (x + math.cos(d["ang"]) * 14, y + math.sin(d["ang"]) * 14), 2)
+    if d.get("hold"):
+        ht = get_font(12, bold=True).render("贴墙", True, (255, 190, 120))
+        screen.blit(ht, ht.get_rect(center=(x, y - 22)))
+    if kam:
+        kt = get_font(12, bold=True).render("自杀式", True, (236, 150, 88))
+        screen.blit(kt, kt.get_rect(center=(x, y + 24)))
+
+
+def _draw_drone_panel(raid, screen):
+    """无人机 HUD:掌镜提示 + 电量 + 标记数。只在有无人机时出现。"""
+    d = getattr(raid, "drone", None)
+    if d is None or raid.over:
+        return
+    from settings import drone_cfg
+    kam = d.get("kind") == "kamikaze"
+    cfg = drone_cfg(d.get("kind", "recon"))
+    ratio = max(0.0, min(1.0, d["battery"] / max(1e-6, cfg["battery"])))
+    pilot = raid.piloting()
+    n = len(getattr(raid, "drone_marks", ()) or ())
+    w, h = 300, 62 if pilot else 50
+    x, y = 20, H - 150 - h
+    screen.blit(_hud_bg(w, h, (10, 12, 14, 180)), (x, y))
+    if kam:
+        head = "自杀无人机掌镜中 · ←/→ 飞" if pilot else "自杀无人机在飞(F 掌镜)"
+        hcol = (236, 150, 88)
+    else:
+        head = "无人机掌镜中 · ←/→ 左右飞" if pilot else "无人机在飞(F 掌镜)"
+        hcol = (130, 225, 205)
+    t = get_font(15, bold=True).render(head, True, hcol)
+    screen.blit(t, (x + 10, y + 6))
+    # 电量条
+    bx, by, bw, bh = x + 10, y + 30, w - 20, 10
+    col = (120, 230, 170) if ratio > 0.3 else (240, 150, 90)
+    pygame.draw.rect(screen, (30, 36, 38), (bx, by, bw, bh), border_radius=3)
+    pygame.draw.rect(screen, col, (bx, by, bw * ratio, bh), border_radius=3)
+    lab = (f"电量 {int(ratio * 100)}%   自爆伤害 {int(cfg['dmg'])} · 半径 {int(cfg['blast_radius'])}"
+           if kam else f"电量 {int(ratio * 100)}%   标记 {n}")
+    t = get_font(12, bold=True).render(lab, True, COL["text_dim"])
+    screen.blit(t, (bx, by + bh + 2))
+    if pilot:
+        hint = ("←/→ 飞(↑/↓ 也可)· 左键俯冲自爆(一次性)" if kam else
+                "←/→ 左右飞(↑/↓ 也可)· 左键收回")
+        t = get_font(12).render(hint, True,
+                                (236, 170, 110) if kam else COL["text_dim"])
+        screen.blit(t, (x + 10, y + h - 16))
 
 
 def _draw_actor(screen, raid, p, sx, sy, col, label=None):
@@ -859,8 +1270,13 @@ def _draw_hud(raid, screen):
     if shown.weapon:
         d = shown.weapon.def_
         col = COL["accent"]
-        big = get_font(30, bold=True).render(
-            f"{shown.weapon.state.get('mag', 0)} / {shown.reserve_count()}", True, col)
+        if d.get("melee"):
+            ammo_txt = "近战"          # 刀没有弹药,别显示 0/0
+        elif d.get("drone"):
+            ammo_txt = "侦察"          # 无人机同理:没有弹药
+        else:
+            ammo_txt = f"{shown.weapon.state.get('mag', 0)} / {shown.reserve_count()}"
+        big = get_font(30, bold=True).render(ammo_txt, True, col)
         screen.blit(big, (W - big.get_width() - 26, H - 64))
         # 射击模式(按 G / 手机「模式」按钮切换):全自动武器才有得切
         mode = weapon_fire_mode(shown.weapon)
@@ -888,6 +1304,10 @@ def _draw_hud(raid, screen):
             bt = get_font(15, bold=True).render(
                 txt, True, COL["good"] if braced else COL["text_dim"])
             screen.blit(bt, (W - bt.get_width() - 26, H - 142))
+
+    # 装备位快捷条(2 主武器 + 副武器 + 近战):按键 1-4 或点方块切枪
+    if not watcher and not raid.over:
+        draw_slot_strip(screen, raid, p)
 
     # 计时/击杀/难度
     tl = max(0, raid.time_left)
@@ -1097,11 +1517,18 @@ def _draw_hud(raid, screen):
             screen.blit(bg, (W // 2 - bg.get_width() // 2, H - 120))
             screen.blit(t, (W // 2 - t.get_width() // 2, H - 105))
 
+    # 非常规武器:侦察无人机面板(有在飞的无人机时才出现)
+    _draw_drone_panel(raid, screen)
+
     # 通知
     y = 56
-    for text, ttl, maxttl, color in raid.toasts:
+    for row in raid.toasts:
+        if not row or len(row) < 4:
+            continue
+        text, ttl, maxttl, color = row
         a = min(1.0, ttl / 0.4)
-        t = get_font(15, bold=True).render(text, True, color)
+        color = as_color(color)
+        t = get_font(15, bold=True).render(str(text), True, color)
         surf = _hud_bg(t.get_width() + 14, 24, (12, 13, 16, int(180 * a)))
         screen.blit(surf, (W // 2 - surf.get_width() // 2, y))
         screen.blit(t, (W // 2 - t.get_width() // 2, y + 4))
@@ -1115,7 +1542,7 @@ def _ring_surface(rad):
     """C4 爆区圈的复用表面(每帧新建太贵)。"""
     surf = _ring_cache.get(rad)
     if surf is None:
-        surf = pygame.Surface((rad * 2, rad * 2), pygame.SRCALPHA)
+        surf = to_display(pygame.Surface((rad * 2, rad * 2), pygame.SRCALPHA), True)
         _ring_cache[rad] = surf
     surf.fill((0, 0, 0, 0))
     return surf
@@ -1221,6 +1648,54 @@ def _close_button(surface, rect):
     return rect
 
 
+# ---------- 装备位快捷条(2 主武器 + 副武器 + 近战) ----------
+# 画在右下角武器名上方;鼠标点这些方块也能切枪(手机)/按键 1-4 同效。
+SLOT_BTN_W, SLOT_BTN_H, SLOT_BTN_GAP = 42, 28, 6
+
+
+def slot_strip_layout(count=None):
+    """装备位方块(从左到右,顺序同 LOADOUT_SLOTS)。"""
+    from settings import LOADOUT_SLOTS
+    n = len(LOADOUT_SLOTS) if count is None else count
+    total = n * SLOT_BTN_W + (n - 1) * SLOT_BTN_GAP
+    x0 = W - total - 26
+    y = H - 200        # 放在武器名/子弹数上面,别和右下角信息挤在一起
+    return [pygame.Rect(x0 + i * (SLOT_BTN_W + SLOT_BTN_GAP), y,
+                        SLOT_BTN_W, SLOT_BTN_H) for i in range(n)]
+
+
+def draw_slot_strip(screen, raid, shown):
+    """右下角:4 个装备位方块(亮框 = 当前拿的那把,点方块或按 1-4 切枪)。"""
+    from settings import LOADOUT_SLOTS, loadout_all
+    cur_slot = getattr(shown, "cur_slot", "main1")
+    weapons = loadout_all(raid.game.save)
+    f = get_font(13, bold=True)
+    for i, rect in enumerate(slot_strip_layout()):
+        slot = LOADOUT_SLOTS[i]
+        it = weapons.get(slot)
+        active = (slot == cur_slot)
+        col = COL["panel_hi"] if it is not None else COL["panel"]
+        pygame.draw.rect(screen, col, rect, border_radius=5)
+        pygame.draw.rect(screen, COL["accent"] if active else COL["border"],
+                         rect, 2 if active else 1, border_radius=5)
+        t = f.render("%d" % (i + 1), True,
+                     COL["accent"] if active else COL["text"])
+        screen.blit(t, (rect.x + 4, rect.y + 1))
+        if it is None:
+            s = get_font(10).render("空", True, COL["text_dim"])
+            screen.blit(s, (rect.x + 17, rect.y + 9))
+        else:
+            # 有东西就画个缩略图标(无人机/刀这些没有弹药,光看名字容易混)
+            try:
+                import uikit as _uk
+                _uk.draw_item_icon(screen, it, rect.x + 15, rect.y + 3, cell=10)
+            except Exception:
+                s = get_font(10).render(it.name[:2], True,
+                                        COL["text"] if active else COL["text_dim"])
+                screen.blit(s, (rect.x + 17, rect.y + 9))
+    return slot_strip_layout()
+
+
 # ---------- 背包界面 ----------
 def _draw_inventory(raid, screen):
     p = raid.player
@@ -1229,12 +1704,31 @@ def _draw_inventory(raid, screen):
     _close_button(screen, lay["close"])
     mx, my = pygame.mouse.get_pos()
 
-    uikit.draw_slot(screen, lay["weapon"], p.weapon, "武器",
-                    hover=lay["weapon"].collidepoint(mx, my))
+    # ---- 装备位:和藏身处「出战配置」同一套(4 个武器位 + 护甲/头盔/背包) ----
+    from settings import (LOADOUT_SLOTS, LOADOUT_SLOT_NAMES, loadout_all)
+    sd = raid.game.save
+    weapons = loadout_all(sd)
+    cur_slot = getattr(p, "cur_slot", "main1")
+    for slot in LOADOUT_SLOTS:
+        r = lay[slot]
+        it = weapons.get(slot)
+        active = (slot == cur_slot and it is not None)
+        label = LOADOUT_SLOT_NAMES[slot]
+        if active:
+            label += " · 手持"
+        uikit.draw_slot(screen, r, it,
+                        label if it is not None else label + "(空)",
+                        hover=r.collidepoint(mx, my))
+        if active:
+            # 当前拿在手上的那把描个高亮框,和右下角装备位条一致
+            pygame.draw.rect(screen, COL["accent"], r, 2, border_radius=6)
     uikit.draw_slot(screen, lay["armor"], p.armor, "护甲",
                     hover=lay["armor"].collidepoint(mx, my))
     uikit.draw_slot(screen, lay["helmet"], p.helmet, "头盔",
                     hover=lay["helmet"].collidepoint(mx, my))
+    pack_it = getattr(p, "pack", None) or getattr(sd, "pack", None)
+    uikit.draw_slot(screen, lay["pack"], pack_it, "背包(战局内不可换)",
+                    hover=lay["pack"].collidepoint(mx, my))
     bag_rect, cell = lay["bag"]
     draw_grid(screen, bag_rect.x, bag_rect.y, p.bag, cell,
               f"出战背包 {p.bag.w}×{p.bag.h}")
@@ -1299,12 +1793,18 @@ def _draw_inventory(raid, screen):
     hovered = grid_hit_px(p.bag, lay["bag"], (mx, my))
     if hovered is None:
         hovered = grid_hit_px(p.safe, lay["safe"], (mx, my))
-    if hovered is None and lay["weapon"].collidepoint(mx, my) and p.weapon:
-        draw_tooltip(screen, mx, my, p.weapon)
-    elif hovered is None and lay["armor"].collidepoint(mx, my) and p.armor:
-        draw_tooltip(screen, mx, my, p.armor)
-    elif hovered is None and lay["helmet"].collidepoint(mx, my) and p.helmet:
-        draw_tooltip(screen, mx, my, p.helmet)
+    if hovered is None:
+        for slot in LOADOUT_SLOTS:
+            if lay[slot].collidepoint(mx, my) and weapons.get(slot) is not None:
+                draw_tooltip(screen, mx, my, weapons[slot])
+                break
+        else:
+            if lay["armor"].collidepoint(mx, my) and p.armor:
+                draw_tooltip(screen, mx, my, p.armor)
+            elif lay["helmet"].collidepoint(mx, my) and p.helmet:
+                draw_tooltip(screen, mx, my, p.helmet)
+            elif lay["pack"].collidepoint(mx, my) and pack_it is not None:
+                draw_tooltip(screen, mx, my, pack_it)
     if hovered is not None:
         draw_tooltip(screen, mx, my, hovered.item)
     # 触屏长按信息面板(最上层)
@@ -1313,8 +1813,7 @@ def _draw_inventory(raid, screen):
 
 def _draw_ask_merge(raid, screen):
     """整理弹药确认框。"""
-    dark = pygame.Surface((W, H), pygame.SRCALPHA)
-    dark.fill((0, 0, 0, 120))
+    dark = _overlay("ask_merge_dark", (W, H), (0, 0, 0, 120))
     screen.blit(dark, (0, 0))
     lay = ask_layout()
     uikit.draw_panel(screen, lay["panel"], "整理弹药")
@@ -1421,8 +1920,9 @@ def _draw_loot_window(raid, screen):
 
 # ---------- 暂停 ----------
 def _draw_pause(raid, screen):
-    dark = pygame.Surface((W, H), pygame.SRCALPHA)
-    dark.fill((0, 0, 0, 140))
+    # 暂停菜单每帧都在画:复用缓存表面,别再每帧新建 1280×720 SRCALPHA
+    # (新建 + fill + 逐像素 alpha blit 是这条路径上最贵的一笔)
+    dark = _overlay("pause_dark", (W, H), (0, 0, 0, 140))
     screen.blit(dark, (0, 0))
     lay = pause_layout()
     uikit.draw_panel(screen, lay["panel"], "暂停")
@@ -1437,8 +1937,7 @@ def _draw_pause(raid, screen):
 # ---------- 结算 ----------
 def _draw_result(raid, screen):
     r = raid.result
-    dark = pygame.Surface((W, H), pygame.SRCALPHA)
-    dark.fill((6, 7, 9, 225))
+    dark = _overlay("result_dark", (W, H), (6, 7, 9, 225))
     screen.blit(dark, (0, 0))
     titles = {"extract": ("撤离成功", COL["good"]),
               "death": ("你已阵亡 — 带入装备已丢失", COL["bad"]),

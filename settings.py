@@ -1,9 +1,13 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Tarkov2D 全局配置:常量、物品定义、地图、拾荒者定义。"""
+import os
+
 import pygame
 
+from inventory import Item      # 装备位里的武器要在槽之间搬(inventory 不反向依赖本模块)
+
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.12.4"
+GAME_VERSION = "2.13.0"
 # 更新清单地址(可换成自建服务器 / GitHub raw;留空则只认 EXE 同目录的 version.json)
 UPDATE_MANIFEST_URL = "http://127.0.0.1:8765/version.json"
 UPDATE_TIMEOUT = 3   # 检查 / 下载超时(秒)
@@ -55,6 +59,8 @@ WEAPON_CLASS = {
     "m4a1": "突击步枪",
     "asval": "特种步枪",
     "m700": "狙击步枪",
+    "ak50": "反器材步枪",
+    "knife": "近战武器",
     "m139": "轻机枪",
     "pkp": "轻机枪",
     "rpg": "火箭筒",
@@ -64,7 +70,9 @@ WEAPON_CLASS_COL = {
     "手枪": (196, 176, 120), "冲锋枪": (150, 200, 150), "霰弹枪": (200, 150, 110),
     "突击步枪": (150, 180, 230), "特种步枪": (180, 150, 220),
     "精确射手步枪": (200, 200, 150),
-    "狙击步枪": (230, 190, 120), "轻机枪": (220, 130, 120),
+    "狙击步枪": (230, 190, 120), "反器材步枪": (240, 210, 140),
+    "近战武器": (190, 200, 210),
+    "轻机枪": (220, 130, 120),
     "火箭筒": (230, 110, 90),
 }
 
@@ -104,8 +112,56 @@ COL = {
     "scav": (200, 120, 70),
 }
 
+# ---------- 战争迷雾:压暗系数 ----------
+def fog_darken(rgba):
+    """把「压暗层颜色」换算成乘性压暗用的 RGB(0~255)。
+
+    和 raid_ui._darken_fill 用的是同一个公式,这一点很重要:
+    「预压暗地图」必须和原来的「整屏 BLEND_RGB_MULT」得到完全一样的亮度,
+    否则换方案就会改变画面明暗。
+
+        darken_c = (255 - a) + c * a // 255
+
+    例:COL["fog"] = (8, 9, 12, 185) -> (75, 76, 78),即压到约 30% 亮度。
+    """
+    a = rgba[3]
+    return tuple(min(255, (255 - a) + (rgba[i] * a) // 255) for i in range(3))
+
+
+# ---------- 显示格式转换(SDL2 性能关键) ----------
+def to_display(surf, alpha=False):
+    """把「长期存活」的 Surface 转成显示格式(convert / convert_alpha)。
+
+    pygame 的 blit 在源/目标像素格式不一致时要逐像素转换;逐像素 alpha 混合
+    还要走混合慢路径。SDL2 在 x86 上有手写 SSE blitter,这些路径很快,所以
+    桌面(i5-4210U)上测出来很漂亮;安卓(ARM)上基本是通用 C 实现,同样的
+    blit 要贵好几倍 —— 这是「电脑上 162fps、手机上很卡」的主要差距来源。
+
+    本工程绝大多数表面都是「建一次、缓存起来、之后每帧反复 blit」
+    (_CachedFont / 迷雾层 / 粒子精灵 / HUD 背景 / 预渲染地图),
+    所以 convert 的代价只付一次,之后的每帧都走最窄的 blit 路径。
+
+    没有显示模式时(selftest 之前的调用)原样返回,不影响无头流程。
+    """
+    if pygame.display.get_surface() is None:
+        return surf
+    try:
+        return surf.convert_alpha() if alpha else surf.convert()
+    except pygame.error:
+        return surf
+
+
 # ---------- 字体 ----------
 _font_cache = {}
+
+
+# ---------- 文字快速渲染 ----------
+# 见 _CachedFont.render 的说明:带底色渲染 + 底色做色键 = 8 位调色板快路径,
+# 真机实测比逐像素 alpha 快约 129 倍(一行 HUD 文字 1.31ms -> 0.010ms)。
+# 底色取"迷雾压暗后的地图色"近似值,字形边缘的过渡色就看不出来。
+# TARKOV2D_ALPHA_TEXT=1 可完全退回原来的逐像素 alpha 文字。
+_FAST_TEXT = os.environ.get("TARKOV2D_ALPHA_TEXT") != "1"
+_TEXT_KEY = (18, 21, 24)
 
 
 class _CachedFont(pygame.font.Font):
@@ -135,7 +191,21 @@ class _CachedFont(pygame.font.Font):
             return super().render(text, antialias, color, background)
         if hit is not None:
             return hit
-        surf = super().render(text, antialias, color, background)
+
+        if background is None and antialias and _FAST_TEXT:
+            # 关键优化(真机实测快约 129 倍):带底色渲染得到的是 **8 位调色板**
+            # 表面,再把底色设成色键 —— SDL 对"调色板+色键"有快路径(还能 RLE
+            # 跳过整段透明像素),而逐像素 alpha 只能走 ARM 上的通用 C 循环
+            # (一行 HUD 文字 1.3ms,十几串就是整帧的大头)。
+            #
+            # 代价:字形边缘像素是"向底色过渡"而不是"向真实背景过渡"。
+            # 底色取的是迷雾压暗后地图的近似值,所以肉眼看不出来;
+            # 要完全保持原样就把 TARKOV2D_ALPHA_TEXT=1 设上。
+            surf = super().render(text, True, color, _TEXT_KEY)
+            surf.set_colorkey(_TEXT_KEY)
+        else:
+            surf = super().render(text, antialias, color, background)
+
         if surf.get_height() <= self._CACHE_MAX_H:
             if len(cache) >= self._CACHE_MAX:
                 cache.clear()
@@ -400,6 +470,8 @@ TRADE_GOODS = [
     ("bandage", 1), ("medkit", 1),
     ("paca", 1), ("fort", 1), ("b45", 1), ("bt201", 1),
     ("pack_mid", 1), ("pack_large", 1), ("pack_xl", 1),
+    # 近战:战术匕首(占近战位,不消耗弹药)
+    ("knife", 1),
 ]
 
 
@@ -584,6 +656,8 @@ TRADE_GOODS += [(iid, 1) for iid in SPECIAL_WEAPONS]
 # 黑暗模式装备:枪上照明 + 夜视头盔(夜视很贵,不然夜战太简单)
 TRADE_GOODS += [("flashlight", 1), ("flashlight_pro", 1),
                 ("nvg_pnv", 1), ("nvg_gpnvg", 1)]
+# 非常规武器:侦察无人机(交易站「特殊枪械」分区有售,也能在军械箱里翻到)
+TRADE_GOODS += [("drone", 1), ("drone_kam", 1)]
 
 # 交易站分区:(标签名, 分区键;None = 全部)
 TRADE_TABS = [("全部", None), ("枪械", "weapon"), ("特殊枪械", "special"), ("配件", "attach"),
@@ -595,7 +669,7 @@ TRADE_PAGE_H = 450      # 商品区可见高度(像素);超出时用滚轮翻看
 # slot: mag 弹夹 / grip 前握把 / laser 激光 / stock 后握把 / light 照明(手电)
 # 效果:mag_bonus 加弹容;brace_mul 架枪散布倍率(越小越准);hip_mul 腰射散布倍率
 ATTACH_SLOTS = {"mag": "弹夹", "grip": "前握把", "laser": "激光", "stock": "后握把",
-                "light": "照明"}
+                "light": "照明", "trigger": "扳机组"}
 ITEMS.update({
     "mag_ext": dict(name="加长弹夹", cat="attach", slot="mag", w=1, h=1,
                     color=(150, 150, 160), price=6000, mag_bonus=10, desc="弹容 +10"),
@@ -624,6 +698,15 @@ ITEMS.update({
     "flashlight_pro": dict(name="强光探照灯", cat="attach", slot="light", w=2, h=1,
                            color=(238, 236, 200), price=45000,
                            beam=(580, 32), desc="夜战照明:锥形亮区 580 内可见"),
+    # ---- 教官专属:全自动扳机组件 ----
+    # 只能从「教官」任务链拿到(商店没有、战利品里也没有),条件苛刻。
+    # 只对 精确射手步枪 / 狙击步枪 / 反器材步枪 有效:装上后这把枪多出「全自动」模式,
+    # 代价是腰射/架枪散布都变差(全自动连发更难压枪)。
+    "auto_trigger": dict(name="全自动扳机组件", cat="attach", slot="trigger", w=2, h=1,
+                         color=(236, 132, 84), price=0,
+                         auto_convert=True, hip_mul=1.38, brace_mul=1.30,
+                         instructor_only=True,
+                         desc="射手/狙击/反器材步枪 → 全自动 · 腰射 +38% 架枪 +30% 散布"),
 })
 
 # ---------- 头盔(黑暗模式夜视头盔 + 常规防护头盔) ----------
@@ -815,6 +898,10 @@ TALENTS = {
     "m24": dict(name="猎杀专家", desc="伤害 +6%", dmg_mul=1.06),
     "sj16": dict(name="国产远程", desc="伤害 +7%", dmg_mul=1.07),
     "ax50": dict(name="反器材", desc="伤害 +10%", dmg_mul=1.10),
+    # ---- 反器材步枪(AK-50:同样不参与架枪)----
+    "ak50": dict(name="重装药", desc="伤害 +8%", dmg_mul=1.08),
+    # ---- 近战武器 ----
+    "knife": dict(name="开刃", desc="伤害 +10%", dmg_mul=1.10),
     # ---- 轻机枪 ----
     "rpk16": dict(name="班用机枪", desc="装填速度 +30%", reload_mul=0.70),
     "evolys": dict(name="轻量弹链", desc="装填速度 +35%", reload_mul=0.65),
@@ -841,7 +928,7 @@ WEAPON_SLOTS = {
     "ak74": ["mag", "grip", "laser", "stock", "light"],
     "m4a1": ["mag", "grip", "laser", "stock", "light"],
     "akm": ["mag", "grip", "laser", "stock", "light"],
-    "m700": ["mag", "laser", "stock", "light"],
+    "m700": ["mag", "laser", "stock", "light", "trigger"],
     "m139": [], "asval": ["mag", "grip", "laser", "light"],
     "vector": ["mag", "grip", "laser", "stock", "light"],
     "pkp": ["laser", "light"], "rpg": [], "rpg2": [],
@@ -925,6 +1012,8 @@ EXTRA_WEAPONS = [
     ("m24", "M24 狙击步枪", "狙击步枪", "a762x51", 88, 5, 1.50, 0.018, None, 1450, 138000, 6, 2, (100, 94, 78), False),
     ("sj16", "SJ-16 狙击步枪", "狙击步枪", "a54r", 95, 10, 1.40, 0.020, None, 1500, 158000, 6, 2, (96, 98, 88), False),
     ("ax50", "AX-50 反器材狙击步枪", "狙击步枪", "a50", 180, 5, 1.70, 0.015, None, 1800, 320000, 6, 3, (88, 90, 94), False),
+    # ===== 特殊枪械:AK-50(12.7×99 半自动反器材步枪,M966 高穿弹能穿墙、有概率炸膛)=====
+    ("ak50", "AK-50 反器材步枪", "反器材步枪", "m966", 165, 10, 0.90, 0.022, None, 1500, 400000, 7, 3, (86, 70, 56), False),
     # ===== 轻机枪 =====
     ("rpk16", "RPK-16 轻机枪", "轻机枪", "a545", 24, 45, 0.085, 0.110, 0.045, 900, 168000, 5, 3, (116, 88, 60), True),
     ("evolys", "FN EVOLYS 轻机枪", "轻机枪", "a556", 25, 100, 0.075, 0.100, 0.040, 950, 218000, 5, 3, (92, 96, 92), True, 1, 5),
@@ -950,14 +1039,16 @@ _WEAPON_SLOTS_BY_CLASS = {
     "霰弹枪": ["mag", "grip", "laser", "light"],
     "突击步枪": ["mag", "grip", "laser", "stock", "light"],
     "特种步枪": ["mag", "grip", "laser", "light"],
-    "精确射手步枪": ["mag", "grip", "laser", "stock", "light"],
-    "狙击步枪": ["mag", "laser", "stock", "light"],
+    "精确射手步枪": ["mag", "grip", "laser", "stock", "light", "trigger"],
+    "狙击步枪": ["mag", "laser", "stock", "light", "trigger"],
+    "反器材步枪": ["mag", "laser", "light", "trigger"],
+    "近战武器": [],
     "轻机枪": ["laser", "light"],
     "火箭筒": [],
 }
 _WEAPON_SFX_BY_CLASS = {"手枪": "pm", "冲锋枪": "mp5", "霰弹枪": "sg"}
 _WEAPON_LOUD_BY_CLASS = {"手枪": 520, "冲锋枪": 720, "霰弹枪": 900,
-                         "狙击步枪": 1100, "轻机枪": 1150}
+                         "狙击步枪": 1100, "反器材步枪": 1220, "轻机枪": 1150}
 
 for _spec in EXTRA_WEAPONS:
     _iid, _name, _cls, _ammo, _dmg, _mag, _rof, _spread, _braced = _spec[:9]
@@ -977,7 +1068,7 @@ for _spec in EXTRA_WEAPONS:
     WEAPON_CLASS[_iid] = _cls
     WEAPON_SLOTS[_iid] = list(_WEAPON_SLOTS_BY_CLASS[_cls])
 
-# 新弹种(5.8×42 / 7.62×51 / 7.62×25 / 5.7×28 / .50)
+# 新弹种(5.8×42 / 7.62×51 / 7.62×25 / 5.7×28 / .50 / 12.7×99)
 ITEMS.update({
     "a762x51": dict(name="7.62×51 穿甲弹", cat="ammo", w=1, h=1,
                     color=(152, 122, 88), price=180, stack=120, dmg_mul=1.30),
@@ -989,12 +1080,251 @@ ITEMS.update({
                 color=(190, 172, 212), price=150, stack=120, dmg_mul=1.15),
     "a50": dict(name=".50 大口径弹", cat="ammo", w=1, h=1,
                 color=(232, 190, 62), price=900, stack=60, dmg_mul=1.60),
+    # AK-50 专用:M966 高穿弹 —— 能打穿一堵墙(伤害衰减 25%),代价是有概率炸膛
+    "m966": dict(name="M966 高穿弹", cat="ammo", w=1, h=1,
+                 color=(236, 208, 96), price=1200, stack=60, dmg_mul=1.25,
+                 range_mul=1.15, wall_pen=1, wall_decay=0.75,
+                 misfire=0.12, misfire_dmg=26),
 })
 
 # 新枪械与新弹种全部上架交易站
 TRADE_GOODS += [(s[0], 1) for s in EXTRA_WEAPONS]
 TRADE_GOODS += [("a762x51", 30), ("a58", 30), ("a762x25", 30),
-                ("a57", 30), ("a50", 10)]
+                ("a57", 30), ("a50", 10), ("m966", 10)]
+
+
+# ---------- 近战武器(刀)----------
+# 刀占「近战位」,左键就是挥刀(近战判定,不消耗弹药、几乎没声音)。
+# melee=True 让战局走挥刀分支;ammo 给空列表(没有弹种,装填/备弹自然为 0)。
+ITEMS["knife"] = dict(name="战术匕首", cat="weapon", w=2, h=1, color=(196, 202, 214),
+                      price=12000, ammo=[], dmg=55, pellets=1,
+                      spread=0.05, rof=0.45, auto=False, mag=0, range=46,
+                      loud=60, sfx="click", melee=True)
+WEAPON_CLASS["knife"] = "近战武器"
+WEAPON_SLOTS["knife"] = []
+
+# ---------- 非常规武器:便携侦察无人机 ----------
+# 它占「主武器位」,但不是枪:左键 = 放出无人机(不消耗弹药),F 键掌镜,
+# 掌镜时按住 ←/→(或按住右键朝鼠标)直接操纵无人机飞;
+# 电量耗尽自动回收,飞远了信号断掉自毁。数据都在 DRONE 里,想调手感改这里。
+DRONE = dict(
+    battery=55.0,        # 满电能用多少秒
+    speed=270.0,         # 操控飞行速度(像素/秒)
+    deploy_dist=96.0,    # 左键放出时朝准星方向飞出去多远(撞墙就停在墙前)
+    hold_speed_div=0.5,  # 鼠标离屏幕中心多远算"推到底"(乘屏幕短边;越小越灵敏)
+    radius=9,            # 机身半径(撞墙判定用)
+    view_radius=620,     # 摄像头照亮半径(战争迷雾挖洞 / 夜战亮区)
+    mark_radius=620,     # 自动标记敌人的半径
+    mark_hold=3.0,       # 标记在地图上保留几秒(持续被看到才续期)
+    mark_scan=0.5,       # 每隔多久扫一次(不用每帧勾视线,省算力)
+    noise=220,           # 放出时的动静(守军能听见)
+    recall_dist=140.0,   # 回收半径:电量耗尽时离玩家这么近就自动回到包里
+    crash_dmg=0.0,       # 信号断掉(飞太远)时自毁,对玩家无伤害
+    max_dist=1500.0,     # 信号最大距离:超过就断开(自毁)
+    talent_battery_mul=1.25,   # 天赋「长续航」的电量倍率
+    talent_mark_mul=1.30,      # 天赋「长续航」的标记半径倍率
+)
+DRONE_VIEW_FPS = 0.5     # 无人机视野多边形的重建间隔(秒);它飞得快,比玩家视野勤一点
+DRONE_VIEW_POLYS = 90    # 无人机视野多边形的射线数(比玩家的 140 少,省算力)
+
+# ---------- 非常规武器:「蜂群」自杀式无人机 ----------
+# 和侦察无人机同一套操作(左键放出 / F 掌镜 / ←→ 控飞),区别在于:
+#   * 不自动标记敌人,摄像头视野也更小(它是拿去炸的,不是去看的)
+#   * 掌镜时**左键 = 俯冲自爆**:在无人机位置炸开一片,伤害守军(离太近自己也会挨)
+#   * 自爆后机体损毁,装备位上那一架就没了(一次性)
+#   * 电量短、飞得快:它本来就是单程票
+KAMIKAZE = dict(
+    battery=30.0,        # 满电能飞多少秒(比侦察机短)
+    speed=312.0,         # 飞行速度(比侦察机快,好冲脸)
+    deploy_dist=96.0,
+    hold_speed_div=0.5,
+    radius=9,
+    view_radius=520,     # 摄像头亮区(比侦察机小)
+    mark_radius=0,       # 不做自动标记
+    mark_hold=0.0,
+    mark_scan=0.5,
+    noise=260,
+    recall_dist=120.0,
+    crash_dmg=0.0,
+    max_dist=1200.0,     # 信号距离比侦察机短(冲太远会失联)
+    dmg=260.0,           # 自爆中心伤害
+    blast_radius=140.0,  # 自爆半径
+    struct_dmg=90.0,     # 对设施的伤害(C4 同款口径)
+    talent_battery_mul=1.25,
+    talent_mark_mul=1.00,
+)
+
+DRONE_KINDS = {"recon": DRONE, "kamikaze": KAMIKAZE}
+
+
+def is_drone(item_or_def):
+    """是不是无人机(非枪械的非常规装备,侦察型/自杀型都算)。"""
+    if item_or_def is None:
+        return False
+    d = item_or_def.def_ if hasattr(item_or_def, "def_") else item_or_def
+    return bool(d.get("drone"))
+
+
+def drone_kind(item_or_def):
+    """这架无人机是哪种:'recon' 侦察型 / 'kamikaze' 自杀型。"""
+    if item_or_def is None:
+        return "recon"
+    d = item_or_def.def_ if hasattr(item_or_def, "def_") else item_or_def
+    return "kamikaze" if d.get("kamikaze") else "recon"
+
+
+def is_kamikaze(item_or_def):
+    return drone_kind(item_or_def) == "kamikaze"
+
+
+def drone_cfg(kind="recon"):
+    """无人机参数(含天赋加成后的实际值)。kind: 'recon' / 'kamikaze'。"""
+    base = DRONE_KINDS.get(kind, DRONE)
+    tal = TALENTS.get("drone_kam" if kind == "kamikaze" else "drone", {})
+    c = dict(base)
+    c["battery"] *= tal.get("battery_mul", 1.0)
+    c["mark_radius"] = int(c["mark_radius"] * tal.get("mark_mul", 1.0))
+    c["kind"] = kind
+    return c
+
+
+ITEMS["drone"] = dict(name="RQ-11 侦察无人机", cat="weapon", w=2, h=2,
+                      color=(120, 210, 190), price=220000, ammo=[], dmg=0,
+                      pellets=0, spread=0.0, spread_braced=-0.05, rof=0.8,
+                      auto=False, mag=0, range=0, loud=DRONE["noise"],
+                      sfx="click", drone=True,
+                      desc="左键放出 · ←/→ 控飞 · F 掌镜")
+WEAPON_CLASS["drone"] = "侦察无人机"
+WEAPON_SLOTS["drone"] = []
+TALENTS["drone"] = dict(name="长续航", desc="电量 +25% · 标记半径 +30%",
+                        battery_mul=DRONE["talent_battery_mul"],
+                        mark_mul=DRONE["talent_mark_mul"])
+
+ITEMS["drone_kam"] = dict(name="「蜂群」自杀式无人机", cat="weapon", w=2, h=2,
+                          color=(232, 150, 88), price=260000, ammo=[], dmg=0,
+                          pellets=0, spread=0.0, spread_braced=-0.05, rof=0.8,
+                          auto=False, mag=0, range=0, loud=KAMIKAZE["noise"],
+                          sfx="click", drone=True, kamikaze=True,
+                          desc="左键放出 · ←/→ 控飞 · F 掌镜 · 掌镜时左键=俯冲自爆")
+WEAPON_CLASS["drone_kam"] = "自杀式无人机"
+WEAPON_SLOTS["drone_kam"] = []
+TALENTS["drone_kam"] = dict(name="末段加速", desc="电量 +25%",
+                            battery_mul=KAMIKAZE["talent_battery_mul"],
+                            mark_mul=KAMIKAZE["talent_mark_mul"])
+
+# ---------- 装备位(藏身处「出战配置」)----------
+# 两个主武器 + 一个副武器 + 一把刀。槽内物品不进战局背包,所以不会占格子。
+# 注意:main1 就是存档里的 sd.weapon 本身(老存档/战局/联机代码全都用它),
+# 其余三个槽存在 sd.weapon.state["x_slots"] 里 —— 这样现有存档格式一个字都不用改。
+LOADOUT_SLOTS = ("main1", "main2", "side", "melee")
+LOADOUT_SLOT_NAMES = {"main1": "主武器 1", "main2": "主武器 2",
+                      "side": "副武器", "melee": "近战"}
+_X_SLOTS_KEY = "x_slots"
+
+
+def is_melee(item_or_def):
+    """是不是近战武器(刀)。"""
+    if item_or_def is None:
+        return False
+    d = item_or_def.def_ if hasattr(item_or_def, "def_") else item_or_def
+    return bool(d.get("melee"))
+
+
+def slot_for_weapon(item):
+    """这件武器该进哪个装备位(按类别分)。"""
+    if is_melee(item):
+        return "melee"
+    cls = weapon_class(item.iid)
+    if cls in ("手枪", "冲锋枪"):
+        return "side"
+    return "main1"          # 主武器位:main1 满了会自动去 main2
+
+
+def loadout_get(sd, slot):
+    """取某个装备位上的武器(None = 空)。"""
+    if slot == "main1":
+        return getattr(sd, "weapon", None)
+    w = getattr(sd, "weapon", None)
+    if w is None:
+        return None
+    xs = w.state.get(_X_SLOTS_KEY)
+    if not isinstance(xs, dict):
+        return None
+    data = xs.get(slot)
+    return Item.from_dict(data) if isinstance(data, dict) else data
+
+
+def _loadout_ensure(sd):
+    """保证 sd.weapon 存在且带 x_slots(内部用)。"""
+    w = getattr(sd, "weapon", None)
+    if w is None:
+        return None
+    xs = w.state.get(_X_SLOTS_KEY)
+    if not isinstance(xs, dict):
+        xs = {}
+        w.state[_X_SLOTS_KEY] = xs
+    return xs
+
+
+def loadout_set(sd, slot, item):
+    """把武器放进指定装备位(item=None 就是清空该位)。
+
+    槽内保存的是序列化数据(不是对象引用),所以槽里的枪每次读出来都是新对象 ——
+    战局里开火/换弹的 state 改动不会自动回写,这点和 main1(=sd.weapon 本尊)不同。
+    """
+    if slot == "main1":
+        sd.weapon = item
+        _loadout_ensure(sd)
+        return True
+    if getattr(sd, "weapon", None) is None:
+        if item is None:
+            return True
+        sd.weapon = item            # 没有主武器时先占住 main1,否则存档存不下旁的槽
+        _loadout_ensure(sd)
+        return True
+    xs = _loadout_ensure(sd)
+    xs[slot] = item.serialize() if item is not None else None
+    return True
+
+
+loadout_put = loadout_set       # 兼容别名
+
+
+def loadout_all(sd):
+    """{槽名: 武器或 None},固定按 LOADOUT_SLOTS 的顺序。"""
+    return {slot: loadout_get(sd, slot) for slot in LOADOUT_SLOTS}
+
+
+def loadout_weapons(sd):
+    """所有装备位上的武器(不含 None),按槽位顺序。"""
+    return [w for w in loadout_all(sd).values() if w is not None]
+
+
+def loadout_free_slot(sd, item):
+    """这件武器该放的槽:先看它的专属位,主武器位满了自动去第二个主武器位。"""
+    slot = slot_for_weapon(item)
+    if loadout_get(sd, slot) is None:
+        return slot
+    if slot == "main1" and loadout_get(sd, "main2") is None:
+        return "main2"
+    return None
+
+
+def loadout_add(sd, item):
+    """装上一件武器,返回 (是否成功, 提示语)。"""
+    slot = loadout_free_slot(sd, item)
+    if slot is None:
+        slot = slot_for_weapon(item)
+        if slot == "main1" or loadout_get(sd, slot) is not None:
+            return False, "%s 已满,先把里面那把卸下来" % LOADOUT_SLOT_NAMES[slot]
+        return False, "没有可用的武器位"
+    loadout_put(sd, slot, item)
+    return True, "已装备 %s → %s" % (item.name, LOADOUT_SLOT_NAMES[slot])
+
+
+def loadout_limits(sd):
+    """当前装备里最高的护甲等级要求(甲不够就拿不动重武器)。"""
+    return max([w.def_.get("req_armor_level", 0) for w in loadout_weapons(sd)] + [0])
 
 
 def weapon_talent(iid):
@@ -1016,8 +1346,11 @@ def weapon_capacity(item):
 
 
 def weapon_params(item):
-    """(伤害, 弹丸数, 腰射散布, 架枪散布, 射程, 装填时间, 枪声, 燃烧伤害)。
-    综合武器基础值 + 当前装填的弹种 + 配件 + 天赋。"""
+    """(伤害, 弹丸数, 腰射散布, 架枪散布, 射程, 装填时间, 枪声, 燃烧伤害,
+    穿墙层数, 每层伤害系数, 炸膛概率, 炸膛自伤)。
+    综合武器基础值 + 当前装填的弹种 + 配件 + 天赋。
+    后四项是「特殊弹种」的弹道特性:只有带 wall_pen / misfire 的子弹才非零
+    (目前是 AK-50 的 M966 高穿弹:穿 1 堵墙、有概率炸膛),普通子弹恒为 0。"""
     d = item.def_
     ammo_ids = d["ammo"] if isinstance(d["ammo"], list) else [d["ammo"]]
     loaded = item.state.get("loaded")
@@ -1041,7 +1374,9 @@ def weapon_params(item):
     braced *= braced_mul
     return (dmg, pellets, hip, braced, d["range"] * a.get("range_mul", 1.0),
             1.6 * tal.get("reload_mul", 1.0), d["loud"] * tal.get("loud_mul", 1.0),
-            a.get("burn", 0.0))
+            a.get("burn", 0.0),
+            a.get("wall_pen", 0), a.get("wall_decay", 0.0),
+            a.get("misfire", 0.0), a.get("misfire_dmg", 0.0))
 
 
 def weapon_ammo_ids(item):
@@ -1056,6 +1391,13 @@ def weapon_blast_mul(item):
     return tal.get("blast_mul", 1.0)
 
 
+# ---------- 特殊弹种(穿墙 / 炸膛) ----------
+# 墙:能挡住普通子弹、也能挡住视线(地图瓦片 '#')。树同样挡视线,但高穿弹能打穿。
+PENETRABLE = ("#", "T")
+# 炸膛后的卡壳时间:这段时间内扳机扣不动(提示「枪膛卡死」),之后自动排除
+MISFIRE_JAM_TIME = 1.4
+
+
 # ---------- 射击模式(按 G 切换) ----------
 # 全自动枪械:单发 → 三连发 → 全自动 循环;半自动/栓动/泵动枪只有单发。
 # 当前模式存在武器 state["fire_mode"] 里,所以换枪、存档都跟着武器走。
@@ -1063,17 +1405,47 @@ FIRE_MODE_NAMES = {"semi": "单发", "burst": "三连发", "auto": "全自动"}
 FIRE_MODE_ORDER = ["semi", "burst", "auto"]
 BURST_COUNT = 3          # 三连发:扣一次扳机打几发
 
+# 「全自动扳机组件」能改造的枪械类别(教官专属配件,商店买不到)
+AUTO_TRIGGER_IID = "auto_trigger"
+AUTO_TRIGGER_CLASSES = ("精确射手步枪", "狙击步枪", "反器材步枪")
+
+
+def has_auto_trigger(item_or_def):
+    """检查这件武器有没有装「全自动扳机组件」(且类别符合)。"""
+    if not hasattr(item_or_def, "state"):       # 只传了 def 的场合:没有配件信息
+        return False
+    d = item_or_def.def_
+    if d.get("auto"):
+        return False                            # 本来就是全自动,不需要
+    try:
+        if weapon_class(item_or_def.iid) not in AUTO_TRIGGER_CLASSES:
+            return False
+    except Exception:
+        return False
+    return AUTO_TRIGGER_IID in weapon_attach(item_or_def).values()
+
 
 def weapon_fire_modes(item_or_def):
     """这把枪支持的射击模式(按切换顺序)。"""
     d = item_or_def.def_ if hasattr(item_or_def, "def_") else item_or_def
-    return list(FIRE_MODE_ORDER) if d.get("auto") else ["semi"]
+    if d.get("auto"):
+        return list(FIRE_MODE_ORDER)
+    if has_auto_trigger(item_or_def):
+        return ["semi", "auto"]      # 装了全自动扳机组:可单发可全自动
+    return ["semi"]
 
 
 def weapon_default_fire_mode(item_or_def):
-    """默认模式:全自动枪用全自动(与老版本行为一致),其余单发。"""
+    """默认模式:全自动枪用全自动(与老版本行为一致),其余单发。
+
+    装了「全自动扳机组件」的射手/狙击/反器材步枪默认就是全自动 —— 这正是玩家
+    花大代价换来的效果;想点射按 G 切回单发即可。"""
     d = item_or_def.def_ if hasattr(item_or_def, "def_") else item_or_def
-    return "auto" if d.get("auto") else "semi"
+    if d.get("auto"):
+        return "auto"
+    if has_auto_trigger(item_or_def):
+        return "auto"
+    return "semi"
 
 
 def weapon_fire_mode(item):
@@ -1291,6 +1663,15 @@ TASKS = [
          reward=dict(rubles=120000, ammo=[("a545", 120), ("a12db", 40)])),
     dict(id="t7", name="长期合同", desc="每击杀 10 名拾荒者就能结一次账", kind="kills",
          need=10, reward=dict(rubles=25000), repeat=True),
+    # ---- 教官专属长线(唯一的「全自动扳机组件」来源,条件刻意开得很高)----
+    # 三条必须按顺序做:req 指向的任务没领掉,后面的就锁着(quests.task_state)。
+    dict(id="t8", name="教官的信赖 · 一", desc="累计击杀 120 名拾荒者",
+         kind="kills", need=120, reward=dict(rubles=150000)),
+    dict(id="t9", name="教官的信赖 · 二", desc="累计击杀 300 名拾荒者",
+         kind="kills", need=300, req="t8", reward=dict(rubles=250000)),
+    dict(id="t10", name="教官的信赖 · 三", desc="累计带回价值 3000 万的物资",
+         kind="value", need=30000000, req="t9",
+         reward=dict(rubles=400000, attachments=["auto_trigger"])),
 ]
 # 保险承包商:40 个长线任务。全部完成后,保险箱从 2 格升为 4 格(2×2,阵亡不丢)
 # (id, 名字, 类型, 数量, 奖励卢布)
@@ -1473,7 +1854,10 @@ def trade_cat_match(iid, key):
     if key is None:
         return True
     if key == "special":
-        return bool(d.get("boss_only"))
+        # 头目专属(boss_only)+ 特殊枪械(反器材步枪这一类,AK-50 就在这个分区)
+        # + 非常规武器(侦察无人机)
+        return (bool(d.get("boss_only")) or weapon_class(iid) == "反器材步枪"
+                or bool(d.get("drone")))
     if key == "weapon":
         return d["cat"] == "weapon" and not d.get("boss_only")
     return d["cat"] == key
@@ -1531,9 +1915,18 @@ LOOT = {
             ("scar_hamr", 1, 1), ("groza", 1, 1), ("mk14", 1, 1), ("m110", 1, 1),
             ("sj16", 1, 1), ("ax50", 1, 1), ("rpk16", 1, 1), ("evolys", 1, 1),
             ("negev7", 1, 1), ("deagle", 1, 1), ("deagle_gold", 1, 1),
+            # 特殊枪械 AK-50:军械箱里极低概率出(0.5 权重)
+            ("ak50", 1, 1),
+            # 近战武器:军械箱里偶尔能翻到刀
+            ("knife", 1, 3),
+            # 非常规武器:侦察无人机(比刀还少见一点,权重 1 ≈ 0.4%/次)
+            ("drone", 1, 1),
+            # 自杀式无人机:更少见(消耗品,军械箱里偶尔翻得到一架)
+            ("drone_kam", 0.6, 1),
             # 新弹种
             ("a762x51", 30, 4), ("a58", 30, 4), ("a762x25", 30, 5),
-            ("a57", 30, 3), ("a50", 5, 2)],
+            ("a57", 30, 3), ("a50", 5, 2),
+            ("m966", 10, 2)],
     # 保险箱:值钱货与高阶杂物(金色物品仍是最稀有的);5 级甲小概率开出
     "val": [("gold", 1, 5), ("cpu", 1, 4), ("btc", 1, 1), ("vase", 1, 2),
             ("b45", 1, 2), ("bt201", 1, 1), ("pack_large", 1, 2), ("pack_xl", 1, 1),

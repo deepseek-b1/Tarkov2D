@@ -10,15 +10,83 @@ from settings import STASH_W, STASH_H, BAG_W, BAG_H, SAFE_BASE
 from inventory import Container, Item
 
 
+def _writable(d):
+    """这个目录能不能**真的写文件**(存在 ≠ 可写 —— 这正是"登录闪退"的根因)。"""
+    try:
+        os.makedirs(d, exist_ok=True)
+        probe = os.path.join(d, ".t2d_write_test")
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("x")
+        try:
+            os.remove(probe)
+        except OSError:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+def _app_dir():
+    """EXE(或脚本)所在目录。"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _migrate_accounts(first, cand):
+    """便携回退时:把首选目录里已有的账号表和存档**拷**一份过来(只补缺,不覆盖)。
+
+    否则玩家换到便携目录会看到"一个账号都没有",以为进度没了。
+    """
+    try:
+        src_accounts = os.path.join(first, "accounts")
+        if not os.path.exists(os.path.join(src_accounts, "index.json")):
+            return
+        dst_accounts = os.path.join(cand, "accounts")
+        if not os.path.exists(os.path.join(dst_accounts, "index.json")):
+            shutil.copytree(src_accounts, dst_accounts)
+        for name in ("save.json", "save.json.bak", "legacy_imported"):
+            src = os.path.join(first, name)
+            dst = os.path.join(cand, name)
+            if os.path.exists(src) and not os.path.exists(dst):
+                shutil.copy2(src, dst)
+    except Exception:
+        pass
+
+
 def _default_dir():
-    """按平台选择可写的存档目录。"""
+    """按平台选择**可写**的存档目录。
+
+    首选 %LOCALAPPDATA%\\Tarkov2D。如果它不可写(权限受限的运行环境、被安全
+    软件盯着、目录被锁……),就退到 EXE 旁边的 Tarkov2D-save(便携模式),并把
+    原来的账号/存档一起带过去。
+    **绝不能因为"选不出能写的目录"就让游戏在登录那一步崩掉。**
+    """
     if sys.platform == "emscripten":
         return os.environ.get("PYGBAG_SAVE_DIR") or "."
     android = os.environ.get("ANDROID_PRIVATE")
     if android:
         return os.path.join(android, "Tarkov2D")
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "Tarkov2D")
+    first = os.path.join(base, "Tarkov2D")
+    if _writable(first):
+        return first
+    for cand in (os.path.join(_app_dir(), "Tarkov2D-save"),
+                 os.path.join(os.getcwd(), "Tarkov2D-save")):
+        if _writable(cand):
+            _migrate_accounts(first, cand)
+            try:
+                with open(os.path.join(cand, "PORTABLE.txt"), "w",
+                          encoding="utf-8") as f:
+                    f.write("首选存档目录不可写,已改用便携存档目录。\n")
+                    f.write("  首选: %s\n" % first)
+                    f.write("  现用: %s\n" % cand)
+                    f.write("(把游戏放到有写权限的目录,或用正常方式双击运行,"
+                            "就会回到首选目录)\n")
+            except Exception:
+                pass
+            return cand
+    return first
 
 
 SAVE_DIR = _default_dir()
@@ -251,6 +319,27 @@ _backup_t = 0.0        # 上次滚动备份的时刻(进程内)
 # 以及之后每 10 分钟,把上一次的存档留一份 save.json.bak —— 至少能退回
 # "这次启动之前"的状态(比 save.json.broken-* 的"读到坏档才备份"更主动)。
 BACKUP_INTERVAL = 600.0
+BACKUP_KEEP = 30       # 滚动备份最多留几份(≈最近 30 个备份点)
+
+
+def _backup_dir():
+    d = os.path.join(os.path.dirname(SAVE_FILE) or ".", "backups")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _prune_backups(d, keep=BACKUP_KEEP):
+    """只保留最近 keep 份滚动备份(按修改时间)。"""
+    try:
+        files = [f for f in os.listdir(d) if f.endswith(".json")]
+        files.sort(key=lambda f: os.path.getmtime(os.path.join(d, f)))
+        for f in files[:-keep]:
+            try:
+                os.remove(os.path.join(d, f))
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def backup_due(force=False):
@@ -264,17 +353,42 @@ def backup_due(force=False):
         shutil.copy2(SAVE_FILE, SAVE_FILE + ".bak")
     except OSError:
         return False
+    # 再留一份带时间戳的滚动备份(只保留最近 BACKUP_KEEP 份)。
+    # 光有 save.json.bak 只能退回"上一次";仓库被清空/被 bug 吃掉时,
+    # 需要能翻回任意一个历史时间点 —— 这就是那道保险。
+    try:
+        d = _backup_dir()
+        dst = os.path.join(d, "save-" + time.strftime("%Y%m%d-%H%M%S") + ".json")
+        if not os.path.exists(dst):
+            shutil.copy2(SAVE_FILE, dst)
+        _prune_backups(d)
+    except OSError:
+        pass
     _backup_t = now
     return True
 
 
 def save_data(sd):
-    os.makedirs(SAVE_DIR, exist_ok=True)
-    backup_due()
-    tmp = SAVE_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(sd.serialize(), f, ensure_ascii=False)
-    os.replace(tmp, SAVE_FILE)
+    """写存档。**失败返回 False,绝不抛异常** —— 存档目录不可写时也要让游戏能跑,
+    不能像旧版那样在登录那一步直接把窗口搞闪退。"""
+    try:
+        os.makedirs(SAVE_DIR, exist_ok=True)
+        backup_due()
+        tmp = SAVE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(sd.serialize(), f, ensure_ascii=False)
+        os.replace(tmp, SAVE_FILE)
+        return True
+    except OSError:
+        try:
+            import traceback
+            with open(os.path.join(_app_dir(), "save_error.log"), "a",
+                      encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {SAVE_FILE}\n")
+                f.write(traceback.format_exc() + "\n")
+        except Exception:
+            pass
+        return False
 
 
 def load_data():
