@@ -35,13 +35,16 @@ DEFAULTS = {
     "firemode": (pygame.K_g,),
     "heal": (pygame.K_h,),
     "bag": (pygame.K_TAB,),
-    "support1": (pygame.K_1,),
-    "support2": (pygame.K_2,),
-    "support3": (pygame.K_3,),
+    # 友军支援(仅突袭模式):默认 F1-F3 —— 数字键 1-4 留给「切装备位」,
+    # 同一个键不能既切枪又放技能(玩家想改回数字键也可以在设置页改)
+    "support1": (pygame.K_F1,),
+    "support2": (pygame.K_F2,),
+    "support3": (pygame.K_F3,),
 }
 
 # 固定键说明(设置页脚注)
-FIXED_NOTES = "固定键:ESC 菜单/关闭 · 对白选项用数字键 1-4 · 移动改绑后只认新键"
+FIXED_NOTES = ("固定键:ESC 菜单/关闭 · 数字键 1-4 = 切装备位 · "
+               "对白选项用数字键 1-4 · 移动改绑后只认新键")
 
 
 def _overrides(sd):

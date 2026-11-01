@@ -1626,7 +1626,9 @@ def _draw_support_panel(raid, screen, x, y):
             col, tag = COL["text_dim"], f"冷却 {int(cd) + 1}s"
         else:
             col, tag = COL["bad"], f"缺 {cfg['cost'] - raid.support_points} 分"
-        line = f"[{i + 1}] {cfg['name']:<5s} {cfg['cost']:>2d} 分   {tag}"
+        # 键名跟玩家改键走(F1/F2/F3;以前写死 [1][2][3] 会和切装备位撞车)
+        kb = bindings.label_for(raid.game.save, "support%d" % (i + 1))
+        line = f"[{kb}] {cfg['name']:<5s} {cfg['cost']:>2d} 分   {tag}"
         t = fs.render(line, True, col)
         screen.blit(t, (x + 10, yy))
         yy += 24

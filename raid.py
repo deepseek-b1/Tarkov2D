@@ -481,8 +481,10 @@ class Raid:
                            COL["accent"], 6.0)
             self.add_toast("想掐断敌方援兵:炸掉通讯站(他们联系不上总部就没人可派了);"
                            "打死司令只掉装备,不影响援兵", COL["good"], 6.0)
-            self.add_toast("友军支援 1 空袭 / 2 炮火覆盖 / 3 无人机侦察(击杀换积分)",
-                           COL["good"], 5.0)
+            self.add_toast("友军支援 " + " / ".join(
+                f"{bindings.label_for(self.game.save, a)} {SUPPORT[k]['name']}"
+                for a, k in zip(("support1", "support2", "support3"), SUPPORT_ORDER))
+                + "(击杀换积分;数字键 1-4 是切装备位)", COL["good"], 5.5)
         if any(getattr(s, "tag", None) == "author" for s in self.scavs):
             self.add_toast("警报:隐藏头目「作者」携 RPG 在场!(没穿 6 级甲别硬碰)",
                            COL["bad"], 5.0)
@@ -3509,10 +3511,16 @@ class Raid:
         else:
             held = pygame.mouse.get_pressed()[0]
             self.braced = bool(pygame.mouse.get_pressed()[2])   # 右键=架枪
-            # 数字键 1-4 = 切装备位(2 主武器 + 副武器 + 近战);点 HUD 上的槽也行
+            # 数字键 1-4 = 切装备位(2 主武器 + 副武器 + 近战);点 HUD 上的槽也行。
+            # 突袭模式的支援技能可以改键,万一玩家把它绑到 1-4,就让技能优先 ——
+            # 同一个键不能又切枪又放技能(以前默认 1/2/3 就是这么冲突的)。
             for ev in events:
-                if ev.type == pygame.KEYDOWN and pygame.K_1 <= ev.key <= pygame.K_4:
-                    self.switch_slot_key(p, ev.key)
+                if ev.type == pygame.KEYDOWN:
+                    if any(bindings.key_matches(ev.key, sd, a)
+                           for a in ("support1", "support2", "support3")):
+                        continue
+                    if pygame.K_1 <= ev.key <= pygame.K_4:
+                        self.switch_slot_key(p, ev.key)
                 elif (ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1
                       and not self.inv_open and self.loot_target is None
                       and self.dialogue is None):

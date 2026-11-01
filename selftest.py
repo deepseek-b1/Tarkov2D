@@ -5592,9 +5592,48 @@ def run():
     check("非常规武器-自杀式无人机(放出/掌镜/俯冲自爆/机体损毁)", t_kamikaze_drone)
     check("配件-教官专属全自动扳机组(射击模式/任务链解锁/不上架)", t_auto_trigger)
 
+    def t_key_conflict():
+        """突袭支援键 vs 切装备位键:默认不许重叠,同一个键只能做一件事。"""
+        from game import Game
+        from settings import loadout_put, loadout_get
+        import bindings
+        # 1) 默认键位:支援 = F1/F2/F3,和 1-4 切装备位分开
+        sup = set()
+        for act in ("support1", "support2", "support3"):
+            sup.update(bindings.DEFAULTS[act])
+        assert sup == {pygame.K_F1, pygame.K_F2, pygame.K_F3}, sup
+        assert not (sup & {pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4})
+        # 2) 突袭模式里:F1 = 放支援(不切枪),2 = 切枪(不放支援)
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        g.save.mode = "assault"
+        g.save.touch = False
+        g.start_raid()
+        r = g.raid
+        sd = g.save
+        loadout_put(sd, "main2", Item.weapon("ak74", mag=30))
+        r.player.cur_slot = "main1"
+        r.player.weapon = loadout_get(sd, "main1")
+        r.support_points = 100
+        n0 = len(r.strikes)
+        before = r.player.weapon.iid
+        r.update(1 / 60, [pygame.event.Event(pygame.KEYDOWN,
+                                             key=pygame.K_F1, unicode="")])
+        assert len(r.strikes) > n0, "F1 应该呼叫空袭"
+        assert r.player.weapon.iid == before, "F1 不该同时切枪"
+        n1 = len(r.strikes)
+        r.update(1 / 60, [pygame.event.Event(pygame.KEYDOWN,
+                                             key=pygame.K_2, unicode="")])
+        assert len(r.strikes) == n1, "2 只该切枪,不该再叫支援"
+        assert r.player.cur_slot == "main2", r.player.cur_slot
+        assert r.player.weapon.iid == "ak74", r.player.weapon.iid
+        g.to_hideout()
+
     check("账号-名字+密码多档登录/老存档并入/登录界面", t_accounts)
     check("双人合作-P2键盘操作/双人可见性/战利品并仓/单独阵亡", t_coop)
     check("局域网联机-回环握手/开局/输入上传/状态镜像/断开", t_lan)
+    check("键位-突袭支援(F1-F3)与切装备位(1-4)不冲突", t_key_conflict)
 
     ok = all(r[1] for r in results)
     report = ["Tarkov2D selftest " + ("PASS" if ok else "FAIL"), ""]
