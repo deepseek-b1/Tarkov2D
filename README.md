@@ -10,6 +10,49 @@
 - ★ **先登录**:输入「名字 + 密码」进入自己的存档(见下「账号与存档」)
 - **手机模式**:`python main.py --touch`(或在藏身处点「手机模式:开/关」)
 - 重新打包:双击 `build_exe.bat`(需 `pip install pyinstaller`)
+- **Windows 7 / 32 位机器**:用 `build_win7_32.bat` 打 32 位版(见下「Win7 32 位版」)
+
+## Win7 32 位版(2.13.1)
+
+正常的 `build_exe.bat` 用本机 64 位 **CPython 3.13**,它**只支持 Windows 8.1 及以上**
+(`python313.dll` 依赖 Win7 上不存在的 `api-ms-win-core-path-l1-1-0.dll`),
+所以在 Win7 上双击会直接起不来 —— 这跟打没打包无关,只能换 Python 重打。
+
+32 位版用的工具链(与 `build_win7_32.bat` 一致):
+
+| 组件 | 版本 | 说明 |
+|---|---|---|
+| CPython | **3.8.10 32 位** | 官方最后一个支持 Windows 7 的 Python |
+| pygame | **2.6.1** | cp38-win32 / SDL 2.28.4 |
+| PyInstaller | **6.19.0** | `--onefile --noconsole --runtime-tmpdir .\_mei_cache` |
+
+```bat
+:: 装好 32 位 Python 3.8 后(把它放到 PATH 最前面)
+python -m pip install pygame==2.6.1 pyinstaller==6.19.0
+build_win7_32.bat
+```
+
+产物校验(`dist\Tarkov2D.exe`):
+
+- **PE32 / Machine 0x014C (i386)**、Subsystem 2 (GUI)、**MinOS 6.0**
+- 内置 `python38.dll`,**不含** `python312/313.dll`,也不引用 `api-ms-win-core-path-l1-1-0.dll`
+- 一个 32 位 exe 同时覆盖 **Win7 SP1(32/64 位)和 Win10/11**(64 位系统走 WoW64)
+- Win7 需要「通用 C 运行库(UCRT)」= 补丁 **KB2999226**(绝大多数 Win7 SP1 已装)
+
+交付包(`Tarkov2D-2.13.1-Win7-32位-内容更新版.zip`)里包含:
+
+```
+Tarkov2D-2.13.1-Win7-32\
+  Tarkov2D.exe                  32 位单文件(解压到 exe 旁边的 _mei_cache)
+  启动游戏.bat / 触摸模式-启动(显示控制台).bat
+  Tarkov2D-免解压版\             onedir 版,不解压、不写额外文件
+  使用说明.txt                   Win7 注意事项 / 这次改了什么 / 联机说明
+  _自检报告-单文件版.txt         这一版 32 位 exe 的 --selftest 结果
+  源码(可重新打包)\             全部 .py + Tarkov2D.spec + build_win7_32.bat
+```
+
+> 注意:32 位版和 64 位版**存档通用**(都在 `%LOCALAPPDATA%\Tarkov2D\`)。
+> 联机两边要用同一个版本。
 
 ## 账号与存档(2.12.0)
 
