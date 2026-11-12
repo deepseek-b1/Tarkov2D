@@ -1117,45 +1117,166 @@ class Hideout:
             return True
         return False
 
+    def _wd_rect(self):
+        """改装窗口的位置(可拖动)。"""
+        if not hasattr(self, "wd_pos") or self.wd_pos is None:
+            self.wd_pos = [(W - 660) // 2, (H - 430) // 2]
+        return pygame.Rect(self.wd_pos[0], self.wd_pos[1], 660, 430)
+
+    def _wd_slot_rects(self):
+        """当前武器各槽位的框(相对窗口)。"""
+        w = self.weapon_detail
+        from settings import ATTACH_SLOTS, weapon_slots
+        r = self._wd_rect()
+        out, y = [], r.y + 96
+        for key in ATTACH_SLOTS:
+            if key in weapon_slots(w.iid):
+                out.append((key, pygame.Rect(r.x + 20, y, 380, 38)))
+                y += 44
+        return out
+
+    def _wd_stash_rects(self):
+        """窗口下方「仓库里的配件」格子。"""
+        import settings as S
+        sd = self.game.save
+        r = self._wd_rect()
+        out, x, y = [], r.x + 20, r.y + 330
+        for pl in sd.stash.items:
+            if pl.item.cat != "attach":
+                continue
+            box = pygame.Rect(x, y, 56, 40)
+            out.append((pl.item.iid, pl, box))
+            x += 62
+            if x > r.right - 80:
+                x, y = r.x + 20, y + 46
+        return out
+
+    def _wd_event(self, ev):
+        """窗口打开时接管鼠标:拖标题栏移动 / 拖配件到槽位安装。"""
+        import pygame
+        r = self._wd_rect()
+        mx, my = pygame.mouse.get_pos()
+        if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 3:
+            self.weapon_detail = None
+            self.drag_item = None
+            self.wd_drag = None
+            return True
+        if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+            title = pygame.Rect(r.x, r.y, r.w, 34)
+            if title.collidepoint(mx, my):
+                self.wd_drag = (mx - r.x, my - r.y)
+                return True
+            for key, box in self._wd_slot_rects():
+                if box.collidepoint(mx, my):
+                    self._wd_install(key)
+                    return True
+            for iid, pl, box in self._wd_stash_rects():
+                if box.collidepoint(mx, my):
+                    self.drag_item = (iid, pl)
+                    audio.play("click")
+                    return True
+            if not r.collidepoint(mx, my):
+                self.weapon_detail = None
+                return True
+            return True
+        if ev.type == pygame.MOUSEMOTION and getattr(self, "wd_drag", None):
+            dx, dy = self.wd_drag
+            self.wd_pos = [mx - dx, my - dy]
+            return True
+        if ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
+            if getattr(self, "wd_drag", None):
+                self.wd_drag = None
+                return True
+            if getattr(self, "drag_item", None):
+                for key, box in self._wd_slot_rects():
+                    if box.collidepoint(mx, my):
+                        self._wd_install(key)
+                        return True
+                self.drag_item = None
+                return True
+        return False
+
+    def _wd_install(self, key):
+        """把拖过来的配件装到指定槽位(不兼容就提示)。"""
+        from settings import ITEMS, weapon_attach, weapon_slots
+        sd = self.game.save
+        w = self.weapon_detail
+        drag = getattr(self, "drag_item", None)
+        if not drag:
+            self.say("先从下面仓库里拖一个配件过来", COL["text_dim"], 2.4)
+            return
+        iid, placed = drag
+        d = ITEMS[iid]
+        if d.get("slot") != key:
+            self.say(f"{d['name']} 装不到这个位置", COL["bad"], 2.4)
+            return
+        if key not in weapon_slots(w.iid):
+            self.say(f"{w.name} 没有这个槽位", COL["bad"], 2.4)
+            return
+        old = weapon_attach(w).get(key)
+        if old is not None and not sd.stash.add_item(Item(old)):
+            self.say("仓库放不下换下来的配件", COL["bad"], 2.4)
+            return
+        sd.stash.remove_placed(placed)
+        w.state.setdefault("attach", {})[key] = iid
+        self.drag_item = None
+        save_mod.save_data(sd)
+        audio.play("click")
+        self.say(f"{w.name} 装上 {d['name']}", COL["good"], 2.6)
+
     def _draw_weapon_detail(self, screen):
-        """画武器详情:名字 + 6 个配件位(装了显示名字,没装显示空)。"""
+        """可拖动改装窗口:标题栏拖动 · 配件从下面仓库拖到槽位。"""
         from settings import ATTACH_SLOTS, weapon_attach, weapon_slots
         w = self.weapon_detail
-        pw, ph = 620, 400
-        px, py = (W - pw) // 2, (H - ph) // 2
+        r = self._wd_rect()
         ov = _overlay("wdim", (W, H), (0, 0, 0, 150))
         screen.blit(ov, (0, 0))
-        panel = pygame.Rect(px, py, pw, ph)
-        pygame.draw.rect(screen, COL["panel"], panel, border_radius=10)
-        pygame.draw.rect(screen, COL["accent"], panel, 2, border_radius=10)
-        t = get_font(22, bold=True).render(w.name, True, COL["accent"])
-        screen.blit(t, (px + 20, py + 14))
-        sub = get_font(14).render(
-            f"{w.def_.get('cal', '')} · 弹匣 {w.state.get('mag', 0)} · 右键/左键关闭",
-            True, COL["text_dim"])
-        screen.blit(sub, (px + 20, py + 46))
-        slots = weapon_slots(w.iid)
+        pygame.draw.rect(screen, COL["panel"], r, border_radius=10)
+        pygame.draw.rect(screen, COL["accent"], r, 2, border_radius=10)
+        title = pygame.Rect(r.x, r.y, r.w, 34)
+        pygame.draw.rect(screen, COL["panel_hi"], title, border_radius=10)
+        t = get_font(20, bold=True).render(f"武器改装 — {w.name}", True, COL["accent"])
+        screen.blit(t, (r.x + 16, r.y + 6))
+        tip = get_font(12).render("拖标题栏移动窗口 · 右键关闭", True, COL["text_dim"])
+        screen.blit(tip, (r.right - tip.get_width() - 14, r.y + 12))
         have = weapon_attach(w)
-        y = py + 84
-        for key in ATTACH_SLOTS:
-            if key not in slots:
-                continue
-            box = pygame.Rect(px + 20, y, pw - 40, 40)
+        for key, box in self._wd_slot_rects():
             got = have.get(key)
             pygame.draw.rect(screen, COL["panel_hi"] if got else COL["bg"], box,
                              border_radius=6)
             pygame.draw.rect(screen, COL["accent"] if got else COL["border"],
                              box, 2 if got else 1, border_radius=6)
-            lt = get_font(15, bold=True).render(
-                ATTACH_SLOTS.get(key, key), True, COL["text_dim"])
-            screen.blit(lt, (box.x + 12, box.y + 11))
-            name = ITEMS[got]["name"] if got else "空"
-            vt = get_font(16, bold=True).render(
-                name, True, COL["text"] if got else COL["text_dim"])
-            screen.blit(vt, (box.x + 130, box.y + 9))
-            y += 46
-        if y > py + ph - 40:
-            pass
+            lt = get_font(15, bold=True).render(ATTACH_SLOTS.get(key, key), True,
+                                                COL["text_dim"])
+            screen.blit(lt, (box.x + 12, box.y + 10))
+            nm = ITEMS[got]["name"] if got else "空 —— 把配件拖到这里"
+            vt = get_font(15, bold=True).render(
+                nm, True, COL["text"] if got else COL["text_dim"])
+            screen.blit(vt, (box.x + 120, box.y + 10))
+        lbl = get_font(13, bold=True).render("仓库里的配件(按住拖到上面的槽位)",
+                                             True, COL["text_dim"])
+        screen.blit(lbl, (r.x + 20, r.y + 306))
+        pygame.draw.line(screen, COL["border"], (r.x + 20, r.y + 326),
+                         (r.right - 20, r.y + 326), 1)
+        for iid, pl, box in self._wd_stash_rects():
+            sel = getattr(self, "drag_item", None) and self.drag_item[0] == iid
+            pygame.draw.rect(screen, COL["panel_hi"] if sel else COL["panel"], box,
+                             border_radius=5)
+            pygame.draw.rect(screen, COL["accent"] if sel else COL["border"], box,
+                             2 if sel else 1, border_radius=5)
+            try:
+                draw_item_icon(screen, pl.item, box.x + 4, box.y + 4, cell=16)
+            except Exception:
+                pass
+        drag = getattr(self, "drag_item", None)
+        if drag:
+            mx, my = pygame.mouse.get_pos()
+            nm = get_font(14, bold=True).render(ITEMS[drag[0]]["name"], True,
+                                                COL["accent"])
+            bg = pygame.Rect(mx + 12, my + 8, nm.get_width() + 14, 22)
+            pygame.draw.rect(screen, COL["panel"], bg, border_radius=5)
+            pygame.draw.rect(screen, COL["accent"], bg, 1, border_radius=5)
+            screen.blit(nm, (bg.x + 7, bg.y + 3))
 
 
     def _right_click(self, pos):
@@ -1920,6 +2041,8 @@ class Hideout:
         # 玩法简介:先读完再进游戏
         if self.show_intro:
             for ev in events:
+                if getattr(self, "weapon_detail", None) is not None and self._wd_event(ev):
+                    continue
                 if ev.type in (pygame.MOUSEBUTTONDOWN, pygame.KEYDOWN,
                                pygame.FINGERDOWN):
                     nxt = intro.advance(self.intro_page)
