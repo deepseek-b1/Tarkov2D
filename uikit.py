@@ -136,6 +136,9 @@ def draw_item_icon(surface, item, x, y, cell=CELL):
     col = item.def_["color"]
     pygame.draw.rect(surface, col, rect.inflate(-6, -6), border_radius=4)
     pygame.draw.rect(surface, (20, 20, 24), rect.inflate(-6, -6), 2, border_radius=4)
+    # 品质外框:白/绿/蓝/紫/金/红(按单价分档,一眼看出值不值钱)
+    from settings import quality_color
+    pygame.draw.rect(surface, quality_color(item.def_), rect, 2, border_radius=5)
     cx, cy = rect.center
     inner = rect.inflate(-8, -8)
     cat = item.cat
@@ -298,7 +301,9 @@ def item_info_lines(item):
     d = item.def_
     lines = [d["name"]]
     w, h = item.base_size()
-    sub = [f"{w}×{h} 格  {fmt_rub(d['price'])}"]
+    from settings import item_quality
+    _qname, _qcol = item_quality(d)
+    sub = [f"{w}×{h} 格  {fmt_rub(d['price'])}  【{_qname}】"]
     if item.cat == "weapon" and d.get("drone"):
         # 侦察无人机:不是枪,只报侦察参数(伤害/弹匣这些没意义)
         from settings import drone_cfg

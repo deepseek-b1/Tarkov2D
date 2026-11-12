@@ -1798,6 +1798,40 @@ def run():
 
     check("承包商-商店/狙击扳机组/50任务/保险箱掉落", t_contractor_shop)
 
+    def t_quality():
+        """物品品质描边:按单价分 6 档 / 悬浮提示带品质名 / 图标在各种格尺寸下能画。"""
+        import settings
+        import uikit as _uk3
+        from inventory import Item
+
+        Q = settings.QUALITY_TIERS
+        assert len(Q) == 6, len(Q)
+        ths = [t for t, _n, _c in Q]
+        assert ths == sorted(ths), ths
+        assert ths[0] == 0
+        # 典型物品落档(白/绿/蓝/紫/金/红)
+        cases = [("a9", "普通"), ("bandage", "普通"), ("paca", "优良"),
+                 ("ak74", "优良"), ("bt201", "传说"), ("gold_ak", "神话"),
+                 ("keycard", "传说")]
+        for iid, want in cases:
+            got = settings.item_quality(Item(iid).def_)[0]
+            assert got == want, (iid, got, want)
+        # 品质序号单调、颜色互不相同
+        assert settings.quality_index(Item("gold_ak").def_) > \
+            settings.quality_index(Item("a9").def_)
+        cols = {c for _t, _n, c in Q}
+        assert len(cols) == 6, cols
+        # 悬浮提示里带品质名
+        lines = _uk3.item_info_lines(Item("gold_ak"))
+        assert any("【神话】" in ln for ln in lines), lines
+        # 图标:各档 × 各格尺寸都能画
+        surf = pygame.Surface((320, 320))
+        for iid in ("a9", "paca", "bt201", "gold_ak", "keycard"):
+            for cell in (10, 24, 44):
+                _uk3.draw_item_icon(surf, Item(iid), 0, 0, cell)
+
+    check("品质描边-分档/提示/图标", t_quality)
+
     def t_boss():
         """三张地图的头目系统:5 级甲(89/81/75%)+ 专属枪械掉落。"""
         from game import Game

@@ -1470,6 +1470,8 @@ class Hideout:
                              r, 2 if (hover and afford) else 1, border_radius=6)
             pygame.draw.rect(screen, d["color"], (r.x + 10, r.y + 12, 8, 26),
                              border_radius=2)
+            from settings import quality_color as _qcol_f
+            pygame.draw.rect(screen, _qcol_f(d), (r.x, r.y + 4, 3, r.h - 8))
             t = get_font(16, bold=True).render(
                 d["name"], True, COL["text"] if afford else COL["text_dim"])
             screen.blit(t, (r.x + 26, r.y + 8))
@@ -3107,6 +3109,8 @@ class Hideout:
                              r, 2 if (hover and afford) else 1, border_radius=6)
             pygame.draw.rect(screen, d["color"], (r.x + 8, r.y + 9, 8, 24),
                              border_radius=2)
+            from settings import quality_color as _qcol_f
+            pygame.draw.rect(screen, _qcol_f(d), (r.x, r.y + 4, 3, r.h - 8))
             name = d["name"] + (f" ×{count}" if d["cat"] == "ammo" else "")
             nfont = get_font(15, bold=True)
             # 弹药分区左侧要让出口径目录,格子变窄:名字放不下就截断加省略号

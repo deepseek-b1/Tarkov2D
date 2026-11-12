@@ -7,7 +7,7 @@ import pygame
 from inventory import Item      # 装备位里的武器要在槽之间搬(inventory 不反向依赖本模块)
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.13.8"
+GAME_VERSION = "2.13.9"
 # 更新清单地址(留空则只认 EXE 同目录的 version.json)。
 # 默认指向仓库里的 update_server/version.json —— 推到 main 就生效,不用再发服务器。
 # 也可以换成本机自建服务器(如 http://127.0.0.1:8765/version.json)。
@@ -588,6 +588,43 @@ def trade_buy_price(iid, count, discount=0.0):
 def trade_sell_price(item):
     """回收价。"""
     return max(1, int(item.total_price() * SELL_RATE))
+
+
+# ---------- 物品品质(按单价分档,给图标描边 + 悬浮提示用) ----------
+# 白 < 绿 < 蓝 < 紫 < 金 < 红;阈值是单件价格(弹药按单发)。
+QUALITY_TIERS = [
+    (0,      "普通", (226, 230, 238)),   # 白
+    (20000,  "优良", (110, 222, 120)),   # 绿
+    (60000,  "稀有", (92, 172, 255)),    # 蓝
+    (120000, "史诗", (182, 120, 255)),   # 紫
+    (250000, "传说", (255, 190, 72)),    # 金
+    (400000, "神话", (240, 78, 78)),     # 红
+]
+_QUALITY_INDEX = {name: i for i, (_t, name, _c) in enumerate(QUALITY_TIERS)}
+
+
+def item_quality(iid_or_def):
+    """物品品质:(名字, 颜色)。按单价分档,图标描边和悬浮提示都用它。"""
+    d = iid_or_def.def_ if hasattr(iid_or_def, "def_") else iid_or_def
+    try:
+        price = int(float(d.get("price", 0) or 0))
+    except (TypeError, ValueError):
+        price = 0
+    name, col = QUALITY_TIERS[0][1], QUALITY_TIERS[0][2]
+    for th, nm, c in QUALITY_TIERS:
+        if price >= th:
+            name, col = nm, c
+    return name, col
+
+
+def quality_color(iid_or_def):
+    return item_quality(iid_or_def)[1]
+
+
+def quality_index(iid_or_def):
+    """品质档位序号(0=白 … 5=红),排序用。"""
+    return _QUALITY_INDEX.get(item_quality(iid_or_def)[0], 0)
+
 
 # ---------- 地图(三张地图见 maps.py) ----------
 from maps import MAPS, MAP_ORDER, MODE_MAP, MAP_W, MAP_H
