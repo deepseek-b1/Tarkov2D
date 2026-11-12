@@ -150,6 +150,7 @@ class Hideout:
         self.level_claim_all = pygame.Rect(60, 520, 200, 40)
         # 承包商:任务 / 商店 切换
         self.contractor_shop_mode = False
+        self.attach_slot = None   # 配件装到哪个装备位
         self.con_tab_tasks = pygame.Rect(1028, 164, 104, 20)
         self.con_tab_shop = pygame.Rect(1138, 164, 104, 20)
         # 交易所:一页 —— 左边你的仓库(点物品出售 / 批量出售),右边分区 + 商品。
@@ -2163,7 +2164,7 @@ class Hideout:
                 else:
                     self.say("仓库空间不足", COL["bad"])
             return
-        if lay["armor"].collidepoint(pos):
+        if lay.get("armor") is not None and lay["armor"].collidepoint(pos):
             if sd.armor is not None:
                 # 手里正拿着的枪需要护甲 -> 不能脱(备用的枪不影响换甲)
                 cur = sd.weapon
@@ -2296,9 +2297,21 @@ class Hideout:
             return
 
     # ---------- 配件安装 ----------
+    def attach_target(self, sd, need=None):
+        """配件装到哪把枪:优先选中的装备位,其次任意支持该配件的枪。"""
+        order = [getattr(self, "attach_slot", None) or "main1"]
+        order += [x for x in LOADOUT_SLOTS if x not in order]
+        for slot in order:
+            w = loadout_get(sd, slot)
+            if w is None:
+                continue
+            if need is None or need in weapon_slots(w.iid):
+                return w
+        return sd.weapon
+
     def _install_attachment(self, sd, placed):
         item = placed.item
-        w = sd.weapon
+        w = self.attach_target(sd, item.def_.get("slot"))
         slot = item.def_.get("slot")
         if w is None:
             self.say("先装备武器,再点配件安装", COL["bad"], 3.0)
