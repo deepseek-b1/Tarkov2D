@@ -200,17 +200,21 @@ class Player:
         self.burst_left = 0
         return cycle_fire_mode(self.weapon)
 
-    def _absorb_with_armor(self, dmg, raid, pen=True):
-        """护甲/头盔结算:按耐久算实际减伤,被穿甲时打折,并按挡下的伤害磨耐久。
+    def _absorb_with_armor(self, dmg, raid, pen=None):
+        """护甲/头盔结算:按耐久算实际减伤,按弹种穿甲打折,并按挡下的伤害磨耐久。
 
         规则:
           - 实际减伤 = 标称 reduce × 耐久系数(见 Item.armor_effective_reduce);
-          - 单次伤害 >= 等级 × ARMOR_PEN_PER_LEVEL 判定为穿甲,只保留 ARMOR_PEN_KEEP 的减伤;
-          - 每挡掉 1 点伤害磨 ARMOR_WEAR_ABSORB 点耐久,穿甲时按 ARMOR_WEAR_PEN_RATIO 打折;
+          - pen 是**弹种穿甲等级**(0~6),和护甲 level 直接比:
+              pen >= 甲等级     -> 穿透,减伤只剩 ARMOR_PEN_KEEP
+              pen == 甲等级 - 1 -> 半透,减伤按 ARMOR_PEN_PARTIAL
+              更低              -> 打不穿,吃满减伤
+            pen=None 表示不做穿甲判定(爆炸/空袭/炸膛这种非弹丸伤害);
+          - 每挡掉 1 点伤害磨 ARMOR_WEAR_ABSORB 点耐久,穿透时按 ARMOR_WEAR_PEN_RATIO 打折;
           - 耐久打光那一刻提示一次。
         返回剩余伤害。
         """
-        from settings import (ARMOR_PEN_KEEP, ARMOR_PEN_PER_LEVEL, ARMOR_WEAR_ABSORB,
+        from settings import (ARMOR_PEN_KEEP, ARMOR_PEN_PARTIAL, ARMOR_WEAR_ABSORB,
                               ARMOR_WEAR_MIN, ARMOR_WEAR_PEN_RATIO, HELMET_WEAR_RATIO)
         left = float(dmg)
         for piece, wear_ratio in ((self.armor, 1.0), (self.helmet, HELMET_WEAR_RATIO)):
@@ -220,8 +224,13 @@ class Player:
             if eff <= 0:
                 continue
             level = int(piece.def_.get("level", 0) or 0)
-            pierced = bool(pen) and level > 0 and dmg >= level * ARMOR_PEN_PER_LEVEL
-            absorbed = left * eff * (ARMOR_PEN_KEEP if pierced else 1.0)
+            keep, pierced = 1.0, False
+            if pen is not None and level > 0:
+                if pen >= level:
+                    keep, pierced = ARMOR_PEN_KEEP, True
+                elif pen >= level - 1:
+                    keep = ARMOR_PEN_PARTIAL
+            absorbed = left * eff * keep
             if absorbed <= 0:
                 continue
             left -= absorbed
@@ -234,7 +243,7 @@ class Player:
                                COL["bad"], 3.2)
         return left
 
-    def take_damage(self, dmg, raid, rpg=False, pen=True):
+    def take_damage(self, dmg, raid, rpg=False, pen=None):
         if self.out:       # 双人合作里已经倒下 / 已经撤离的不再吃伤害
             return
         if rpg:
@@ -1561,13 +1570,13 @@ class Raid:
         self.add_toast(f"射击模式:{fire_mode_name(nxt)}", COL["accent"], 2.0)
 
     def spawn_scav_bullet(self, x, y, ang, dmg, pellets, spread, rng, sfx,
-                          rpg=False, src=None):
+                          rpg=False, src=None, pen=1):
         for _ in range(pellets):
             a = ang + random.uniform(-spread * 0.6, spread * 0.6)
             spd = 400.0 if rpg else 760.0        # 火箭弹飞得慢,可以闪避
             self.bullets.append(dict(x=x, y=y, dx=math.cos(a) * spd, dy=math.sin(a) * spd,
                                      dmg=dmg, owner="scav", ttl=rng / spd, rpg=rpg,
-                                     src=src))
+                                     src=src, pen=pen))
         audio.play(sfx)
         self.emit_noise(x, y, 700 if rpg else 400)
 
@@ -1652,9 +1661,9 @@ class Raid:
                 if friendly:
                     if self.mode == "assault":
                         self.add_toast("被友军火力波及!", COL["bad"], 2.6)
-                    # 爆炸不吃穿甲判定:威力大(空袭 260)不等于子弹穿甲,
-                    # 否则 6 级甲会因「这一炮威力超过穿甲线」被判定穿透而被打死
-                    q.take_damage(dmg * 0.5, self, pen=False)
+                    # 爆炸不做穿甲判定:威力大(空袭 260)不等于子弹穿甲,
+                    # 否则 6 级甲会因「威力超过穿甲线」被判定穿透而被打死
+                    q.take_damage(dmg * 0.5, self, pen=None)
                 else:
                     q.take_damage(dmg, self, rpg=True)
 
@@ -1823,7 +1832,7 @@ class Raid:
                         dy = q.y - by
                         if (dx < lim and dx > -lim and dy < lim and dy > -lim
                                 and dx * dx + dy * dy < lim * lim):
-                            q.take_damage(b["dmg"], self)
+                            q.take_damage(b["dmg"], self, pen=b.get("pen"))
                             dead = True
                             break
                     if not dead:

@@ -272,7 +272,8 @@ class Scav:
         ang = math.atan2(p.y - self.y, p.x - self.x) + random.uniform(-d["spread"], d["spread"])
         raid.spawn_scav_bullet(self.x, self.y, ang, d["dmg"], d.get("pellets", 1),
                                d["spread"], d["range"], d.get("sfx", "epm"),
-                               rpg=d.get("rpg", False), src=self)
+                               rpg=d.get("rpg", False), src=self,
+                               pen=d.get("pen", 1))
 
     def damage(self, dmg):
         self.hp -= dmg

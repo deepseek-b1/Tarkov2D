@@ -7,7 +7,7 @@ import pygame
 from inventory import Item      # 装备位里的武器要在槽之间搬(inventory 不反向依赖本模块)
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.13.3"
+GAME_VERSION = "2.13.4"
 # 更新清单地址(留空则只认 EXE 同目录的 version.json)。
 # 默认指向仓库里的 update_server/version.json —— 推到 main 就生效,不用再发服务器。
 # 也可以换成本机自建服务器(如 http://127.0.0.1:8765/version.json)。
@@ -43,8 +43,9 @@ INTERACT_DIST = 56           # 搜刮交互距离(像素)
 ARMOR_DUR_BY_LEVEL = {1: 45, 2: 60, 3: 75, 4: 90, 5: 110, 6: 130}  # 满耐久
 HELMET_DUR_RATIO = 0.6       # 同等级头盔的满耐久 = 护甲 × 该系数
 ARMOR_DUR_FLOOR = 0.25       # 耐久打光后仍保留的名义减伤比例(0 = 完全不挡)
-ARMOR_PEN_PER_LEVEL = 14     # 单次伤害 >= 等级 × 该值 = 判定为穿甲
-ARMOR_PEN_KEEP = 0.35        # 被穿甲时还能挡下的比例(相对正常减伤)
+ARMOR_PEN_PER_LEVEL = 14     # [旧]单次伤害 >= 等级 × 该值 = 穿甲(爆炸不复用此规则)
+ARMOR_PEN_KEEP = 0.35        # 被穿透时还能挡下的比例(相对正常减伤)
+ARMOR_PEN_PARTIAL = 0.65     # 弹种穿甲 = 甲等级 - 1 时的"半透"比例
 ARMOR_WEAR_ABSORB = 0.55     # 每挡掉 1 点伤害消耗的耐久
 ARMOR_WEAR_MIN = 0.4         # 单次命中的最低耐久损耗(避免刮痧不掉耐久)
 ARMOR_WEAR_PEN_RATIO = 0.55  # 被穿甲时的耐久损耗倍率
@@ -446,13 +447,15 @@ def pack_grid(iid):
 
 # ---------- 拾荒者(AI 敌人) ----------
 SCAVS = {
-    "melee": dict(name="刀匪", hp=45, speed=210, dmg=13, atk_range=34, atk_cd=0.8, view=310),
+    # pen = 敌人这一枪的穿甲等级(0~6),和护甲 level 比:见 raid.Player._absorb_with_armor
+    "melee": dict(name="刀匪", hp=45, speed=210, dmg=13, atk_range=34, atk_cd=0.8, view=310,
+                  pen=1),
     "pistol": dict(name="拾荒枪手", hp=50, speed=145, dmg=8, pellets=1, spread=0.17, rof=1.2,
-                   range=540, view=430, sfx="epm"),
+                   range=540, view=430, sfx="epm", pen=2),
     "shotgun": dict(name="霰弹拾荒者", hp=60, speed=125, dmg=7, pellets=6, spread=0.24, rof=1.8,
-                    range=320, view=400, sfx="esg"),
+                    range=320, view=400, sfx="esg", pen=1),
     "ar": dict(name="突击拾荒者", hp=70, speed=160, dmg=9, pellets=1, spread=0.15, rof=0.18,
-               burst=3, pause=1.5, range=720, view=460, sfx="ear"),
+               burst=3, pause=1.5, range=720, view=460, sfx="ear", pen=3),
 }
 # 击杀掉落:武器 -> (武器iid, 弹药iid, 弹药min, 弹药max)
 SCAV_DROPS = {
@@ -1117,6 +1120,160 @@ TRADE_GOODS += [("a762x51", 30), ("a58", 30), ("a762x25", 30),
                 ("a57", 30), ("a50", 10), ("m966", 10)]
 
 
+# ---------- 弹种:口径 / 穿甲等级 ----------
+# 每个弹种带两个新字段:
+#   caliber  口径分组(交易所左侧按它列目录,同口径的弹通用同一批枪)
+#   pen      穿甲等级 0~6,和护甲/头盔的 level 直接比大小:
+#            pen >= 甲等级     -> 穿透,减伤只剩 ARMOR_PEN_KEEP
+#            pen == 甲等级 - 1 -> 半透,减伤按 ARMOR_PEN_PARTIAL
+#            再低             -> 打不穿,吃满减伤
+AMMO_CALIBER_ORDER = [
+    "9×19", "5.45×39", "5.56×45", "7.62×39", "7.62×45", "7.62×51",
+    "7.62×54R", "9×39", "5.8×42", "5.7×28", ".45 ACP", "7.62×25",
+    "12号", ".50", "12.7×99", "特殊",
+]
+
+# 新弹种(补全每种口径的"普通弹/穿甲弹/特殊弹"三档)
+NEW_AMMO = {
+    # 9×19:便宜手枪弹,三档
+    "a9_pst": dict(name="9×19 PST 穿甲弹", cat="ammo", w=1, h=1,
+                   color=(226, 196, 96), price=95, stack=120, dmg_mul=1.15),
+    "a9_rip": dict(name="9×19 RIP 空尖弹", cat="ammo", w=1, h=1,
+                   color=(232, 140, 120), price=150, stack=120, dmg_mul=1.45),
+    # 5.45×39
+    "a545_ps": dict(name="5.45×39 PS 普通弹", cat="ammo", w=1, h=1,
+                    color=(196, 110, 92), price=70, stack=120, dmg_mul=1.0),
+    "a545_bt": dict(name="5.45×39 BT 曳光弹", cat="ammo", w=1, h=1,
+                    color=(240, 150, 70), price=150, stack=120, dmg_mul=1.18),
+    # 5.56×45
+    "a556_m855": dict(name="5.56×45 M855 普通弹", cat="ammo", w=1, h=1,
+                      color=(210, 160, 96), price=85, stack=120, dmg_mul=1.0),
+    "a556_sost": dict(name="5.56×45 SOST 弹", cat="ammo", w=1, h=1,
+                      color=(190, 176, 130), price=160, stack=120, dmg_mul=1.2),
+    # 7.62×39
+    "a762_ps": dict(name="7.62×39 PS 普通弹", cat="ammo", w=1, h=1,
+                    color=(168, 116, 74), price=75, stack=120, dmg_mul=1.0),
+    "a762_us": dict(name="7.62×39 US 亚音速弹", cat="ammo", w=1, h=1,
+                    color=(120, 140, 116), price=120, stack=120, dmg_mul=1.25),
+    # 7.62×54R
+    "a54r_lps": dict(name="7.62×54R LPS 普通弹", cat="ammo", w=1, h=1,
+                     color=(160, 96, 110), price=110, stack=120, dmg_mul=1.0),
+    "a54r_bt": dict(name="7.62×54R BT 穿甲弹", cat="ammo", w=1, h=1,
+                    color=(210, 90, 130), price=320, stack=120, dmg_mul=1.45),
+    # 12 号霰弹
+    "a12_buck": dict(name="12号鹿弹", cat="ammo", w=1, h=1,
+                     color=(206, 130, 88), price=90, stack=30,
+                     pellets=8, dmg_mul=0.55, spread_add=0.04),
+    "a12_slug": dict(name="12号独头弹", cat="ammo", w=1, h=1,
+                     color=(178, 150, 120), price=160, stack=30,
+                     pellets=1, dmg_mul=2.0, spread_add=-0.06),
+    # 5.7×28
+    "a57_sb193": dict(name="5.7×28 SB193 亚音速弹", cat="ammo", w=1, h=1,
+                      color=(150, 170, 200), price=130, stack=120, dmg_mul=1.0),
+    # .45 ACP
+    "a45_ap": dict(name=".45 ACP AP 穿甲弹", cat="ammo", w=1, h=1,
+                   color=(196, 208, 226), price=180, stack=120, dmg_mul=1.15),
+    # 7.62×51
+    "a762x51_m80": dict(name="7.62×51 M80 弹", cat="ammo", w=1, h=1,
+                        color=(196, 160, 110), price=120, stack=120, dmg_mul=1.0),
+    # 9×39
+    "a939_sp5": dict(name="9×39 SP-5 弹", cat="ammo", w=1, h=1,
+                     color=(150, 156, 140), price=110, stack=120, dmg_mul=1.0),
+    # 5.8×42
+    "a58_dbp": dict(name="5.8×42 DBP 普通弹", cat="ammo", w=1, h=1,
+                    color=(176, 150, 120), price=110, stack=120, dmg_mul=1.0),
+}
+for _iid, _d in NEW_AMMO.items():
+    _d.setdefault("cat", "ammo")
+    _d.setdefault("w", 1)
+    _d.setdefault("h", 1)
+    ITEMS[_iid] = _d
+
+# 口径 / 穿甲等级表(原有弹种和新增弹种一起:口径, 穿甲, 一句话说明)
+AMMO_INFO = {
+    # 9×19
+    "a9": ("9×19", 1, "标准手枪弹,便宜量大"),
+    "a9_pst": ("9×19", 2, "PST 穿甲芯,能打 2 级甲"),
+    "a9_rip": ("9×19", 1, "RIP 空尖:肉伤最高,完全打不穿甲"),
+    # 5.45×39
+    "a545_ps": ("5.45×39", 2, "PS 普通弹,打不穿 3 级甲以上"),
+    "a545_bt": ("5.45×39", 3, "BT 曳光,中档穿透"),
+    "a545": ("5.45×39", 4, "BP 穿甲弹,4 级甲以内稳穿"),
+    # 5.56×45
+    "a556_m855": ("5.56×45", 2, "M855 普通弹"),
+    "a556_sost": ("5.56×45", 3, "SOST 精确弹,中档穿透"),
+    "a556": ("5.56×45", 4, "M855A1 穿甲弹"),
+    # 7.62×39
+    "a762_ps": ("7.62×39", 2, "PS 普通弹"),
+    "a762_us": ("7.62×39", 1, "US 亚音速:肉伤高、穿透极低"),
+    "a762": ("7.62×39", 3, "BP 穿甲弹"),
+    # 7.62×45
+    "a762x45": ("7.62×45", 2, "机枪弹,量大管饱"),
+    # 7.62×51
+    "a762x51_m80": ("7.62×51", 3, "M80 全威力普通弹"),
+    "a762x51": ("7.62×51", 4, "M61 穿甲弹"),
+    # 7.62×54R
+    "a54r_lps": ("7.62×54R", 3, "LPS 普通弹"),
+    "a54r": ("7.62×54R", 5, "SNB 穿甲弹,5 级甲以内通吃"),
+    "a54r_bt": ("7.62×54R", 5, "BT 穿甲弹,伤害更高"),
+    # 9×39
+    "a939_sp5": ("9×39", 2, "SP-5 亚音速弹"),
+    "a939": ("9×39", 4, "SP-6 穿甲弹"),
+    # 5.8×42
+    "a58_dbp": ("5.8×42", 2, "DBP 普通弹"),
+    "a58": ("5.8×42", 4, "DBP10 穿甲弹"),
+    # 5.7×28
+    "a57_sb193": ("5.7×28", 2, "SB193 亚音速弹"),
+    "a57": ("5.7×28", 3, "SS190 穿甲弹"),
+    # .45 ACP
+    "a45": (".45 ACP", 1, ".45 标准弹,停止力强"),
+    "a45_ap": (".45 ACP", 3, "AP 穿甲弹"),
+    # 7.62×25
+    "a762x25": ("7.62×25", 2, "托卡列夫弹,便宜"),
+    # 12 号
+    "a12_buck": ("12号", 1, "鹿弹:8 颗弹丸,近战糊脸"),
+    "a12_slug": ("12号", 2, "独头弹:单发高伤、准头更好"),
+    "a12ap": ("12号", 4, "穿甲独头弹:唯一能打穿护甲的霰弹"),
+    "a12db": ("12号", 1, "龙息弹:多弹丸 + 点燃"),
+    # .50 / 特殊
+    "a50": (".50", 5, ".50 大口径穿甲弹"),
+    "m966": ("12.7×99", 6, "AK-50 专用高穿弹:打墙穿甲,代价是炸膛风险"),
+    "rocket": ("特殊", 6, "PG-7V 火箭弹"),
+}
+for _iid, (_cal, _pen, _desc) in AMMO_INFO.items():
+    if _iid in ITEMS:
+        ITEMS[_iid]["caliber"] = _cal
+        ITEMS[_iid]["pen"] = _pen
+        ITEMS[_iid]["desc"] = _desc
+
+TRADE_GOODS += [(iid, 30) for iid in NEW_AMMO]
+
+
+def ammo_caliber(iid):
+    """弹种所属口径;不是弹药返回 None。"""
+    d = ITEMS.get(iid) or {}
+    return d.get("caliber") if d.get("cat") == "ammo" else None
+
+
+def ammo_pen(iid):
+    """弹种穿甲等级(0~6);不是弹药返回 0。"""
+    d = ITEMS.get(iid) or {}
+    return int(d.get("pen", 0)) if d.get("cat") == "ammo" else 0
+
+
+def ammo_by_caliber():
+    """口径 -> [弹药 iid](按 AMMO_CALIBER_ORDER 排序,穿甲等级从低到高)。"""
+    out = {}
+    for iid, d in ITEMS.items():
+        if d.get("cat") != "ammo":
+            continue
+        out.setdefault(d.get("caliber", "特殊"), []).append(iid)
+    for cal in out:
+        out[cal].sort(key=lambda i: (ammo_pen(i), ITEMS[i]["price"]))
+    return out
+
+
+
 # ---------- 近战武器(刀)----------
 # 刀占「近战位」,左键就是挥刀(近战判定,不消耗弹药、几乎没声音)。
 # melee=True 让战局走挥刀分支;ammo 给空列表(没有弹种,装填/备弹自然为 0)。
@@ -1407,7 +1564,18 @@ def weapon_ammo_ids(item):
     if item is None:
         return []
     a = item.def_["ammo"]
-    return list(a) if isinstance(a, list) else [a]
+    base = list(a) if isinstance(a, list) else [a]
+    # 同口径的弹种全部可用:新增弹种不必回头改每一把枪的 ammo 字段。
+    # 近战武器(ammo=[])和火箭筒(口径"特殊")按原样返回,不会被塞进别的弹。
+    out = list(base)
+    cals = {ITEMS[i].get("caliber") for i in base if i in ITEMS}
+    cals.discard(None)
+    if cals:
+        for iid, d in ITEMS.items():
+            if (d.get("cat") == "ammo" and d.get("caliber") in cals
+                    and iid not in out):
+                out.append(iid)
+    return out
 
 
 def weapon_blast_mul(item):

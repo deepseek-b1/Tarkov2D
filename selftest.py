@@ -255,6 +255,9 @@ def run():
         assert g.save.difficulty == "lockdown"
         # 简单:更少敌人、属性全面弱化
         g.save.difficulty = "easy"
+        # 固定种子:刷怪位置依赖随机流,不隔离的话前面的用例多用/少用几次随机
+        # 就会把这条用例的敌人数量带偏
+        random.seed(20260928)
         g.start_raid()
         r = g.raid
         assert r.diff_key == "easy"
@@ -269,6 +272,7 @@ def run():
         # 强化封锁:更多敌人(含追加出生点)、属性强化
         g2 = Game()
         g2.save.difficulty = "hardened"
+        random.seed(20260929)
         g2.start_raid()
         r2 = g2.raid
         normal2 = [x for x in r2.scavs if x.tag is None]
@@ -1419,7 +1423,7 @@ def run():
             pass
 
         raid_stub = _Raid()
-        # 未穿甲:30 < 3 级 × 14 = 42,挡掉约 28%
+        # pen=None(爆炸/空袭):不做穿甲判定,吃满 28%
         h = _Holder()
         h.armor, h.helmet = Item("paca"), None
         left = Player._absorb_with_armor(h, 30, raid_stub)
@@ -1427,12 +1431,24 @@ def run():
         assert abs(frac - 0.28) < 0.03, frac
         assert h.armor.armor_dur() < lv3, h.armor.armor_dur()
 
-        # 穿甲:120 >= 42,只保留 ARMOR_PEN_KEEP 的减伤
+        # pen=3 打 3 级甲 -> 穿透,只保留 ARMOR_PEN_KEEP
         h2 = _Holder()
         h2.armor, h2.helmet = Item("paca"), None
-        left2 = Player._absorb_with_armor(h2, 120, raid_stub)
-        frac2 = (120 - left2) / 120.0
-        assert frac2 < frac * 0.6, (frac, frac2)
+        left2 = Player._absorb_with_armor(h2, 30, raid_stub, pen=3)
+        frac2 = (30 - left2) / 30.0
+        assert abs(frac2 - 0.28 * settings.ARMOR_PEN_KEEP) < 0.03, frac2
+
+        # pen=2 打 3 级甲 -> 半透(ARMOR_PEN_PARTIAL)
+        h2b = _Holder()
+        h2b.armor, h2b.helmet = Item("paca"), None
+        left2b = Player._absorb_with_armor(h2b, 30, raid_stub, pen=2)
+        assert abs((30 - left2b) / 30.0 - 0.28 * settings.ARMOR_PEN_PARTIAL) < 0.03
+
+        # pen=1 打 3 级甲 -> 打不穿,吃满减伤
+        h2c = _Holder()
+        h2c.armor, h2c.helmet = Item("paca"), None
+        left2c = Player._absorb_with_armor(h2c, 30, raid_stub, pen=1)
+        assert abs((30 - left2c) / 30.0 - 0.28) < 0.03
 
         # 耐久打光:只剩标称 × 下限;用 20 点伤害(低于穿甲线 42)才能单独验证下限
         h3 = _Holder()
@@ -1460,6 +1476,67 @@ def run():
             draw_item_icon(surf, Item(helm_id), 0, 0, cell)
 
     check("护甲耐久-磨损/穿甲/打光/维修/存档/图标", t_armor_durability)
+
+    def t_ammo():
+        """弹种:口径分组 / 穿甲等级 / 同口径通用 / 交易所左侧口径目录。"""
+        import settings
+        from inventory import Item
+        from game import Game
+        import uikit as _uk2
+
+        ammo = {k: v for k, v in settings.ITEMS.items() if v.get("cat") == "ammo"}
+        assert len(ammo) >= 30, len(ammo)
+        for iid, d in ammo.items():
+            assert d.get("caliber"), iid
+            assert 0 <= int(d.get("pen", -1)) <= 6, iid
+        # 口径分组:每组按穿甲从低到高排,且顺序表覆盖所有口径
+        groups = settings.ammo_by_caliber()
+        assert groups.get("5.45×39") and len(groups["5.45×39"]) >= 3
+        pens = [settings.ammo_pen(i) for i in groups["5.45×39"]]
+        assert pens == sorted(pens), pens
+        for cal in groups:
+            assert cal in settings.AMMO_CALIBER_ORDER, cal
+        # 同口径通用:AK-74 能装 5.45 的全部弹种,别的口径塞不进来
+        ids = settings.weapon_ammo_ids(Item("ak74"))
+        assert set(groups["5.45×39"]) <= set(ids), ids
+        assert "a762" not in ids, ids
+        # 近战没有弹种;RPG 只认火箭弹(不和 M966 混口径)
+        assert settings.weapon_ammo_ids(Item("knife")) == []
+        assert settings.weapon_ammo_ids(Item("rpg")) == ["rocket"]
+        # 交易所:弹药分区 + 左侧口径目录 + 筛选
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        h = g.hideout
+        h.trade_cat = "ammo"
+        h.trade_ammo_cal = None
+        all_ammo = h.trade_goods()
+        assert all_ammo and all(settings.ITEMS[i]["cat"] == "ammo" for i, _c in all_ammo)
+        h.trade_ammo_cal = "5.45×39"
+        only = h.trade_goods()
+        assert only and all(settings.ITEMS[i]["caliber"] == "5.45×39"
+                            for i, _c in only), only
+        assert len(only) < len(all_ammo)
+        h.trade_ammo_cal = None
+        rows = h._trade_cal_rows()
+        cals = {cal for _l, cal, _r in rows}
+        assert None in cals and "5.45×39" in cals, cals
+        rects = [r for _l, _c, r in rows]
+        for i in range(len(rects)):
+            for j in range(i + 1, len(rects)):
+                assert not rects[i].colliderect(rects[j]), (i, j)
+        # 口径目录只在弹药分区出现
+        h.trade_cat = "weapon"
+        assert h._trade_cal_rows() == []
+        h.trade_cat = "ammo"
+        # 悬浮提示:口径 + 穿甲等级 + 说明
+        lines = _uk2.item_info_lines(Item("a545"))
+        assert any("口径 5.45×39" in ln for ln in lines), lines
+        assert any("穿甲等级 4/6" in ln for ln in lines), lines
+        lines2 = _uk2.item_info_lines(Item("a9"))
+        assert any("穿甲等级 1/6" in ln for ln in lines2), lines2
+
+    check("弹种-口径分组/穿甲等级/同口径通用/交易所口径目录", t_ammo)
 
     def t_boss():
         """三张地图的头目系统:5 级甲(89/81/75%)+ 专属枪械掉落。"""
@@ -2186,15 +2263,25 @@ def run():
         assert weapon_slots("m139") == []
         # 6) 弹药分级
         assert "a12" not in ITEMS, "旧霰弹应被龙息/独头弹取代"
-        assert set(weapon_ammo_ids(Item.weapon("mp133"))) == {"a12db", "a12ap"}
+        # 同口径通用:MP-133 能装 12 号的全部弹种(至少含龙息/穿甲独头)
+        mp133_ammo = set(weapon_ammo_ids(Item.weapon("mp133")))
+        assert {"a12db", "a12ap"} <= mp133_ammo, mp133_ammo
+        assert all(ITEMS[i].get("caliber") == "12号" for i in mp133_ammo), mp133_ammo
         assert weapon_params(Item.weapon("mp133"))[1] >= 5        # 龙息:多弹丸
         it_ap = Item.weapon("mp133")
         it_ap.state["loaded"] = "a12ap"
         ap = weapon_params(it_ap)
         assert ap[1] == 1 and ap[0] > 30, ap[:2]                  # 独头弹:单发高伤
         for rid in ("ak74", "akm", "m4a1", "m700"):
-            for aid in weapon_ammo_ids(Item.weapon(rid)):
-                assert ITEMS[aid].get("dmg_mul", 1.0) > 1.0, (rid, aid)
+            ids_r = weapon_ammo_ids(Item.weapon(rid))
+            assert ids_r, rid
+            # 同口径里必须有穿甲弹(伤害倍率 > 1),也要有普通弹(倍率 = 1)
+            assert any(ITEMS[a].get("dmg_mul", 1.0) > 1.0 for a in ids_r), rid
+            # 每一发都必须是这个口径、且带穿甲等级(交易所口径目录靠它分组)
+            cal_r = ITEMS[ids_r[0]].get("caliber")
+            for aid in ids_r:
+                assert ITEMS[aid].get("caliber") == cal_r, (rid, aid)
+                assert ITEMS[aid].get("pen") is not None, (rid, aid)
         # 7) 藏身处安装配件(含机枪拒绝)
         g = Game()
         g.save = save_mod.reset_data()
@@ -4302,8 +4389,7 @@ def run():
         p.hp = p.max_hp
         eff_a = p.armor.armor_effective_reduce()             # 满耐久时的实际减伤
         assert eff_a > 0
-        p.take_damage(100, r)
-        # 100 >= 3 级 × ARMOR_PEN_PER_LEVEL,判定穿甲 → 只挡 eff × ARMOR_PEN_KEEP
+        p.take_damage(100, r, pen=3)                         # 3 级弹打 3 级甲 -> 穿透
         expect = max(1, round(100 * (1 - eff_a * _st.ARMOR_PEN_KEEP)))
         assert p.max_hp - p.hp == expect, (p.max_hp - p.hp, expect)
         p.hp = p.max_hp
@@ -4311,18 +4397,18 @@ def run():
         p.helmet = Item("h_6bnt")                            # 6 级盔:标称再减 40%
         ea = p.armor.armor_effective_reduce()
         eh = p.helmet.armor_effective_reduce()
-        p.take_damage(100, r)
+        p.take_damage(100, r, pen=3)                         # 护甲被穿,头盔打不穿
         dmg = 100.0
-        dmg -= dmg * ea * _st.ARMOR_PEN_KEEP                  # 100 >= 42,护甲被穿
-        dmg -= dmg * eh * _st.ARMOR_PEN_KEEP                  # 100 >= 84,头盔也被穿
+        dmg -= dmg * ea * _st.ARMOR_PEN_KEEP
+        dmg -= dmg * eh                                      # 3 < 6-1,头盔吃满减伤
         expect = max(1, round(dmg))
         assert p.max_hp - p.hp == expect, (p.max_hp - p.hp, expect)
         p.hp = p.max_hp
         p.armor = None                                       # 只戴头盔
         p.helmet = Item("h_6bnt")
         eh = p.helmet.armor_effective_reduce()
-        p.take_damage(100, r)
-        expect = max(1, round(100 * (1 - eh * _st.ARMOR_PEN_KEEP)))
+        p.take_damage(100, r, pen=3)
+        expect = max(1, round(100 * (1 - eh)))
         assert p.max_hp - p.hp == expect, (p.max_hp - p.hp, expect)
         assert p.hp > 0, "这里不该被打死"
         # 7) 悬浮信息与 HUD 渲染(普通头盔显示减伤,夜视头盔显示夜视)

@@ -145,6 +145,7 @@ class Hideout:
         self.trade_stash_grid = (66, 150)
         self.trade_stash_view_h = 9 * 40      # 交易所左侧仓库可见高度(其余滚轮翻)
         self.trade_cat = None            # 当前分区(None = 全部)
+        self.trade_ammo_cal = None       # 弹药分区里选中的口径(None = 全部口径)
         self.trade_scroll = 0.0          # 商品网格的滚动偏移
         self.trade_view_top = 178        # 商品网格可见范围(与 trade_view_bottom 一对)
         self.trade_view_bottom = 178 + TRADE_PAGE_H
@@ -210,6 +211,7 @@ class Hideout:
     TRADE_PAD = 6
     TRADE_TAB_H = 30         # 分区标签高
     TRADE_TAB_PAD = 6        # 分区标签间距
+    TRADE_CAL_W = 92         # 弹药分区:左侧口径目录宽
 
     def _trade_panels(self):
         """(左面板, 右面板):左 = 你的仓库,右 = 分区标签 + 商品。"""
@@ -228,10 +230,38 @@ class Hideout:
                              self.TRADE_TAB_H))
                 for i, (label, cat) in enumerate(TRADE_TABS)]
 
+    def _trade_cal_rows(self):
+        """弹药分区的口径目录(竖排在商品区左侧):[(label, caliber, rect)]。
+
+        caliber 为 None 的那一项是「全部」。只有确实有货的口径才列出来。
+        """
+        if self.trade_cat != "ammo":
+            return []
+        from settings import AMMO_CALIBER_ORDER, ammo_by_caliber
+        view_full = pygame.Rect(self._trade_panels()[1].x + 18, self.trade_view_top,
+                                self._trade_panels()[1].w - 36, TRADE_PAGE_H)
+        w, h, gap = self.TRADE_CAL_W, 24, 2
+        x = view_full.x
+        y = view_full.y
+        groups = ammo_by_caliber()
+        rows = [("全部", None)]
+        for cal in AMMO_CALIBER_ORDER:
+            if groups.get(cal):
+                rows.append((f"{cal} ({len(groups[cal])})", cal))
+        out = []
+        for i, (label, cal) in enumerate(rows):
+            out.append((label, cal, pygame.Rect(x, y + i * (h + gap), w, h)))
+        return out
+
     def _trade_goods_view(self):
-        """右侧商品网格的可见范围(上面留给分区标签,右边留给滚动条)。"""
+        """右侧商品网格的可见范围(上面留给分区标签,右边留给滚动条)。
+
+        弹药分区还要在左边让出口径目录的宽度。
+        """
         p = self._trade_panels()[1]
         x = p.x + 18
+        if self.trade_cat == "ammo":
+            x += self.TRADE_CAL_W + 10
         return pygame.Rect(x, self.trade_view_top,
                            p.right - 36 - x, TRADE_PAGE_H)
 
@@ -765,9 +795,13 @@ class Hideout:
 
     # ---- 交易站:商品网格与滚动 ----
     def trade_goods(self):
-        """当前分区的商品列表(「特殊枪械」= 头目专属枪械)。"""
+        """当前分区的商品列表(「特殊枪械」= 头目专属枪械;弹药按口径再筛一次)。"""
         from settings import trade_cat_match
-        return [g for g in TRADE_GOODS if trade_cat_match(g[0], self.trade_cat)]
+        goods = [g for g in TRADE_GOODS if trade_cat_match(g[0], self.trade_cat)]
+        if self.trade_cat == "ammo" and self.trade_ammo_cal:
+            goods = [g for g in goods
+                     if (ITEMS.get(g[0]) or {}).get("caliber") == self.trade_ammo_cal]
+        return goods
 
     def trade_max_scroll(self):
         goods = self.trade_goods()
@@ -2117,7 +2151,14 @@ class Hideout:
         for label, cat, r in self._trade_cat_rows():
             if r.collidepoint(pos):
                 self.trade_cat = cat
+                self.trade_ammo_cal = None       # 换分区时口径筛选复位
                 self.trade_scroll = 0.0          # 换分区回到顶部
+                return
+        # 弹药分区:左侧口径目录
+        for _label, cal, r in self._trade_cal_rows():
+            if r.collidepoint(pos):
+                self.trade_ammo_cal = cal
+                self.trade_scroll = 0.0
                 return
         # 商品格
         view = self._trade_goods_view()
@@ -2734,6 +2775,18 @@ class Hideout:
                 label, True, COL["accent"] if sel else COL["text"])
             screen.blit(ft, ft.get_rect(center=r.center))
 
+        # ---- 弹药分区:左侧口径目录(点口径 = 只看这个口径的弹) ----
+        for label, cal, r in self._trade_cal_rows():
+            sel = self.trade_ammo_cal == cal
+            hover = r.collidepoint(mx, my)
+            pygame.draw.rect(screen, COL["panel_hi"] if (hover or sel) else COL["panel"],
+                             r, border_radius=6)
+            pygame.draw.rect(screen, COL["accent"] if sel else COL["border"],
+                             r, 2 if sel else 1, border_radius=6)
+            ft = get_font(13, bold=True).render(
+                label, True, COL["accent"] if sel else COL["text"])
+            screen.blit(ft, ft.get_rect(center=r.center))
+
         # ---- 商品网格 ----
         goods = self.trade_goods()
         view = self._trade_goods_view()
@@ -2755,12 +2808,24 @@ class Hideout:
             pygame.draw.rect(screen, d["color"], (r.x + 8, r.y + 9, 8, 24),
                              border_radius=2)
             name = d["name"] + (f" ×{count}" if d["cat"] == "ammo" else "")
-            nt = get_font(15, bold=True).render(
+            nfont = get_font(15, bold=True)
+            # 弹药分区左侧要让出口径目录,格子变窄:名字放不下就截断加省略号
+            avail = r.w - 34
+            if nfont.size(name)[0] > avail:
+                while name and nfont.size(name + "…")[0] > avail:
+                    name = name[:-1]
+                name = name + "…"
+            nt = nfont.render(
                 name, True, COL["text"] if afford else (108, 108, 114))
             screen.blit(nt, (r.x + 24, r.y + 9))
             cls = weapon_class(iid)
             if cls:
                 sub = get_font(12).render(cls, True, COL["text_dim"])
+                screen.blit(sub, (r.x + 24, r.y + 32))
+            elif d["cat"] == "ammo":
+                # 弹药:直接标穿甲等级,不用点开提示也能比较
+                sub = get_font(12).render(
+                    f"穿甲 {d.get('pen', 0)}/6", True, COL["text_dim"])
                 screen.blit(sub, (r.x + 24, r.y + 32))
             pt = get_font(14, bold=True).render(
                 fmt_rub(price), True, COL["accent"] if afford else COL["bad"])

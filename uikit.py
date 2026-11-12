@@ -259,6 +259,24 @@ def draw_slot(surface, rect, item, label, hover=False):
     return rect
 
 
+def ammo_pen_hint(pen):
+    """穿甲等级的一句话说明(给悬浮提示用)。"""
+    pen = int(pen or 0)
+    if pen >= 6:
+        return "可穿透 6 级甲"
+    if pen >= 5:
+        return "可穿透 5 级甲"
+    if pen >= 4:
+        return "可穿透 4 级甲"
+    if pen >= 3:
+        return "可穿透 3 级甲"
+    if pen >= 2:
+        return "可穿透 2 级甲"
+    if pen >= 1:
+        return "只能穿透 1 级甲"
+    return "打不穿任何护甲"
+
+
 def armor_dur_line(item):
     """护甲/头盔的耐久说明行(给悬浮提示用)。"""
     mx = item.armor_max_dur()
@@ -390,6 +408,16 @@ def item_info_lines(item):
     elif item.cat == "med":
         sub.append(f"治疗 {d['heal']} HP")
     elif item.cat == "ammo":
+        cal = d.get("caliber")
+        pen = int(d.get("pen", 0) or 0)
+        sub.append(f"口径 {cal or '?'}   穿甲等级 {pen}/6"
+                   f"   {ammo_pen_hint(pen)}")
+        if d.get("dmg_mul") not in (None, 1, 1.0):
+            sub.append(f"伤害倍率 ×{d['dmg_mul']:.2f}")
+        if d.get("pellets", 1) > 1:
+            sub.append(f"一次发射 {d['pellets']} 颗弹丸")
+        if d.get("desc"):
+            sub.append(d["desc"])
         sub.append(f"剩余 {item.count} 发")
     lines.extend(sub)
     return lines
