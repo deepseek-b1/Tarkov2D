@@ -7,7 +7,7 @@ import pygame
 from inventory import Item      # 装备位里的武器要在槽之间搬(inventory 不反向依赖本模块)
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.13.11"
+GAME_VERSION = "2.13.12"
 # 更新清单地址(留空则只认 EXE 同目录的 version.json)。
 # 默认指向仓库里的 update_server/version.json —— 推到 main 就生效,不用再发服务器。
 # 也可以换成本机自建服务器(如 http://127.0.0.1:8765/version.json)。
@@ -1829,13 +1829,11 @@ def fire_mode_name(mode):
 # ---------- 游戏模式 ----------
 MODES = {
     "raid": dict(name="搜打撤", short="搜打撤", desc="自由搜刮 · 找撤离点撤离"),
-    "hostage": dict(name="人质解救", short="人质", desc="室内近战 · 20 名匪徒分守八间房 · 救出 4 名人质"),
     "assault": dict(name="突袭", short="突袭", desc="强攻敌巢 · 50 守军 · 友军空袭支援"),
-    "story": dict(name="剧情", short="剧情", desc="灰区二日 · 两天两夜 · 有分支与结局"),
     "night": dict(name="黑暗行动", short="夜战",
                   desc="漆黑一片 · 要自带光源 · 默认强化封锁"),
 }
-MODE_ORDER = ["raid", "hostage", "assault", "story", "night"]
+MODE_ORDER = ["raid", "assault", "night"]
 
 # ---------- 黑暗模式(夜战) ----------
 # 全图压成漆黑:只有「光源范围」内能看见东西(敌人也只有亮区里才显示)。
@@ -1846,13 +1844,10 @@ NIGHT_BEAM_RGB = (240, 236, 205)  # 手电光锥的颜色(暖白)
 NIGHT_TINT = (150, 235, 170)  # 夜视仪亮区的偏色(微绿)
 NIGHT_AMBIENT_TINT = (120, 126, 140)   # 脚边微光的颜色(偏冷灰)
 NIGHT_BEAM_STEPS = 26       # 光锥圆弧的采样点数
-HOSTAGE_COUNT = 4          # 人质数量
-HOSTAGE_ENEMIES = 20       # 人质模式的敌人数量下限(地图上的刷新点按房间均匀布置)
 ALLY_COUNT = 3             # 队友数量
 ALLY_HP = 130
 ALLY_DMG = 13
 ALLY_RANGE = 520
-HOSTAGE_RESCUE_TIME = 2.5  # 解救人质引导时间(秒)
 REVIVE_TIME = 2.0          # 拉起倒地球友的引导时间(秒)
 INTERACT_RANGE = 64        # 人质/队友交互距离(像素)
 
@@ -1938,7 +1933,7 @@ SUPPORT = {
 
 # ---------- 固定强度的模式(不给难度档) ----------
 # 人质解救 = 强化封锁强度;夜战 = 强化封锁(用户要求:太亮/太简单就没意思)
-MODE_DIFF = {"hostage": "hardened", "night": "hardened"}
+MODE_DIFF = {"assault": "hardened", "night": "hardened"}
 
 # ---------- 双人合作(同一台电脑两人玩,见 coop.py) ----------
 # P2 只用键盘:方向键移动 + 自动瞄准最近可见敌人,其余是动作键。这些键由 P2
@@ -1971,13 +1966,6 @@ COOP_MODES = ("raid", "night")
 
 # ---------- 剧情模式《灰区二日》 ----------
 # 独立模式:固定强度,两天 × 四时段,每个时段出击一次
-STORY_DIFF = dict(name="剧情", hp=0.95, dmg=0.85, spread=1.15, rof=1.15,
-                  view=0.95, speed=0.95, scavs=22, rolls=2, loot=1.05,
-                  desc="封锁区守军(固定强度)", loot_desc="城区物资")
-STORY_TIMES = [12 * 60, 12 * 60, 10 * 60, 8 * 60]   # 各时段出击时限(按 period 取)
-STORY_FINAL_TIME = 10 * 60      # 最终撤离:最后十分钟
-STORY_WANTED_BONUS = 6          # 每级通缉给敌人数量加多少
-STORY_INTERACT = 64             # 剧情交互距离(和搜刮一致)
 
 # ---------- 背包卷起(省仓库格子) ----------
 # 展开占格不超过 4×4 的包,卷起来只占 1×2;5×5 及以上的占 2×2
@@ -2005,8 +1993,6 @@ TASKS = [
          reward=dict(rubles=40000, attachments=["mag_ext"])),
     dict(id="t3", name="深入敌后", desc="累计带回价值 30 万的物资", kind="value", need=300000,
          reward=dict(rubles=50000, attachments=["grip_vert"])),
-    dict(id="t4", name="救出人质", desc="完成 1 次人质解救(救满 4 人并撤离)",
-         kind="hostage_win", need=1, reward=dict(rubles=80000, weapons=["m4a1"])),
     dict(id="t5", name="要塞攻坚", desc="完成 1 次突袭(炸毁 3 座设施并撤离)",
          kind="assault_win", need=1,
          reward=dict(rubles=150000, weapons=["pkp"], attachments=["stock_heavy"])),
@@ -2345,3 +2331,14 @@ ITEMS["a_6b2"] = dict(name="6B2 防弹衣", cat="armor", w=2, h=2, color=(82,88,
 TRADE_GOODS.append(("a_6b2", 1))
 ITEMS["a_6b23_1"] = dict(name="6B23-1 防弹衣", cat="armor", w=2, h=2, color=(82,88,96), price=210320, level=3, reduce=0.28, slow=0.12, desc="3 级防弹衣 · 耐久 206")
 TRADE_GOODS.append(("a_6b23_1", 1))
+
+# ---------- .50 BMG 三弹种(依据游戏内截图数据换算,配 AK-50 / AX-50) ----------
+ITEMS["m33_50bmg"] = dict(name=".50 BMG M33 弹", cat="ammo", w=1, h=1, color=(224, 206, 150), price=11600, dmg_mul=1.00, pen=5, stack=20, caliber="12.7×99", desc=".50 BMG 实心弹 · 穿深高、伤害稳定")
+AMMO_INFO["m33_50bmg"] = ("12.7×99", 5, ".50 BMG 实心弹 · 穿深高、伤害稳定")
+TRADE_GOODS.append(("m33_50bmg", 20))
+ITEMS["slap_50bmg"] = dict(name=".50 BMG M903 SLAP 弹", cat="ammo", w=1, h=1, color=(224, 206, 150), price=19800, dmg_mul=0.72, pen=6, stack=20, caliber="12.7×99", desc=".50 BMG 脱壳穿甲弹 · 破甲极强、后坐大")
+AMMO_INFO["slap_50bmg"] = ("12.7×99", 6, ".50 BMG 脱壳穿甲弹 · 破甲极强、后坐大")
+TRADE_GOODS.append(("slap_50bmg", 20))
+ITEMS["hp_50bmg"] = dict(name=".50 BMG HP 弹", cat="ammo", w=1, h=1, color=(224, 206, 150), price=7200, dmg_mul=1.90, pen=2, stack=20, caliber="12.7×99", desc=".50 BMG 空尖弹 · 打裸身一枪一个、遇甲几乎无效")
+AMMO_INFO["hp_50bmg"] = ("12.7×99", 2, ".50 BMG 空尖弹 · 打裸身一枪一个、遇甲几乎无效")
+TRADE_GOODS.append(("hp_50bmg", 20))

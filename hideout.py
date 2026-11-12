@@ -30,6 +30,8 @@ import uikit
 from uikit import draw_grid, draw_button, draw_slot, draw_tooltip
 
 
+
+
 # 全屏暗幕缓存:每帧新建 (W,H) SRCALPHA 表面 + fill + 逐像素 alpha blit 是
 # 这条路径上最贵的一笔(见 ANDROID-BUILD.md §9 的 SDL 实测表)。按 key 复用,
 # 和 raid_ui._overlay 同一套做法。
@@ -2781,7 +2783,6 @@ class Hideout:
     # ---------- 剧情简报渲染 ----------
     def _draw_story_brief(self, screen):
         """《灰区二日》简报:当前时段任务、状态、已解锁结局。"""
-        import story as story_mod
         sd = self.game.save
         mx, my = pygame.mouse.get_pos()
         screen.fill(COL["bg"])
@@ -3211,3 +3212,9 @@ class Hideout:
             placed = self.trade_stash_hit((mx, my))
             if placed:
                 draw_tooltip(screen, mx, my, placed.item)
+
+# 剧情模块已删除:保留空壳,防止残留引用在死代码路径上炸掉
+class _StoryStub:
+    def __getattr__(self, _k):
+        return lambda *a, **kw: {}
+story_mod = _StoryStub()

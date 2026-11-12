@@ -7,9 +7,10 @@ import pygame
 
 import audio
 import coop as coop_mod
-import story as story_mod
 import uikit
 from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
+
+
                       ADRENALINE_TIME, ADRENALINE_MAX_STACK, ADRENALINE_SPEED_MUL,
                       ADRENALINE_REGEN, ADRENALINE_HP_MUL,
                       INTERACT_DIST, ITEMS, LOOT, SCAV_DROPS, DIFFICULTIES,
@@ -17,12 +18,10 @@ from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       MAPS, BOSSES, GUARD_ARMOR_DROP, GUARD_ARMORS,
                       AUTHOR_BOSS, AUTHOR_MIN_DIFFICULTY, RPG_BLAST_RADIUS,
                       RPG_HALF_HP_ARMOR_LEVEL, TOUCH, MODES, MODE_MAP,
-                      HOSTAGE_COUNT, HOSTAGE_ENEMIES, ALLY_COUNT,
-                      HOSTAGE_RESCUE_TIME, REVIVE_TIME, INTERACT_RANGE, ALLY_DMG,
+                      ALLY_COUNT,
+                      REVIVE_TIME, INTERACT_RANGE, ALLY_DMG,
                       ASSAULT_ENEMIES, ASSAULT_ALLIES, ASSAULT_PLANT_TIME,
                       ASSAULT_START_POINTS, ASSAULT_KILL_POINTS, ASSAULT_DIFF,
-                      STORY_DIFF, STORY_TIMES, STORY_FINAL_TIME,
-                      STORY_WANTED_BONUS, STORY_INTERACT,
                       SUPPORT, SUPPORT_ORDER,
                       C4_FUSE, C4_BLAST_RADIUS, C4_UNIT_DMG, C4_STRUCT_DMG,
                       C4_PLANT_RANGE, STRUCT_INFO, ALLY_STRUCT_HP, MODE_DIFF,
@@ -51,7 +50,7 @@ import bindings
 from inventory import Item, try_move
 from world import GameMap, LootContainer
 from enemy import Scav
-from npc import Ally, Hostage
+from npc import Ally
 import touch as touch_mod
 from touch import TouchUI
 
@@ -1163,7 +1162,7 @@ class Raid:
         wanted = self.diff["scavs"]
         if self.mode == "hostage":
             # 室内图的刷新点本身就是按房间均匀摆设的,取满即扩保证分散
-            wanted = max(wanted, HOSTAGE_ENEMIES)
+            wanted = max(wanted)
         if wanted <= len(spawns):
             return random.sample(spawns, wanted) if wanted < len(spawns) else spawns
         px, py = self.map.spawn
@@ -1326,7 +1325,7 @@ class Raid:
                 if t.kind == "extract":
                     continue
                 d = math.hypot(t.x - p.x, t.y - p.y)
-                if d < min(bd, STORY_INTERACT):
+                if d < min(bd):
                     best, bd, kind = t, d, "story"
         return (kind, best) if best is not None else (None, None)
 
@@ -1336,7 +1335,7 @@ class Raid:
         if k == "story":
             o = self.channel["ent"].obj
             return float(o.get("need", 2.0)) if o else 2.0
-        return {"rescue": HOSTAGE_RESCUE_TIME, "revive": REVIVE_TIME,
+        return {"rescue": REVIVE_TIME, "revive": REVIVE_TIME,
                 "destroy": ASSAULT_PLANT_TIME}.get(k, 1.0)
 
     def channel_label(self, kind=None):
@@ -4491,3 +4490,9 @@ class Raid:
 
     def value_of(self, item):
         return item.total_price()
+
+# 剧情模块已删除:保留空壳,防止残留引用在死代码路径上炸掉
+class _StoryStub:
+    def __getattr__(self, _k):
+        return lambda *a, **kw: {}
+story_mod = _StoryStub()

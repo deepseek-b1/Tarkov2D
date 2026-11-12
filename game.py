@@ -11,10 +11,11 @@ import mystery
 import net as net_mod
 import quests
 import save as save_mod
-import story as story_mod
 import raid_ui
 from hideout import Hideout
 from settings import W, H, COOP_MODES
+
+
 
 
 def _install_vsync_default():
@@ -430,3 +431,9 @@ class Game:
             pass
         if not keep_window:
             pygame.quit()
+
+# 剧情模块已删除:保留空壳,防止残留引用在死代码路径上炸掉
+class _StoryStub:
+    def __getattr__(self, _k):
+        return lambda *a, **kw: {}
+story_mod = _StoryStub()

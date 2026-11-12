@@ -9,13 +9,15 @@ import audio
 import bindings
 from settings import (W, H, COL, BAG_W, BAG_H, RAID_TIME, EXTRACT_TIME,
                       ADRENALINE_SPEED_MUL, ADRENALINE_REGEN, ADRENALINE_HP_MUL,
-                      HOSTAGE_RESCUE_TIME, REVIVE_TIME, C4_BLAST_RADIUS,
+                      REVIVE_TIME, C4_BLAST_RADIUS,
                       NIGHT_DARK_RGB, NIGHT_BEAM_RGB, PLAYER, COOP,
                       fmt_rub, get_font, to_display, fog_darken,
                       weapon_beam, helmet_nvg, weapon_fire_mode,
                       weapon_fire_modes, fire_mode_name)
 import uikit
 from uikit import CELL, draw_grid, draw_item_icon, draw_tooltip, draw_button, draw_slot
+
+
 
 
 # 白天的迷雾压暗系数(定点 8 位),给 _dim() 调暗视野外的小物件用。
@@ -624,7 +626,6 @@ def draw_raid(raid, screen):
 
     # 剧情模式:关键点与 NPC 标记
     if raid.mode == "story":
-        import story as story_mod
         # 待决定的俘虏:画三个小人;选完之后变成"被放走(往南走)/被处决(尸体)"
         cap = story_mod.CITY_AT.get("captives")
         if cap and raid.story_mission is not None \
@@ -1380,7 +1381,6 @@ def _draw_hud(raid, screen):
 
     # 剧情模式:第几天/时段 + 目标勾选 + 状态
     if raid.mode == "story" and not raid.over:
-        import story as story_mod
         sd = raid.game.save
         s = story_mod.st(sd)
         m = story_mod.mission(sd)
@@ -2036,7 +2036,6 @@ def _draw_result(raid, screen):
 
     elif r.get("mode") == "story":
         sd = raid.game.save
-        import story as story_mod
         s = story_mod.st(sd)
         note = r.get("story_note", "")
         if note:
@@ -2069,3 +2068,9 @@ def _draw_result(raid, screen):
             y += 26
     t = get_font(16).render("按任意键返回藏身处", True, COL["text_dim"])
     screen.blit(t, t.get_rect(center=(W // 2, H - 90)))
+
+# 剧情模块已删除:保留空壳,防止残留引用在死代码路径上炸掉
+class _StoryStub:
+    def __getattr__(self, _k):
+        return lambda *a, **kw: {}
+story_mod = _StoryStub()

@@ -686,23 +686,12 @@ MAPS = {
                  boss="port",
                  desc="集装箱迷宫 + 南侧海域,栈桥撤离"),
     # 人质模式专用:室内大楼
-    "indoor": dict(name="人质大楼", short="人质大楼", rows=build_indoor(),
-                   extracts={"1": "西侧门", "2": "东侧门", "3": "正门广场"},
-                   boss=None, indoor=True,
-                   desc="室内近战 · 拐角死角多 · 别暴露在开阔地"),
     # 突袭模式专用:敌军大本营
     "base": dict(name="敌军大本营", short="大本营", rows=build_base(),
                  extracts={"1": "西线公路", "2": "东线公路"},
                  boss="base", indoor=True,
                  desc="要塞攻坚 · 50 名守军 · 系统配发满配装备"),
-    # 剧情模式专用:卡斯卡德-7 城区(一张连续大图,7 个撤离点由剧情规则开放)
-    "city": dict(name="卡斯卡德-7", short="卡斯卡德", rows=build_city(),
-                 extracts={"1": "铁路桥", "2": "下水道", "3": "黑曜石检查站",
-                           "4": "直升机坪", "5": "铁路隧道", "6": "港口船只",
-                           "7": "地下管道"},
-                 boss=None,
-                 desc="封锁区城区 · 两天两夜 · 剧情模式专用"),
 }
-MAP_ORDER = ["border", "tv", "port", "indoor", "base", "city"]
+MAP_ORDER = ["border", "tv", "port", "base"]
 # 模式对应地图(人质→室内大楼,突袭→大本营,剧情→卡斯卡德-7 城区)
-MODE_MAP = {"raid": None, "hostage": "indoor", "assault": "base", "story": "city"}
+MODE_MAP = {"raid": None, "assault": "base", "story": "city"}
