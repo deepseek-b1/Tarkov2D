@@ -1310,7 +1310,13 @@ def run():
             text, ratio = updater._hud_text(s)
             assert "9.9.9" in text and ratio is None, (text, ratio)
 
-            # 2) 开发模式(python 运行)不下载,但要说明原因
+            # 2) 开发模式(python 运行)不下载,但要说明原因。
+            #    打包后的 EXE 里 sys.frozen 本来就是 True,这里先临时去掉,
+            #    让这条用例在「源码运行」和「成品 EXE 自检」下结论一致。
+            try:
+                del sys.frozen
+            except AttributeError:
+                pass
             ok, msg = updater.start_download()
             assert ok is False and "开发" in msg, msg
 

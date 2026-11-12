@@ -1,4 +1,4 @@
-[app]
+﻿[app]
 # Tarkov2D - Android packaging config (buildozer / python-for-android)
 # Build with:  buildozer -v android debug
 #
@@ -16,7 +16,7 @@ source.include_patterns = fonts/*
 source.exclude_dirs = build, dist, update_server, webapp, .github, .codely-cli, __pycache__, p4a-recipes
 source.exclude_exts = spec, bat, md, exe, log, zip
 
-version = 2.13.1
+version = 2.13.2
 
 # Pinned on purpose - each line below is a fix for a real build failure:
 #   * p4a stock pygame recipe is stuck at 2.1.0 (2021) and uses the old
