@@ -237,6 +237,11 @@ class Game:
             sd.mode = "raid"      # 联机只支持搜打撤 / 夜战(和同屏双人一致)
         self.lan_role = "host"
         try:
+            _slots = tuple(self.net.slots() or (2,))
+            self.coop_slots = _slots
+        except Exception:
+            self.coop_slots = (2,)
+        try:
             self.start_raid()
         except Exception:
             self.lan_role = None
@@ -245,7 +250,8 @@ class Game:
         self.net.host_start(dict(
             mode=raid.mode, diff_key=getattr(raid, "diff_key", None),
             map_key=raid.map_key, time_left=raid.time_left, coop=True,
-            host=getattr(sd, "name", "") or self.net.room_name))
+            host=getattr(sd, "name", "") or self.net.room_name,
+            slots=list(getattr(self, "coop_slots", (2,)))))
         return True
 
     def lan_client_begin(self, cfg):
@@ -259,6 +265,10 @@ class Game:
         if cfg.get("map_key"):
             sd.map_key = cfg["map_key"]
         self.lan_role = "client"
+        try:
+            self.coop_slots = tuple(int(s) for s in (cfg.get("slots") or (2,)))
+        except Exception:
+            self.coop_slots = (2,)
         self.start_raid()
         raid = self.raid
         raid.lan = "client"

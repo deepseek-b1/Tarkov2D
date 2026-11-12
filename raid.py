@@ -397,22 +397,42 @@ class Raid:
         self.net_input = {}
         self.lan_edge = False        # 客户端:本帧鼠标左键刚按下
         self.player2 = None
+        self.player3 = None
+        self.player4 = None
         self.p2_kit = None
         self.p2_revive_used = False     # P2 的 6 级甲自救(每局一次)
+        self.p3_revive_used = False
+        self.p4_revive_used = False
         self.p2_take = None             # P2 的自动搜刮状态
         self.p2_extract_t = 0.0         # P2 的撤离引导进度
+        self.p3_extract_t = 0.0
+        self.p4_extract_t = 0.0
         self.p2_fire_edge = False       # P2 的点射沿(键盘按下那一帧)
+        self.p3_fire_edge = False
+        self.p4_fire_edge = False
         self.p2_start_value = 0
+        self.p3_start_value = 0
+        self.p4_start_value = 0
+        # 联机最多 4 人:房主 + 槽位 2/3/4;同屏双人只有 2 号
+        self.coop_slots = ()
         if self.coop:
-            self.p2_kit = coop_mod.P2Kit()
-            self.player2 = Player(self.p2_kit)
-            self.player2.x, self.player2.y = self._p2_spawn()
-            self.player2.aim = self.player.aim
+            self.coop_slots = tuple(
+                int(s) for s in (getattr(game, "coop_slots", None) or (2,))
+                if 2 <= int(s) <= 4) or (2,)
+            for _s in self.coop_slots:
+                _kit = coop_mod.P2Kit()
+                _q = Player(_kit)
+                _q.x, _q.y = self._remote_spawn(_s)
+                _q.aim = self.player.aim
+                setattr(self, "player%d" % _s, _q)
+                if _s == 2:
+                    self.p2_kit = _kit
         self.cam = [0, 0]
         self.shake = 0.0
         self.start_value = self._loadout_value()   # 进局装备总值(撤离收益快照基准)
-        if self.coop:
-            self.p2_start_value = self._loadout_value(self.player2)
+        for _q in self.players()[1:]:
+            setattr(self, self._PSTART[self.p_slot(_q)],
+                    self._loadout_value(_q))
 
         self.scavs = [Scav(k, x, y, self.diff) for k, (x, y) in self._pick_spawns()]
         if self.mode == "hostage":
@@ -638,18 +658,42 @@ class Raid:
 
     # ---------- 玩家集合(单人 / 双人合作共用) ----------
     def players(self):
-        """本局所有玩家:P1,双人合作时还有 P2。"""
-        if self.player2 is not None:
-            return (self.player, self.player2)
-        return (self.player,)
+        """本局所有玩家:P1,合作时还有 P2/P3/P4(联机最多 4 人)。"""
+        out = [self.player]
+        for s in (2, 3, 4):
+            q = getattr(self, "player%d" % s, None)
+            if q is not None:
+                out.append(q)
+        return tuple(out)
+
+    def p_slot(self, p):
+        """玩家槽位:1=房主,2/3/4=队友;不是本局玩家返回 None。"""
+        if p is None:
+            return None
+        if p is self.player:
+            return 1
+        for s in (2, 3, 4):
+            if p is getattr(self, "player%d" % s, None):
+                return s
+        return None
 
     def _p2_spawn(self):
-        """给 P2 找一个离 P1 一两格、站得下人的出生点(找不到就同点出生)。"""
+        """兼容老调用:P2 的出生点。"""
+        return self._remote_spawn(2)
+
+    def _remote_spawn(self, slot):
+        """给队友找一个离 P1 一两格、站得下人的出生点(找不到就同点出生)。
+
+        4 人时按槽位错开搜索方向,免得 P2/P3/P4 挤在同一个格子。
+        """
         bx, by = self.map.spawn
+        off = {2: 0, 3: 2, 4: 4}.get(int(slot or 2), 0)
+        dirs_all = ((1, 0), (-1, 0), (0, 1), (0, -1),
+                    (1, 1), (-1, -1), (1, -1), (-1, 1))
+        dirs = dirs_all[off % len(dirs_all):] + dirs_all[:off % len(dirs_all)]
         tx, ty = int(bx // TILE), int(by // TILE)
         for rad in (1, 2, 3):
-            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1),
-                           (1, 1), (-1, -1), (1, -1), (-1, 1)):
+            for dx, dy in dirs:
                 nx, ny = tx + dx * rad, ty + dy * rad
                 if self.map.tile_solid(nx, ny):
                     continue
@@ -673,11 +717,38 @@ class Raid:
         return self.player2 is not None and p is self.player2
 
     def player_name(self, p):
-        return "P2" if self.p_is_p2(p) else "P1"
+        s = self.p_slot(p)
+        return ("P%d" % s) if s else "P?"
+
+    # 每位玩家在 raid 上的状态字段名(槽位 -> 属性名)
+    _PSTART = {1: "start_value", 2: "p2_start_value",
+               3: "p3_start_value", 4: "p4_start_value"}
+    _PREVIVE = {1: "revive_used", 2: "p2_revive_used",
+                3: "p3_revive_used", 4: "p4_revive_used"}
+    _PEXTRACT = {1: "extract_t", 2: "p2_extract_t",
+                 3: "p3_extract_t", 4: "p4_extract_t"}
+    _PFIRE = {1: "fire_edge", 2: "p2_fire_edge",
+              3: "p3_fire_edge", 4: "p4_fire_edge"}
+
+    def _pslot_or(self, p, dflt=1):
+        s = self.p_slot(p)
+        return s if s else dflt
+
+    def get_extract(self, p):
+        return getattr(self, self._PEXTRACT[self._pslot_or(p)], 0.0)
+
+    def set_extract(self, p, v):
+        setattr(self, self._PEXTRACT[self._pslot_or(p)], v)
+
+    def get_fire_edge(self, p):
+        return getattr(self, self._PFIRE[self._pslot_or(p)], False)
+
+    def set_fire_edge(self, p, v):
+        setattr(self, self._PFIRE[self._pslot_or(p)], bool(v))
 
     def p_start_value(self, p):
         """该玩家进局时的装备总值(净收益快照基准)。"""
-        return self.p2_start_value if self.p_is_p2(p) else self.start_value
+        return getattr(self, self._PSTART[self._pslot_or(p)], 0)
 
     def nearest_player_d2(self, x, y):
         """(x, y) 到最近玩家的距离²(守军 AI 的远景降级判定用)。"""
@@ -733,15 +804,10 @@ class Raid:
 
     def can_revive(self, p):
         """6 级甲倒地自救还能用吗(每位玩家每局一次)。"""
-        if self.p_is_p2(p):
-            return not self.p2_revive_used
-        return not self.revive_used
+        return not getattr(self, self._PREVIVE[self._pslot_or(p)], False)
 
     def mark_revive(self, p):
-        if self.p_is_p2(p):
-            self.p2_revive_used = True
-        else:
-            self.revive_used = True
+        setattr(self, self._PREVIVE[self._pslot_or(p)], True)
 
     def player_down(self, p):
         """玩家倒下:单人 = 直接结算;双人 = 只要还有人在场上就继续打。"""
@@ -779,12 +845,14 @@ class Raid:
             self.add_toast("撤离成功!", COL["good"])
             self.finish("extract")
             return
-        if self.lan == "host" and self.p_is_p2(p):
+        _slot = self.p_slot(p)
+        if self.lan == "host" and _slot and _slot >= 2:
             # 联机:队友的战利品要进**他自己的**仓库 —— 把背包/装备原样发给
-            # 客户端,由客户端在自己那边入账(主机这边不入账,免得重复)
+            # 对应的客户端,由客户端在自己那边入账(主机这边不入账,免得重复)
             kept = lost = 0
             try:
-                self.game.net.host_event("extract", self._lan_extract_payload(p))
+                self.game.net.host_event("extract", self._lan_extract_payload(p),
+                                         to=_slot)
             except Exception:
                 pass
         else:
@@ -3643,8 +3711,8 @@ class Raid:
 
         # 装填计时 / 自动换弹 / 受击闪光(两人各自算)
         self._update_weapon_timers(p, dt)
-        if self.coop and self.player2 is not None:
-            self._update_weapon_timers(self.player2, dt)
+        for q in self.players()[1:]:
+            self._update_weapon_timers(q, dt)
 
         # 撤离引导(双人合作:**各自撤离** —— 谁站满谁走,队友还能继续打)
         if not p.out:
@@ -3652,12 +3720,13 @@ class Raid:
                                                        moving=moving)
             if ready:
                 self.player_extracted(p)
-        p2 = self.player2
-        if p2 is not None and not p2.out:
-            self.p2_extract_t, ready2 = self._extract_tick(
-                p2, self.p2_extract_t, dt)
-            if ready2:
-                self.player_extracted(p2)
+        for q in self.players()[1:]:
+            if q.out:
+                continue
+            t_q, ready_q = self._extract_tick(q, self.get_extract(q), dt)
+            self.set_extract(q, t_q)
+            if ready_q:
+                self.player_extracted(q)
         if self.over:
             return
 
@@ -3744,15 +3813,31 @@ class Raid:
 
     # ---------- 局域网联机 ----------
     def _update_p2_net(self, dt):
-        """联机:用客户端上传的输入驱动 P2(移动 / 鼠标瞄准 / 开火 / 动作)。"""
-        p2 = self.player2
+        """联机:用各客户端上传的输入驱动自己的角色(最多 3 个客户端 = 4 人)。"""
+        try:
+            feeds = self.game.net.take_input()
+        except Exception:
+            feeds = []
+        for slot, inp, acts in feeds:
+            q = getattr(self, "player%d" % slot, None)
+            if q is None:
+                continue
+            if slot == 2:
+                self.net_input = inp          # 兼容:客户端鼠标方向
+            self._drive_remote(q, inp, acts, dt)
+
+    def _drive_remote(self, p, inp, acts, dt):
+        """驱动一位队友的移动/瞄准/开火/动作(P2/P3/P4 共用同一套逻辑)。"""
+        saved = self.player2
+        self.player2 = p
+        try:
+            self._drive_remote_body(p, inp, acts, dt)
+        finally:
+            self.player2 = saved
+
+    def _drive_remote_body(self, p2, inp, acts, dt):
         if p2 is None:
             return
-        try:
-            inp, acts = self.game.net.take_input()
-        except Exception:
-            inp, acts = {}, []
-        self.net_input = inp
         if p2.out or self.over:
             return
         vx = float(inp.get("mx", 0.0) or 0.0)

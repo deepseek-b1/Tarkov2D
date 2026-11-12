@@ -1463,6 +1463,32 @@ def _draw_hud(raid, screen):
                 True, COL["good"]), (bar.right + 12, y0 + 45))
         screen.blit(get_font(13).render(hint, True, COL["text_dim"]),
                     (30, y0 + 50))
+        # 联机 4 人:P3/P4 用紧凑名册画在 P2 面板下面
+        extra = [q for q in raid.players()[2:] if q is not None]
+        ry = y0 + 90
+        for q in extra:
+            slot = raid.p_slot(q)
+            if q.extracted:
+                st, sc = "已撤离", COL["good"]
+            elif q.dead:
+                st, sc = "阵亡", (200, 120, 110)
+            else:
+                st, sc = "在场", col
+            screen.blit(_hud_bg(300, 26, (10, 12, 14, 170)), (20, ry))
+            t = get_font(14, bold=True).render(
+                "P%d %s" % (slot, st), True, sc)
+            screen.blit(t, (30, ry + 4))
+            bar = pygame.Rect(120, ry + 8, 110, 10)
+            pygame.draw.rect(screen, COL["hp_bg"], bar, border_radius=3)
+            if not q.out and q.hp > 0:
+                pygame.draw.rect(screen, COL["hp"],
+                                 (bar.x, bar.y, bar.w * max(0.0, q.hp / q.max_hp),
+                                  bar.h), border_radius=3)
+            pygame.draw.rect(screen, COL["border"], bar, 1, border_radius=3)
+            screen.blit(get_font(12).render(
+                "%d/%d" % (max(0, int(q.hp)), q.max_hp), True,
+                COL["text_dim"]), (bar.right + 8, ry + 5))
+            ry += 30
 
     # 双人合作:有人先撤出去了 —— 提示另一位还能继续(各自撤离,不一起走)
     if getattr(raid, "coop", False) and not raid.over:

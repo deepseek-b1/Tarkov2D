@@ -510,10 +510,11 @@ def _old_sub(old_node, new_node):
 
 
 class Patcher:
-    """把补丁应用到本地对象图(路径可整体对调 P1/P2)。"""
+    """把补丁应用到本地对象图(路径可按槽位置换;4 人也走这一条)。"""
 
-    def __init__(self, swap=False):
-        self.swap = swap
+    def __init__(self, swap=False, alias=None):
+        self.alias = dict(alias or {})
+        self.swap = bool(swap) or bool(self.alias)
 
     def map_path(self, path):
         if isinstance(path, str):        # 兜底:单个属性名也算一条路径
@@ -521,10 +522,8 @@ class Patcher:
         if not self.swap or not path:
             return path
         p = list(path)
-        if p[0] == "player":
-            p[0] = "player2"
-        elif p[0] == "player2":
-            p[0] = "player"
+        if p[0] in self.alias:
+            p[0] = self.alias[p[0]]
         elif len(p) == 1 and p[0] in _PAIR:
             p[0] = _PAIR[p[0]]
         return p
@@ -554,7 +553,38 @@ class Patcher:
         return n
 
 
-# 客户端侧 P1/P2 专属字段对调(本机在 raid.player,队友在 raid.player2)
+MAX_CLIENTS = 3                  # 最多 3 个客户端 = 4 人(含房主)
+SLOTS = (2, 3, 4)                # 客户端占用的玩家槽位
+_SLOT_KEYS = ("extract_t", "revive_used", "fire_edge", "start_value")
+
+
+def slot_root(s):
+    """槽位 -> raid 上的玩家属性名。"""
+    return "player" if int(s) == 1 else "player%d" % int(s)
+
+
+def slot_key(s, key):
+    """槽位 + 状态名 -> raid 上的属性名(1 号是裸名,p2_/p3_/p4_ 带前缀)。"""
+    return key if int(s) == 1 else "p%d_%s" % (int(s), key)
+
+
+def slot_alias(mine):
+    """客户端:主机槽位 -> 本机槽位 的名字别名(本机自己永远落在 player)。
+
+    例:3 号客户端的本机布局是 player=主机3号、player2=主机1号、
+    player3=主机2号、player4=主机4号。
+    """
+    mine = int(mine or 2)
+    order = [mine] + [s for s in (1, 2, 3, 4) if s != mine]
+    alias = {}
+    for local_i, host_s in enumerate(order, start=1):
+        alias[slot_root(host_s)] = slot_root(local_i)
+        for key in _SLOT_KEYS:
+            alias[slot_key(host_s, key)] = slot_key(local_i, key)
+    return alias
+
+
+# 客户端侧 P1/P2 专属字段对调(老写法,2 人时等价于 slot_alias(2))
 _PAIR = {
     "extract_t": "p2_extract_t", "p2_extract_t": "extract_t",
     "revive_used": "p2_revive_used", "p2_revive_used": "revive_used",
@@ -568,14 +598,18 @@ _PAIR = {
 
 # 每帧都要发的(视觉/操作相关)
 HOT_KEYS = (
-    "player", "player2", "scavs", "allies", "hostages", "bullets", "particles",
+    "player", "player2", "player3", "player4",
+    "scavs", "allies", "hostages", "bullets", "particles",
     "toasts", "floaters", "channel", "time_left", "over", "result", "shake",
     "structures", "objectives", "friend_structs", "supplies", "strikes",
-    "support_points", "recon_t", "extract_t", "p2_extract_t", "fire_edge",
-    "p2_fire_edge", "banked", "bank_lost", "kills", "loot_log", "warned",
+    "support_points", "recon_t", "extract_t", "p2_extract_t",
+    "p3_extract_t", "p4_extract_t", "fire_edge", "p2_fire_edge",
+    "p3_fire_edge", "p4_fire_edge", "banked", "bank_lost", "kills",
+    "loot_log", "warned",
     "dialogue", "subtitle", "cutscene", "story_targets", "captive_state",
     "enemy_waves", "ally_waves", "hq_teams", "hq_t", "support_calls",
-    "revive_used", "p2_revive_used", "start_value", "p2_start_value",
+    "revive_used", "p2_revive_used", "p3_revive_used", "p4_revive_used",
+    "start_value", "p2_start_value", "p3_start_value", "p4_start_value",
     "fog_dirty", "fog_version", "move_mul",
     # 侦察无人机:主机模拟,客户端镜像(视野多边形由各自本地算)
     "drone", "drone_marks", "drone_cd",
@@ -703,8 +737,11 @@ class Net:
         self.game = game
         self.role = None                 # None / "host" / "client"
         self.room_name = ""
-        self.link = None                 # _Link
+        self.link = None                 # _Link(兼容:最低槽位那个连接)
+        self.links = {}                  # slot -> _Link(2/3/4,最多 4 人)
+        self.slot = None                 # 客户端:房主分给本机的槽位
         self.peer_name = ""
+        self.peer_names = {}             # slot -> 对方名字
         self.error = ""
         self.msg = "未联机"
         self._srv = None
@@ -721,23 +758,41 @@ class Net:
         self._old_hot = None
         self._old_cold = None
         self._bytes_out = 0
-        self._input = {}                 # 主机侧:客户端最新输入
-        self._acts = []                  # 主机侧:待执行动作
-        self._client_ready = False
+        self._input = {}                 # slot -> 客户端最新输入
+        self._acts = []                  # 主机侧:待执行动作 [(slot, act)]
+        self._ready = set()              # 已握手的客户端槽位
         # 主机侧要发给客户端的开局配置
         self._cfg = {}
+
+    @property
+    def _client_ready(self):
+        """至少有一个客户端完成握手(兼容 2 人时代的老判断)。"""
+        return bool(self._ready)
+
+    @_client_ready.setter
+    def _client_ready(self, v):
+        if not v:
+            self._ready = set()
+
+    def slots(self):
+        """当前连着的客户端槽位(升序)。"""
+        return sorted(self.links)
 
     # ---------------- 状态 ----------------
     def status_text(self):
         if self.role is None:
             return "未联机 —— 两台电脑连同一个 Wi-Fi/路由器即可"
         if self.role == "host":
-            if self.link is None:
-                return "房间已开:%s(%s)· 等待对方点「搜索并加入」" % (
-                    self.room_name, _local_ip())
-            if self._client_ready:
-                return "已连接:%s · 在藏身处点「开始联机战局」" % self.peer_name
-            return "对方已连上(%s)· 握手…" % self.peer_name
+            n = len(self.links)
+            cap = 1 + MAX_CLIENTS
+            if n == 0:
+                return "房间已开:%s(%s)· 等待队友加入(最多 %d 人)" % (
+                    self.room_name, _local_ip(), cap)
+            names = "、".join(str(self.peer_names.get(s, "?")) for s in sorted(self.links))
+            if self._ready:
+                return "已连接 %d/%d 人:%s · 在藏身处点「开始联机战局」" % (
+                    n + 1, cap, names)
+            return "队友已连上(%s)· 握手…" % names
         if self.link is None:
             return "连接中…" if not self.error else ("连接失败:" + self.error)
         if self.game.phase == "raid":
@@ -800,6 +855,13 @@ class Net:
         self._acc_t.start()
         return True
 
+    def _free_slot(self):
+        """找一个还没被占的客户端槽位(2/3/4);满了返回 None。"""
+        for s in SLOTS:
+            if s not in self.links:
+                return s
+        return None
+
     def _accept_loop(self):
         while self.role == "host" and not self._stop:
             try:
@@ -808,25 +870,37 @@ class Net:
                 continue
             except Exception:
                 break
-            if self.link is not None:
+            slot = self._free_slot()
+            if slot is None:
                 try:
                     conn.close()
                 except Exception:
                     pass
                 continue
-            self.link = _Link(conn, self._on_msg, self._on_link_down)
-            self.peer_name = addr[0]
-            self.link.send({"t": "welcome", "host": self.room_name, "ver": PROTO})
+            link = _Link(conn, lambda m, s=slot: self._on_msg(m, s),
+                         lambda s=slot: self._on_link_down(s))
+            self.links[slot] = link
+            self.link = self.links[min(self.links)]
+            self.peer_names[slot] = addr[0]
+            link.send({"t": "welcome", "host": self.room_name, "ver": PROTO,
+                       "slot": slot})
         self._srv = None
 
-    def _on_link_down(self):
-        self.link = None
-        self._client_ready = False
-        self._input = {}
-        self._old_hot = None
-        self._old_cold = None
+    def _on_link_down(self, slot=None):
+        if slot is not None:
+            self.links.pop(slot, None)
+            self.peer_names.pop(slot, None)
+            self._ready.discard(slot)
+            self._input.pop(slot, None)
+            self._acts = [x for x in self._acts if x[0] != slot]
+            self.link = self.links[min(self.links)] if self.links else None
+        else:
+            self.link = None
+        if not self.links:
+            self._old_hot = None
+            self._old_cold = None
         with self._lock:
-            self._inbox.append({"t": "_down"})
+            self._inbox.append(({"t": "_down", "slot": slot}, slot))
 
     def host_start(self, cfg):
         """主机开局:把配置发给客户端。"""
@@ -835,16 +909,23 @@ class Net:
         self._old_cold = None
         self._last_hot = 0.0
         self._last_cold = 0.0
-        if self.link is not None:
-            self.link.send({"t": "start", "cfg": cfg})
+        for link in list(self.links.values()):
+            link.send({"t": "start", "cfg": cfg})
 
-    def host_event(self, kind, data=None):
-        if self.link is not None:
-            self.link.send({"t": "ev", "k": kind, "data": data or {}})
+    def host_event(self, kind, data=None, to=None):
+        """广播一个事件;to=槽位时只发给那个客户端。"""
+        msg = {"t": "ev", "k": kind, "data": data or {}}
+        if to is not None:
+            link = self.links.get(to)
+            if link is not None:
+                link.send(msg)
+            return
+        for link in list(self.links.values()):
+            link.send(msg)
 
     def host_after_update(self, raid, dt):
         """每帧末:把战局状态发给客户端。"""
-        if self.role != "host" or self.link is None or not self._client_ready:
+        if self.role != "host" or not self.links or not self._ready:
             return
         now = time.time()
         try:
@@ -852,14 +933,16 @@ class Net:
                 self._last_hot = now
                 patches = self._snapshot(raid, HOT_KEYS, "_old_hot")
                 if patches:
-                    self.link.send({"t": "p", "d": patches}, compress=True,
-                                   droppable=True)
+                    msg = {"t": "p", "d": patches}
+                    for link in list(self.links.values()):
+                        link.send(msg, compress=True, droppable=True)
             if now - self._last_cold >= COLD_EVERY:
                 self._last_cold = now
                 patches = self._snapshot(raid, COLD_KEYS, "_old_cold")
                 if patches:
-                    self.link.send({"t": "p", "d": patches}, compress=True,
-                                   droppable=True)
+                    msg = {"t": "p", "d": patches}
+                    for link in list(self.links.values()):
+                        link.send(msg, compress=True, droppable=True)
         except Exception as e:
             if DEBUG:
                 print("[net] snapshot fail:", e)
@@ -899,12 +982,15 @@ class Net:
         return patches
 
     def take_input(self):
-        """主机侧:取走客户端最新输入,返回 (输入字典, 动作列表)。"""
+        """主机侧:取走所有客户端的最新输入 -> [(槽位, 输入字典, 动作列表)]。"""
         with self._lock:
-            inp = dict(self._input)
-            acts = self._acts
-            self._acts = []
-        return inp, acts
+            out = []
+            for slot in sorted(self._input):
+                d = dict(self._input[slot])
+                acts = [a for (s, a) in self._acts if s == slot]
+                out.append((slot, d, acts))
+            self._acts = [x for x in self._acts if x[0] not in self._input]
+        return out
 
     # ---------------- 客户端 ----------------
     def join(self, ip=None, port=None):
@@ -935,7 +1021,9 @@ class Net:
         self._stop = False
         self.role = "client"
         self.msg = "已连接"
-        self.link = _Link(sock, self._on_msg, self._on_link_down)
+        self.slot = None
+        self.link = _Link(sock, lambda m: self._on_msg(m, None),
+                          lambda: self._on_link_down(None))
         name = ""
         try:
             name = getattr(self.game.save, "name", "") or ""
@@ -949,9 +1037,9 @@ class Net:
             self.link.send({"t": "in", "d": payload})
 
     # ---------------- 收包 ----------------
-    def _on_msg(self, msg):
+    def _on_msg(self, msg, slot=None):
         with self._lock:
-            self._inbox.append(msg)
+            self._inbox.append((msg, slot))
 
     def _start_udp(self, respond=False):
         try:
@@ -1001,31 +1089,39 @@ class Net:
             return
         with self._lock:
             msgs, self._inbox = self._inbox, []
-        for msg in msgs:
+        for msg, slot in msgs:
             try:
-                self._handle(msg)
+                self._handle(msg, slot)
             except Exception as e:
                 if DEBUG:
                     print("[net] handle fail:", msg.get("t"), e)
         if self._scan_until and time.time() > self._scan_until:
             self._scan_until = 0.0
 
-    def _handle(self, msg):
+    def _handle(self, msg, slot=None):
         t = msg.get("t")
         if t == "hello" and self.role == "host":
-            self.peer_name = str(msg.get("name") or "玩家2")[:16]
-            self._client_ready = True
+            name = str(msg.get("name") or ("玩家%d" % (slot or 2)))[:16]
+            if slot is not None:
+                self.peer_names[slot] = name
+                self._ready.add(slot)
+            self.peer_name = name
             if DEBUG:
-                print("[net] 客户端握手:", self.peer_name, flush=True)
-            self.link.send({"t": "welcome", "host": self.room_name, "ver": PROTO})
+                print("[net] 客户端握手:", slot, name, flush=True)
+            link = self.links.get(slot) if slot is not None else self.link
+            if link is not None:
+                link.send({"t": "welcome", "host": self.room_name, "ver": PROTO,
+                           "slot": slot})
         elif t == "in" and self.role == "host":
             d = msg.get("d") or {}
             with self._lock:
-                self._input = d
+                self._input[slot if slot is not None else 2] = d
                 for a in d.get("acts", ()):
-                    self._acts.append(a)
+                    self._acts.append((slot if slot is not None else 2, a))
         elif t == "welcome" and self.role == "client":
             self.peer_name = str(msg.get("host") or "房主")[:24]
+            if msg.get("slot") is not None:
+                self.slot = int(msg.get("slot"))
             self.msg = "已连接"
         elif t == "start" and self.role == "client":
             if DEBUG:
@@ -1036,12 +1132,23 @@ class Net:
         elif t == "ev" and self.role == "client":
             self._client_event(msg.get("k"), msg.get("data") or {})
         elif t == "bye":
-            self.close(notify=False)
-            self.msg = "对方已断开"
+            if self.role == "host" and slot is not None:
+                # 一个客户端退出:只摘掉他那条连接,其余队友继续
+                self.msg = "%s 已断开" % self.peer_names.get(slot, "队友")
+                link = self.links.get(slot)
+                if link is not None:
+                    link.close()
+                self._on_link_down(slot)
+            else:
+                self.close(notify=False)
+                self.msg = "对方已断开"
         elif t == "_down":
             if self.role == "host":
-                self.peer_name = ""
-                self.msg = "对方已断开"
+                if slot is not None:
+                    self.msg = "%s 已断开" % self.peer_names.get(slot, "队友")
+                else:
+                    self.peer_name = ""
+                    self.msg = "对方已断开"
             else:
                 self.role = None
                 self.msg = "与主机断开"
@@ -1050,8 +1157,11 @@ class Net:
 
     # ---------------- 客户端:应用主机状态 ----------------
     def _patcher(self):
-        if not hasattr(self, "_patch_obj"):
-            self._patch_obj = Patcher(swap=True)
+        """客户端侧的补丁应用器:把房主的槽位名映射到本机槽位。"""
+        key = self.slot or 2
+        if getattr(self, "_patch_key", None) != key:
+            self._patch_key = key
+            self._patch_obj = Patcher(alias=slot_alias(key))
         return self._patch_obj
 
     def _client_apply(self, patches):
@@ -1097,12 +1207,19 @@ class Net:
     def close(self, notify=True):
         self._stop = True
         was_client = (self.role == "client")
-        if notify and self.link is not None:
-            try:
-                self.link.send({"t": "bye"})
+        if notify:
+            for link in list(self.links.values()) + ([self.link] if self.link else []):
+                if link is None:
+                    continue
+                try:
+                    link.send({"t": "bye"})
+                except Exception:
+                    pass
+            if self.links or self.link is not None:
                 time.sleep(0.05)
-            except Exception:
-                pass
+        for link in list(self.links.values()):
+            link.close()
+        self.links = {}
         if self.link is not None:
             self.link.close()
             self.link = None
@@ -1119,8 +1236,10 @@ class Net:
                 pass
             self._udp = None
         self.role = None
+        self.slot = None
         self.peer_name = ""
-        self._client_ready = False
+        self.peer_names = {}
+        self._ready = set()
         self._old_hot = None
         self._old_cold = None
         self._stop = False

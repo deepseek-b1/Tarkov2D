@@ -6221,6 +6221,106 @@ def run():
     check("账号-名字+密码多档登录/老存档并入/登录界面", t_accounts)
     check("双人合作-P2键盘操作/双人可见性/战利品并仓/单独阵亡", t_coop)
     check("局域网联机-回环握手/开局/输入上传/状态镜像/断开", t_lan)
+
+    def t_lan4():
+        """局域网 4 人:1 主机 + 3 客户端,每人各自驱动自己的角色、独自镜像。"""
+        from game import Game
+        from settings import W as SW, H as SH
+        import bindings
+        screen = pygame.display.set_mode((SW, SH))
+        port = 27615
+
+        def _mk():
+            g = Game()
+            g.save = save_mod.reset_data()
+            g.save.seen_intro = True
+            g.save.mode = "raid"
+            g.save.touch = False
+            return g
+
+        host = _mk()
+        assert host.net.host_room("四人房", port=port), host.net.error
+        clients = []
+        for i in range(3):
+            c = _mk()
+            assert c.net.join("127.0.0.1", port), c.net.error
+            clients.append(c)
+
+        def _pump(sec, until=None):
+            t0 = time.time()
+            while time.time() - t0 < sec:
+                host.update(1 / 60.0, [])
+                for c in clients:
+                    c.update(1 / 60.0, [])
+                if until is not None and until():
+                    return True
+                time.sleep(1 / 240.0)
+            return until() if until else True
+
+        assert _pump(15, lambda: host.net.slots() == [2, 3, 4]
+                    and len(host.net._ready) >= 3), \
+            "3 个客户端没全部握手:%s(links=%s ready=%s)" % (
+                host.net.status_text(), host.net.slots(), host.net._ready)
+        assert host.net.slots() == [2, 3, 4], host.net.slots()
+        assert [c.net.slot for c in clients] == [2, 3, 4], [c.net.slot for c in clients]
+        assert "4 人" in host.net.status_text(), host.net.status_text()
+
+        assert host.lan_start_raid()
+        assert _pump(12, lambda: all(c.phase == "raid" for c in clients)), \
+            "有客户端没进战局"
+        hr = host.raid
+        assert hr.player2 is not None and hr.player3 is not None \
+            and hr.player4 is not None, "主机没建出 4 个玩家"
+        assert len(hr.players()) == 4, len(hr.players())
+        # 四人出生点互不重合
+        pts = [(round(q.x), round(q.y)) for q in hr.players()]
+        assert len(set(pts)) == 4, pts
+
+        # 每个客户端推自己的方向键,只驱动自己那个槽位的角色
+        import math as _math
+        for idx, c in enumerate(clients):
+            want_slot = 2 + idx
+            target = getattr(hr, "player%d" % want_slot)
+            before = {s: getattr(hr, "player%d" % s).y for s in (2, 3, 4)}
+            keys = set(bindings.keys_for(c.save, "up"))
+
+            class _K:
+                def __getitem__(self, k):
+                    return k in keys
+            real_get = pygame.key.get_pressed
+            pygame.key.get_pressed = lambda: _K()
+            try:
+                t0 = time.time()
+                while time.time() - t0 < 1.4:
+                    host.update(1 / 60.0, [])
+                    for cc in clients:
+                        cc.update(1 / 60.0, [])
+                    time.sleep(1 / 60.0)
+            finally:
+                pygame.key.get_pressed = real_get
+            assert target.y < before[want_slot] - 25, \
+                "槽位 %d 没被自己的客户端驱动(%.0f -> %.0f)" % (
+                    want_slot, before[want_slot], target.y)
+
+        # 镜像:每个客户端看到的"自己"= 主机上对应槽位的角色
+        _pump(1.0)
+        for idx, c in enumerate(clients):
+            slot = 2 + idx
+            mine = getattr(hr, "player%d" % slot)
+            d = _math.hypot(c.raid.player.x - mine.x, c.raid.player.y - mine.y)
+            assert d < 80, "客户端 %d 自己的位置差 %.0f px" % (slot, d)
+            assert len(c.raid.players()) == 4, len(c.raid.players())
+
+        # 断开一个客户端:主机侧对应的槽位被释放,剩下的人继续
+        clients[-1].net.close(notify=True)
+        assert _pump(4, lambda: host.net.slots() == [2, 3]), host.net.slots()
+        assert host.raid is not None and not host.raid.over
+        for c in clients[:2]:
+            c.net.close(notify=False)
+        host.net.close(notify=False)
+
+    check("局域网 4 人-三客户端握手/各自驱动/镜像/掉线释放", t_lan4)
+
     check("键位-突袭支援(F1-F3)与切装备位(1-4)不冲突", t_key_conflict)
 
     ok = all(r[1] for r in results)
