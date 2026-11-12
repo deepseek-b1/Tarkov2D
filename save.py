@@ -130,6 +130,7 @@ class SaveData:
         self.rubles = 20000  # 货币
         self.xp = 0            # 等级经验(见 progress.py:每级一份奖励)
         self.level_claimed = []   # 已领取奖励的等级(1..150)
+        self.favor = {}           # 部门好感:{dept: 点数}(见 settings.FAVOR_*)
         self.stats = {"raids": 0, "extracts": 0, "deaths": 0, "kills": 0, "value": 0}
         self.tasks = {}        # 教官任务进度:{task_id: 已累计数量}
         self.tasks_done = []   # 已领取的一次性任务 id(可重复任务不记这里)
@@ -220,6 +221,7 @@ class SaveData:
             "rubles": int(self.rubles),
             "xp": int(self.xp),
             "level_claimed": [int(x) for x in self.level_claimed],
+            "favor": {str(k): int(v) for k, v in (self.favor or {}).items()},
             "stats": dict(self.stats),
             "tasks": dict(self.tasks),
             "tasks_done": list(self.tasks_done),
@@ -296,6 +298,12 @@ class SaveData:
             if 1 <= lv <= 150 and lv not in sd.level_claimed:
                 sd.level_claimed.append(lv)
         sd.level_claimed.sort()
+        sd.favor = {}
+        for k, v in (data.get("favor") or {}).items():
+            try:
+                sd.favor[str(k)] = max(0, int(v))
+            except (TypeError, ValueError):
+                pass
         sd.stats.update(data.get("stats") or {})
         tasks = data.get("tasks") or {}
         sd.tasks = {k: int(v) for k, v in tasks.items()

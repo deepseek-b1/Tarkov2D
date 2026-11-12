@@ -7,7 +7,7 @@ import pygame
 from inventory import Item      # 装备位里的武器要在槽之间搬(inventory 不反向依赖本模块)
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.13.6"
+GAME_VERSION = "2.13.7"
 # 更新清单地址(留空则只认 EXE 同目录的 version.json)。
 # 默认指向仓库里的 update_server/version.json —— 推到 main 就生效,不用再发服务器。
 # 也可以换成本机自建服务器(如 http://127.0.0.1:8765/version.json)。
@@ -493,6 +493,72 @@ DIFF_ORDER = ["easy", "lockdown", "hardened"]
 # ---------- 交易所 ----------
 SELL_RATE = 0.6          # 回收价 = 原价 × 0.6
 BUY_MARKUP = 1.15         # 售价 = 原价 × 1.15(弹药按整盒计)
+
+# ---------- 部门好感度(交任务/交货涨,交易所按部门打折) ----------
+FAVOR_PER_TIER = 100        # 每 100 好感升 1 级
+FAVOR_MAX_TIER = 5          # 最高 5 级(满好感 500)
+FAVOR_DISCOUNT = 0.02       # 每级 -2%(满级 -10%)
+FAVOR_NAMES = {"instructor": "教官", "medical": "医疗", "logistics": "后勤",
+               "contractor": "承包商"}
+# 每个部门的好感作用在交易所的哪些分区
+FAVOR_CATS = {
+    "instructor": ("weapon", "ammo"),
+    "medical": ("med",),
+    "logistics": ("armor", "helmet", "pack", "attach"),
+    "contractor": ("special",),
+}
+FAVOR_GAIN_CLAIM = 30       # 领一次任务奖励涨多少好感
+FAVOR_GAIN_BARTER = 20      # 完成一次交货涨多少好感
+
+
+def favor_points(sd, dept):
+    """某部门的累计好感。"""
+    d = getattr(sd, "favor", None) or {}
+    try:
+        return max(0, int(d.get(dept, 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def favor_tier(sd, dept):
+    """某部门的好感等级(0 ~ FAVOR_MAX_TIER)。"""
+    return min(FAVOR_MAX_TIER, favor_points(sd, dept) // FAVOR_PER_TIER)
+
+
+def favor_discount(sd, dept):
+    """某部门的折扣比例(0 ~ FAVOR_MAX_TIER × FAVOR_DISCOUNT)。"""
+    return favor_tier(sd, dept) * FAVOR_DISCOUNT
+
+
+def favor_for_tab(sd, tab):
+    """交易所某个分区当前能拿到的折扣(同一分区多个部门时取最高)。"""
+    best = 0.0
+    for dept, cats in FAVOR_CATS.items():
+        if tab is not None and tab in cats:
+            best = max(best, favor_discount(sd, dept))
+    return best
+
+
+def favor_dept_for_tab(tab):
+    """某个分区由哪个部门给折扣(None = 没有)。"""
+    for dept, cats in FAVOR_CATS.items():
+        if tab is not None and tab in cats:
+            return dept
+    return None
+
+
+def add_favor(sd, dept, amount=FAVOR_GAIN_CLAIM):
+    """涨部门好感;返回 (旧等级, 新等级)。"""
+    if dept not in FAVOR_NAMES:
+        return 0, 0
+    cur = getattr(sd, "favor", None)
+    if not isinstance(cur, dict):
+        cur = {}
+        sd.favor = cur
+    old_tier = favor_tier(sd, dept)
+    cur[dept] = max(0, favor_points(sd, dept) + int(amount))
+    return old_tier, favor_tier(sd, dept)
+
 # 商品目录:(iid, 单次购买数量)
 TRADE_GOODS = [
     # 枪械
@@ -510,12 +576,13 @@ TRADE_GOODS = [
 ]
 
 
-def trade_buy_price(iid, count):
-    """商品售价(弹药按盒计)。"""
+def trade_buy_price(iid, count, discount=0.0):
+    """商品售价(弹药按盒计)。discount = 部门好感折扣(0~0.1)。"""
     d = ITEMS[iid]
+    mul = BUY_MARKUP * max(0.0, 1.0 - float(discount or 0.0))
     if d["cat"] == "ammo":
-        return int(d["price"] * count * BUY_MARKUP)
-    return int(d["price"] * BUY_MARKUP)
+        return max(1, int(d["price"] * count * mul))
+    return max(1, int(d["price"] * mul))
 
 
 def trade_sell_price(item):

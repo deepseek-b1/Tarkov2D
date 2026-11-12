@@ -4,6 +4,7 @@
 奖励/交货都是"先试算再落盘":仓库放不下就不发,绝不让玩家白交材料或白领奖励。
 保险承包商:40 个长线任务,全部完成后保险箱(阵亡不丢)从 2 格升为 4 格。
 """
+import settings
 from settings import (TASKS, DEPARTMENT_BARTERS, ITEMS, SAFE_CONTRACT,
                       SAFE_UPGRADED, SAFE_BASE)
 from inventory import Container, Item
@@ -109,8 +110,11 @@ def grant(sd, reward):
     return True, ""
 
 
-def claim(sd, task):
-    """领取任务奖励(教官/承包商)。返回 (成功, 提示)。"""
+def claim(sd, task, dept="instructor"):
+    """领取任务奖励(教官/承包商)。返回 (成功, 提示)。
+
+    dept 用来涨对应部门的好感(见 settings.FAVOR_*),好感高了交易所打折。
+    """
     state, p, need = task_state(sd, task)
     if state == "done":
         return False, f"「{task['name']}」已结算过了"
@@ -128,6 +132,11 @@ def claim(sd, task):
     else:
         sd.tasks_done.append(task["id"])
     msg = f"「{task['name']}」奖励已发放:{reward_text(task['reward'])}"
+    # 领奖涨部门好感
+    old_t, new_t = settings.add_favor(sd, dept, settings.FAVOR_GAIN_CLAIM)
+    if new_t > old_t:
+        msg += (f"  ★{settings.FAVOR_NAMES.get(dept, dept)}好感升到 {new_t} 级"
+                f"(交易所 -{int(settings.favor_discount(sd, dept) * 100)}%)")
     extra = check_safe_upgrade(sd)               # 承包商 40 项齐全 -> 保险箱扩容
     return True, (msg + "  " + extra) if extra else msg
 
@@ -180,7 +189,7 @@ def can_barter(sd, entry):
     return not missing_materials(sd, entry)
 
 
-def barter(sd, entry):
+def barter(sd, entry, dept="medical"):
     """交货:扣材料换物资(先克隆试算,任何一步失败都不动存档)。"""
     miss = missing_materials(sd, entry)
     if miss:
@@ -201,4 +210,10 @@ def barter(sd, entry):
         if left > 0:
             consume(bag, iid, left)
     sd.stash, sd.bag = stash, bag
-    return True, f"交货完成:交出 {need_text(entry)},拿到 {out_text(entry)}"
+    # 交货也涨部门好感
+    old_t, new_t = settings.add_favor(sd, dept, settings.FAVOR_GAIN_BARTER)
+    msg = f"交货完成:交出 {need_text(entry)},拿到 {out_text(entry)}"
+    if new_t > old_t:
+        msg += (f"  ★{settings.FAVOR_NAMES.get(dept, dept)}好感升到 {new_t} 级"
+                f"(-{int(settings.favor_discount(sd, dept) * 100)}%)")
+    return True, msg

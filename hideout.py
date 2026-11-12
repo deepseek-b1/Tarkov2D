@@ -876,6 +876,11 @@ class Hideout:
                     self.sell_ask_no.collidepoint(mx, my))
 
     # ---- 交易站:商品网格与滚动 ----
+    def trade_discount(self):
+        """当前分区的部门好感折扣(0 ~ 0.1)。"""
+        from settings import favor_for_tab
+        return favor_for_tab(self.game.save, self.trade_cat)
+
     def trade_goods(self):
         """当前分区的商品列表(「特殊枪械」= 头目专属枪械;弹药按口径再筛一次)。"""
         from settings import trade_cat_match
@@ -1397,10 +1402,10 @@ class Hideout:
                 continue
             if self.task_dept in ("instructor", "contractor"):
                 task = entry[0]
-                ok, msg = quests.claim(sd, task)
+                ok, msg = quests.claim(sd, task, self.task_dept)
             else:
                 barter = entry[0]
-                ok, msg = quests.barter(sd, barter)
+                ok, msg = quests.barter(sd, barter, self.task_dept)
             save_mod.save_data(sd)
             self.say(msg, COL["good"] if ok else COL["bad"], 3.4)
             return
@@ -2368,7 +2373,7 @@ class Hideout:
             # 被裁掉一半的格子不接受点击(否则会点在看不见的格子上)
             if not view.contains(r):
                 continue
-            price = trade_buy_price(iid, count)
+            price = trade_buy_price(iid, count, self.trade_discount())
             if sd.rubles < price:
                 self.say("余额不足!", COL["bad"])
                 return
@@ -2789,6 +2794,11 @@ class Hideout:
                 else "左键:交货换东西(材料从仓库+背包里扣)")
         if self.task_max_scroll() > 0:
             hint += " · 滚轮翻页"
+        from settings import FAVOR_NAMES, favor_discount, favor_tier
+        if self.task_dept in FAVOR_NAMES:
+            _ft = favor_tier(sd, self.task_dept)
+            hint += (f" · {FAVOR_NAMES[self.task_dept]}好感 Lv.{_ft}"
+                     f"(-{int(round(favor_discount(sd, self.task_dept) * 100))}%)")
         t = get_font(13).render(hint, True, COL["text_dim"])
         screen.blit(t, (556, 168))
 
@@ -2999,7 +3009,7 @@ class Hideout:
             if r.bottom <= view.y or r.top >= view.bottom:
                 continue                      # 完全在可见区外,连画都不画
             d = ITEMS[iid]
-            price = trade_buy_price(iid, count)
+            price = trade_buy_price(iid, count, self.trade_discount())
             afford = sd.rubles >= price
             inside = view.contains(r)         # 被裁掉一半的格子不接受点击
             hover = inside and r.collidepoint(mx, my)
@@ -3039,9 +3049,16 @@ class Hideout:
             screen, self.trade_slider_track(), self.trade_scroll,
             self.trade_max_scroll(),
             rows * (self.TRADE_CELL_H + self.TRADE_PAD))
+        # 底部提示:件数 + 部门好感折扣(有折扣时高亮)
+        dis = self.trade_discount()
+        tip_txt = "本类共 %d 件 · 左键购买 · 滚轮 / 拖右边条翻看" % len(goods)
+        if dis > 0:
+            from settings import FAVOR_NAMES, favor_dept_for_tab
+            dep = favor_dept_for_tab(self.trade_cat)
+            tip_txt += (f" · {FAVOR_NAMES.get(dep, '部门')}好感折扣"
+                        f" -{int(round(dis * 100))}%")
         tip = get_font(13).render(
-            "本类共 %d 件 · 左键购买 · 滚轮 / 拖右边条翻看" % len(goods),
-            True, COL["text_dim"])
+            tip_txt, True, COL["accent"] if dis > 0 else COL["text_dim"])
         screen.blit(tip, (right_p.x + 14, right_p.bottom - 16))
 
         # 悬停提示

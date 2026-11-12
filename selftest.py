@@ -1692,6 +1692,64 @@ def run():
 
     check("等级手册-每级独立奖励/领取/存档往返/页面", t_progress)
 
+    def t_favor():
+        """部门好感:任务/交货涨好感 -> 分级 -> 交易所按分区打折 -> 存档往返。"""
+        import settings
+        import quests
+        from settings import (FAVOR_DISCOUNT, FAVOR_MAX_TIER, FAVOR_PER_TIER,
+                              FAVOR_CATS, TASKS, trade_buy_price)
+
+        sd = save_mod.reset_data()
+        sd.favor = {}
+        # 0 好感不给折扣
+        assert settings.favor_tier(sd, "instructor") == 0
+        assert settings.favor_for_tab(sd, "weapon") == 0.0
+        # 涨好感 -> 分级
+        settings.add_favor(sd, "instructor", FAVOR_PER_TIER)
+        assert settings.favor_tier(sd, "instructor") == 1
+        assert abs(settings.favor_discount(sd, "instructor") - FAVOR_DISCOUNT) < 1e-9
+        settings.add_favor(sd, "instructor", FAVOR_PER_TIER * 99)      # 直接顶到满级
+        assert settings.favor_tier(sd, "instructor") == FAVOR_MAX_TIER
+        assert abs(settings.favor_for_tab(sd, "weapon")
+                   - FAVOR_MAX_TIER * FAVOR_DISCOUNT) < 1e-9
+        # 分区映射:教官只管枪械/弹药,医疗只管药品
+        assert settings.favor_dept_for_tab("weapon") == "instructor"
+        assert settings.favor_for_tab(sd, "med") == 0.0
+        assert settings.favor_for_tab(sd, None) == 0.0
+        # 折扣真的便宜了
+        full = trade_buy_price("ak74", 1)
+        cheap = trade_buy_price("ak74", 1, settings.favor_for_tab(sd, "weapon"))
+        assert cheap < full, (cheap, full)
+        # 领任务奖励会涨好感(把第一个任务刷成可领)
+        sd2 = save_mod.reset_data()
+        sd2.favor = {}
+        t1 = TASKS[0]
+        sd2.tasks[t1["id"]] = t1["need"]
+        assert quests.task_state(sd2, t1)[0] == "ready", quests.task_state(sd2, t1)
+        ok, msg = quests.claim(sd2, t1, "instructor")
+        assert ok, msg
+        assert settings.favor_points(sd2, "instructor") == settings.FAVOR_GAIN_CLAIM
+        # 存档往返
+        save_mod.save_data(sd2)
+        sd3 = save_mod.load_data()
+        assert settings.favor_points(sd3, "instructor") == settings.FAVOR_GAIN_CLAIM
+        # 交易所:按当前分区算折扣
+        from game import Game
+        from settings import W as SW, H as SH
+        g = Game()
+        g.save = sd3
+        h = g.hideout
+        h.trade_cat = "weapon"
+        assert h.trade_discount() == settings.favor_for_tab(sd3, "weapon")
+        h.trade_cat = "med"
+        assert h.trade_discount() == 0.0
+        h.trade_cat = "weapon"
+        h.show_intro = False
+        h.view = "trade"
+        h.draw(pygame.display.set_mode((SW, SH)))
+
+    check("好感度-任务涨好感/分级/交易所折扣/存档", t_favor)
+
     def t_boss():
         """三张地图的头目系统:5 级甲(89/81/75%)+ 专属枪械掉落。"""
         from game import Game
