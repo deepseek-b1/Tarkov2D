@@ -151,6 +151,7 @@ class Hideout:
         # 承包商:任务 / 商店 切换
         self.contractor_shop_mode = False
         self.attach_slot = None   # 配件装到哪个装备位
+        self.weapon_detail = None   # 右键武器时弹出的配件详情
         self.con_tab_tasks = pygame.Rect(1028, 164, 104, 20)
         self.con_tab_shop = pygame.Rect(1138, 164, 104, 20)
         # 交易所:一页 —— 左边你的仓库(点物品出售 / 批量出售),右边分区 + 商品。
@@ -1085,7 +1086,81 @@ class Hideout:
             container.items.append(Placed(it, pos[0], pos[1]))
         return True, f"{it.name} 已展开"
 
+    # ---------- 武器配件详情(右键武器弹出) ----------
+    def _weapon_detail_click(self, pos):
+        """右键仓库里的武器 -> 打开配件详情;面板打开时任意左键关闭。"""
+        if getattr(self, "weapon_detail", None) is not None:
+            self.weapon_detail = None
+            return True
+        if self.view != "stash":
+            return False
+        sd = self.game.save
+        placed = None
+        lay = self.lay
+        if lay["stash_panel"].collidepoint(pos):
+            placed = self.stash_hit(pos)
+        if placed is None and self.bag_rect().collidepoint(pos):
+            b = self.bag_rect()
+            c = self.bag_cell()
+            placed = sd.bag.at(int((pos[0] - b.x) // c), int((pos[1] - b.y) // c))
+        # 装备位上的武器也算
+        if placed is None:
+            for slot in LOADOUT_SLOTS:
+                w = loadout_get(sd, slot)
+                if w is not None and lay.get(slot) is not None and lay[slot].collidepoint(pos):
+                    self.weapon_detail = w
+                    audio.play("click")
+                    return True
+        if placed is not None and placed.item.cat == "weapon":
+            self.weapon_detail = placed.item
+            audio.play("click")
+            return True
+        return False
+
+    def _draw_weapon_detail(self, screen):
+        """画武器详情:名字 + 6 个配件位(装了显示名字,没装显示空)。"""
+        from settings import ATTACH_SLOTS, weapon_attach, weapon_slots
+        w = self.weapon_detail
+        pw, ph = 620, 400
+        px, py = (W - pw) // 2, (H - ph) // 2
+        ov = _overlay("wdim", (W, H), (0, 0, 0, 150))
+        screen.blit(ov, (0, 0))
+        panel = pygame.Rect(px, py, pw, ph)
+        pygame.draw.rect(screen, COL["panel"], panel, border_radius=10)
+        pygame.draw.rect(screen, COL["accent"], panel, 2, border_radius=10)
+        t = get_font(22, bold=True).render(w.name, True, COL["accent"])
+        screen.blit(t, (px + 20, py + 14))
+        sub = get_font(14).render(
+            f"{w.def_.get('cal', '')} · 弹匣 {w.state.get('mag', 0)} · 右键/左键关闭",
+            True, COL["text_dim"])
+        screen.blit(sub, (px + 20, py + 46))
+        slots = weapon_slots(w.iid)
+        have = weapon_attach(w)
+        y = py + 84
+        for key in ATTACH_SLOTS:
+            if key not in slots:
+                continue
+            box = pygame.Rect(px + 20, y, pw - 40, 40)
+            got = have.get(key)
+            pygame.draw.rect(screen, COL["panel_hi"] if got else COL["bg"], box,
+                             border_radius=6)
+            pygame.draw.rect(screen, COL["accent"] if got else COL["border"],
+                             box, 2 if got else 1, border_radius=6)
+            lt = get_font(15, bold=True).render(
+                ATTACH_SLOTS.get(key, key), True, COL["text_dim"])
+            screen.blit(lt, (box.x + 12, box.y + 11))
+            name = ITEMS[got]["name"] if got else "空"
+            vt = get_font(16, bold=True).render(
+                name, True, COL["text"] if got else COL["text_dim"])
+            screen.blit(vt, (box.x + 130, box.y + 9))
+            y += 46
+        if y > py + ph - 40:
+            pass
+
+
     def _right_click(self, pos):
+        if self._weapon_detail_click(pos):
+            return
         """仓库/背包/保险箱里右键:背包 = 卷起/展开;全装包 = 打开;其他 = 横竖旋转。"""
         sd = self.game.save
         if self.lay["stash_panel"].collidepoint(pos):
@@ -2787,6 +2862,9 @@ class Hideout:
         uikit.draw_hold(screen, self.hold)
 
     # ---------- 剧情简报 ----------
+        if getattr(self, "weapon_detail", None) is not None:
+            self._draw_weapon_detail(screen)
+
     def _story_panel(self):
         return pygame.Rect(120, 92, W - 240, 460)
 
