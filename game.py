@@ -358,7 +358,14 @@ class Game:
                 if self.raid is not None:
                     # 关键:战局内可能换装/卸装,撤离前把玩家当前装备写回存档,
                     # 否则同一物品会被同时序列化到槽位与背包(复制),新装备丢失
-                    sd.weapon = self.raid.player.weapon
+                    # 撤离时手里拿的不一定是主武器:哪一格的枪写回哪一格
+                    _p = self.raid.player
+                    _slot = getattr(_p, "cur_slot", "main1") or "main1"
+                    if _slot == "main1":
+                        sd.weapon = _p.weapon
+                    else:
+                        from settings import loadout_set as _ls
+                        _ls(sd, _slot, _p.weapon)
                     sd.armor = self.raid.player.armor
                     sd.helmet = getattr(self.raid.player, "helmet", None)
             if story_run:
