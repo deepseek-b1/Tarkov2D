@@ -3296,6 +3296,17 @@ class Raid:
                                          - self.p_start_value(q)))
         else:
             gained = max(0, int(self._loadout_value() - self.start_value))
+        # 等级经验:击杀 + 撤离净值(见 progress.py:每级一份独立奖励)
+        try:
+            import progress
+            _xp = progress.xp_from_raid(self.kills, gained, kind == "extract")
+            self.xp_gained = _xp
+            _old, _new = progress.add_xp(self.game.save, _xp)
+            if _new > _old:
+                self.add_toast(f"升到 {_new} 级!去「任务中心 → 等级手册」领奖励",
+                               COL["good"], 5.0)
+        except Exception:
+            self.xp_gained = 0
         rescued = sum(1 for h in self.hostages if h.rescued)
         objs_done = sum(1 for o in self.objectives if o.destroyed)
         if self.mode == "hostage":

@@ -1633,6 +1633,65 @@ def run():
 
     check("肾上腺素-击杀叠层/加速/回血/减伤/计时清零", t_adrenaline)
 
+    def t_progress():
+        """等级手册:每级一份独立奖励 / 经验换算 / 逐级领取 / 存档往返 / 页面渲染。"""
+        import progress
+        from settings import W as SW, H as SH
+        from game import Game
+
+        # 经验曲线:1 级起步、封顶 150、可反算
+        assert progress.level_of(0) == 1
+        assert progress.xp_to_next(progress.MAX_LEVEL) == 0
+        assert progress.level_of(progress.total_xp_for_level(10)) == 10
+        assert progress.level_of(progress.total_xp_for_level(150)) == 150
+        # 每一级都有独立奖励(不是只在几个阶段发)
+        texts = set()
+        for lv in range(1, progress.MAX_LEVEL + 1):
+            txt = progress.reward_text(lv)
+            assert txt and txt != "无", lv
+            texts.add(txt)
+        assert len(texts) > progress.MAX_LEVEL * 0.5, len(texts)
+        assert progress.reward_of(100)["rubles"] > progress.reward_of(10)["rubles"]
+        # 经验来源
+        assert progress.xp_from_raid(10, 0, False) == 10 * progress.XP_PER_KILL
+        assert (progress.xp_from_raid(0, 40000, True)
+                == 40000 // progress.XP_PER_VALUE + progress.XP_EXTRACT_BONUS)
+
+        sd = save_mod.reset_data()
+        # 没到等级不能领
+        ok, msg = progress.claim(sd, 5)
+        assert not ok and "还没到" in msg, msg
+        # 加经验到 5 级
+        progress.add_xp(sd, progress.total_xp_for_level(5))
+        assert progress.current_level(sd) == 5, progress.current_level(sd)
+        assert progress.claimable(sd) == [1, 2, 3, 4, 5], progress.claimable(sd)
+        before = sd.rubles
+        ok, msg = progress.claim(sd, 1)
+        assert ok, msg
+        assert sd.rubles > before
+        assert progress.is_claimed(sd, 1)
+        ok2, _ = progress.claim(sd, 1)
+        assert not ok2, "同一级不能领两次"
+        n, msg3 = progress.claim_all(sd)
+        assert n == 4, (n, msg3)
+        assert progress.claimable(sd) == []
+        # 存档往返
+        save_mod.save_data(sd)
+        sd2 = save_mod.load_data()
+        assert int(sd2.xp) == int(sd.xp), (sd2.xp, sd.xp)
+        assert set(sd2.level_claimed) == {1, 2, 3, 4, 5}, sd2.level_claimed
+        # 页面渲染
+        g = Game()
+        g.save = sd2
+        h = g.hideout
+        h.show_intro = False
+        h.view = "task"
+        h.task_dept = "level"
+        h.task_scroll = 0.0
+        h.draw(pygame.display.set_mode((SW, SH)))
+
+    check("等级手册-每级独立奖励/领取/存档往返/页面", t_progress)
+
     def t_boss():
         """三张地图的头目系统:5 级甲(89/81/75%)+ 专属枪械掉落。"""
         from game import Game

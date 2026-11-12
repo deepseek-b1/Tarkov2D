@@ -131,7 +131,7 @@ class Hideout:
         # 任务中心:五个部门(教官 / 医疗 / 后勤 / 保险承包商 / 礼品)
         self.task_dept = "instructor"
         self.task_scroll = 0.0
-        self.task_tab_rects = [pygame.Rect(544 + i * 140, 132, 134, 32)
+        self.task_tab_rects = [pygame.Rect(544 + i * 118, 132, 112, 32)
                                for i in range(len(DEPTS))]
         self.task_view_top = 186
         self.task_view_bottom = 600
@@ -139,6 +139,8 @@ class Hideout:
         self.task_close = pygame.Rect(1140, 76, 100, 36)
         # 礼品页:神秘人的收集清单 + 交付按钮
         self.gift_btn = pygame.Rect(560, 578, 660, 44)
+        # 等级手册:一键领取
+        self.level_claim_all = pygame.Rect(60, 520, 200, 40)
         # 交易所:一页 —— 左边你的仓库(点物品出售 / 批量出售),右边分区 + 商品。
         # 分区标签横排一行、商品网格在右半屏:这样「点仓库物品」和「点分区标签」
         # 各占一块地方,谁也不会盖住谁(分成购买/出售两页时两块都落在左面板上)。
@@ -1229,7 +1231,7 @@ class Hideout:
         if self.task_dept == "contractor":
             return [(t, quests.task_state(self.game.save, t))
                     for t in SAFE_CONTRACT]
-        if self.task_dept == "gift":
+        if self.task_dept in ("gift", "level"):
             return []
         return [(e, ("doing" if not quests.can_barter(self.game.save, e) else "ready"),
                  None, None) for e in quests.barter_list(self.task_dept)]
@@ -1243,6 +1245,119 @@ class Hideout:
         ok, msg = mystery.turn_in(sd)
         save_mod.save_data(sd)
         self.say(msg, COL["good"] if ok else COL["bad"], 4.0)
+
+    # ---- 等级手册:每级一份独立奖励 ----
+    def level_entries(self):
+        import progress
+        return list(range(1, progress.MAX_LEVEL + 1))
+
+    def _level_click(self, pos):
+        import progress
+        sd = self.game.save
+        audio.play("click")
+        if self.task_close.collidepoint(pos):
+            self.view = "stash"
+            save_mod.save_data(sd)
+            return
+        for i, (key, _label) in enumerate(DEPTS):
+            if self.task_tab_rects[i].collidepoint(pos):
+                self.task_dept = key
+                self.task_scroll = 0.0
+                return
+        if self.level_claim_all.collidepoint(pos):
+            n, msg = progress.claim_all(sd)
+            save_mod.save_data(sd)
+            self.say(msg, COL["good"] if n else COL["bad"], 3.6)
+            return
+        # 点某一行 = 领这一级的奖励
+        for i, level in enumerate(self.level_entries()):
+            r = self.task_row_rect(i)
+            if not r.collidepoint(pos):
+                continue
+            if pos[1] < self.task_view_top or pos[1] > self.task_view_bottom:
+                return
+            ok, msg = progress.claim(sd, level)
+            save_mod.save_data(sd)
+            self.say(msg, COL["good"] if ok else COL["bad"], 3.2)
+            return
+
+    def _draw_level(self, screen, mx, my):
+        """等级手册:左侧等级卡片 + 右侧每级一行的奖励清单。"""
+        import progress
+        sd = self.game.save
+        lv = progress.current_level(sd)
+        into = progress.xp_into_level(getattr(sd, "xp", 0))
+        need = progress.xp_to_next(lv)
+        todo = progress.claimable(sd)
+
+        # ---- 左侧:等级卡片(原来画在顶部,和面板标题/部门标签撞在一起) ----
+        card = pygame.Rect(30, 100, 470, 480)
+        uikit.draw_panel(screen, card, "你的等级")
+        t = get_font(54, bold=True).render(f"Lv.{lv}", True, COL["accent"])
+        screen.blit(t, (card.x + 26, card.y + 46))
+        t = get_font(15).render(f"经验 {into} / {need}" if need else "已满级",
+                                True, COL["text_dim"])
+        screen.blit(t, (card.x + 26, card.y + 118))
+        bar = pygame.Rect(card.x + 26, card.y + 142, card.w - 52, 16)
+        pygame.draw.rect(screen, COL["panel"], bar, border_radius=4)
+        if need:
+            pygame.draw.rect(screen, COL["accent"],
+                             (bar.x, bar.y, int(bar.w * into / float(need)), bar.h),
+                             border_radius=4)
+        pygame.draw.rect(screen, COL["border"], bar, 1, border_radius=4)
+        stats = [(f"可领取: {len(todo)} 级", COL["good"] if todo else COL["text_dim"]),
+                 (f"已领取: {len(progress.claimed_levels(sd))} 级", COL["text_dim"]),
+                 (f"总经验: {int(getattr(sd, 'xp', 0))}", COL["text_dim"])]
+        yy = card.y + 178
+        for text, col in stats:
+            t = get_font(16, bold=True).render(text, True, col)
+            screen.blit(t, (card.x + 26, yy))
+            yy += 30
+        t = get_font(13).render("每一级都有独立奖励,不是只在几个阶段发奖",
+                                True, COL["text_dim"])
+        screen.blit(t, (card.x + 26, yy + 6))
+        t = get_font(13).render("点右侧某一行 = 领这一级;滚轮翻页",
+                                True, COL["text_dim"])
+        screen.blit(t, (card.x + 26, yy + 26))
+        label = f"一键领取({len(todo)})" if todo else "暂无可领"
+        draw_button(screen, self.level_claim_all, label,
+                    self.level_claim_all.collidepoint(mx, my), small=True)
+        t = get_font(13).render(
+            "每一级都有独立奖励 · 点某一行领这一级 · 滚轮翻页",
+            True, COL["text_dim"])
+        screen.blit(t, (556, 162))
+
+        vid = pygame.Rect(530, self.task_view_top, 728,
+                          self.task_view_bottom - self.task_view_top)
+        screen.set_clip(vid)
+        f = get_font(15, bold=True)
+        fc = get_font(13)
+        for i, level in enumerate(self.level_entries()):
+            r = self.task_row_rect(i)
+            if r.bottom < vid.y or r.top > vid.bottom:
+                continue
+            claimed = progress.is_claimed(sd, level)
+            reach = level <= lv
+            ready = reach and not claimed
+            col = (COL["good"] if ready else
+                   (COL["text_dim"] if (claimed or not reach) else COL["text"]))
+            pygame.draw.rect(screen, COL["panel"], r, border_radius=6)
+            pygame.draw.rect(screen, COL["accent"] if ready else COL["border"],
+                             r, 2 if ready else 1, border_radius=6)
+            t = f.render(f"Lv.{level}", True, col)
+            screen.blit(t, (r.x + 12, r.y + 8))
+            t = fc.render(progress.reward_text(level), True, col)
+            screen.blit(t, (r.x + 84, r.y + 10))
+            st = ("已领取" if claimed else ("点击领取" if ready else "未达成"))
+            t = get_font(14, bold=True).render(st, True, col)
+            screen.blit(t, (r.right - t.get_width() - 14, r.y + 9))
+        screen.set_clip(None)
+        if self.task_max_scroll() > 0:
+            t = get_font(13).render(
+                f"滚轮翻页(共 {len(self.level_entries())} 级 · "
+                f"已领 {len(progress.claimed_levels(sd))} 级)",
+                True, COL["text_dim"])
+            screen.blit(t, (556, self.task_view_bottom + 6))
 
     def task_rows(self):
         entries = self.task_entries()
@@ -1272,6 +1387,9 @@ class Hideout:
                 return
         if self.task_dept == "gift":
             self._gift_click(pos)
+            return
+        if self.task_dept == "level":
+            self._level_click(pos)
             return
         entries, per = self.task_rows()
         for i, entry in enumerate(entries):
@@ -2636,8 +2754,10 @@ class Hideout:
                                              COL["accent"])
         screen.blit(bal, (W - bal.get_width() - 30, 36))
 
-        uikit.draw_panel(screen, self.lay["trade_goods"],
-                         "部门 — 教官/承包商发任务,医疗/后勤/礼品用材料交货换东西")
+        _title = ("等级手册 — 每级一份独立奖励"
+                  if self.task_dept == "level"
+                  else "部门 — 教官/承包商发任务,医疗/后勤/礼品用材料交货换东西")
+        uikit.draw_panel(screen, self.lay["trade_goods"], _title)
         # 部门标签
         for i, (key, label) in enumerate(DEPTS):
             r = self.task_tab_rects[i]
@@ -2659,6 +2779,9 @@ class Hideout:
             screen.blit(ft, ft.get_rect(center=r.center))
         if self.task_dept == "gift":
             self._draw_gift(screen, mx, my)
+            return
+        if self.task_dept == "level":
+            self._draw_level(screen, mx, my)
             return
         hint = ("左键:领取奖励 · 全部 40 项完成解锁 4 格保险箱"
                 if self.task_dept == "contractor"

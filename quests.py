@@ -82,6 +82,8 @@ def reward_text(reward):
         parts.append(ITEMS[iid]["name"])
     for iid, cnt in reward.get("ammo", []):
         parts.append(f"{ITEMS[iid]['name']} ×{cnt}")
+    for iid, cnt in reward.get("items", []):
+        parts.append(ITEMS[iid]["name"] + (f" ×{cnt}" if cnt > 1 else ""))
     return " + ".join(parts) if parts else "无"
 
 
@@ -94,6 +96,9 @@ def grant(sd, reward):
     for iid in reward.get("attachments", []):
         items.append(Item(iid))
     for iid, cnt in reward.get("ammo", []):
+        items.append(Item(iid, count=int(cnt)))
+    # 通用物品(等级奖励里的医疗品/护甲/全装包走这条)
+    for iid, cnt in reward.get("items", []):
         items.append(Item(iid, count=int(cnt)))
     for it in items:
         if not stash.add_item(it):

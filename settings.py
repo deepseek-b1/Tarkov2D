@@ -7,7 +7,7 @@ import pygame
 from inventory import Item      # 装备位里的武器要在槽之间搬(inventory 不反向依赖本模块)
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.13.5"
+GAME_VERSION = "2.13.6"
 # 更新清单地址(留空则只认 EXE 同目录的 version.json)。
 # 默认指向仓库里的 update_server/version.json —— 推到 main 就生效,不用再发服务器。
 # 也可以换成本机自建服务器(如 http://127.0.0.1:8765/version.json)。
@@ -1844,7 +1844,7 @@ SUPPLY_RANGE = 76            # 站多近才能补给
 # ---------- 任务系统(教官 / 医疗部门 / 后勤部门) ----------
 DEPTS = [("instructor", "教官"), ("medical", "医疗部门"),
          ("logistics", "后勤部门"), ("contractor", "保险承包商"),
-         ("gift", "礼品")]
+         ("gift", "礼品"), ("level", "等级手册")]
 # 教官的任务:kind 决定进度怎么涨(在 game.py 的战局结算里累计)
 # reward: rubles 给钱 / weapons 给枪 / attachments 给配件 / ammo 给子弹
 TASKS = [
