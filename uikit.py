@@ -65,8 +65,71 @@ def grid_hit(container, rect, cell, mx, my, scroll=0.0):
     return container.at(int(gx), int(gy))
 
 
+# 装备分级配色(借鉴暗区的等级色阶,但全部是程序绘制的原创图形,不涉及外部素材)
+ARMOR_LEVEL_COL = {
+    1: (122, 128, 138), 2: (108, 168, 112), 3: (96, 152, 208),
+    4: (160, 122, 198), 5: (226, 160, 74), 6: (222, 86, 80),
+}
+
+
+def level_color(level):
+    return ARMOR_LEVEL_COL.get(int(level or 0), (112, 118, 128))
+
+
+def draw_armor_icon(surface, item, inner, cx, cy):
+    """护甲:背心轮廓 + 等级色前板 + 等级点(几级亮几颗)。"""
+    acc = level_color(item.def_.get("level"))
+    x0, y0, w0, h0 = inner.left, inner.top, inner.w, inner.h
+    if w0 < 8 or h0 < 8:
+        return
+    shell = [
+        (x0 + int(w0 * 0.16), y0 + int(h0 * 0.10)),
+        (x0 + int(w0 * 0.84), y0 + int(h0 * 0.10)),
+        (x0 + int(w0 * 0.84), y0 + int(h0 * 0.62)),
+        (cx, y0 + int(h0 * 0.95)),
+        (x0 + int(w0 * 0.16), y0 + int(h0 * 0.62)),
+    ]
+    pygame.draw.polygon(surface, (38, 40, 48), shell)
+    pygame.draw.polygon(surface, (20, 20, 24), shell, 1)
+    plate = pygame.Rect(x0 + int(w0 * 0.26), y0 + int(h0 * 0.22),
+                        max(2, int(w0 * 0.48)), max(2, int(h0 * 0.42)))
+    pygame.draw.rect(surface, acc, plate, border_radius=2)
+    pygame.draw.rect(surface, (18, 18, 22), plate, 1, border_radius=2)
+    lv = min(6, int(item.def_.get("level", 0) or 0))
+    r = max(1, int(h0 * 0.04))
+    for i in range(lv):
+        px = plate.left + r + 2 + i * (r * 2 + 2)
+        if px + r > plate.right - 1:
+            break
+        pygame.draw.circle(surface, (245, 245, 250), (px, plate.bottom - r - 1), r)
+
+
+def draw_helmet_icon(surface, item, inner, cx, cy):
+    """头盔:盔壳 + 等级色面罩 + 护颚;带夜视的额外点一颗绿灯。"""
+    acc = level_color(item.def_.get("level"))
+    x0, y0, w0, h0 = inner.left, inner.top, inner.w, inner.h
+    if w0 < 8 or h0 < 8:
+        return
+    shell = pygame.Rect(x0 + int(w0 * 0.16), y0 + int(h0 * 0.18),
+                        max(3, int(w0 * 0.68)), max(3, int(h0 * 0.46)))
+    pygame.draw.ellipse(surface, (36, 38, 46), shell)
+    pygame.draw.ellipse(surface, (20, 20, 24), shell, 1)
+    visor = pygame.Rect(shell.left + int(shell.w * 0.16),
+                        shell.centery - max(1, int(shell.h * 0.10)),
+                        max(2, int(shell.w * 0.68)), max(2, int(shell.h * 0.36)))
+    pygame.draw.rect(surface, acc, visor, border_radius=max(1, int(shell.h * 0.12)))
+    pygame.draw.rect(surface, (44, 46, 54),
+                     (cx - max(2, int(w0 * 0.16)), shell.bottom - 1,
+                      max(3, int(w0 * 0.32)), max(2, int(h0 * 0.16))),
+                     border_radius=2)
+    if item.def_.get("nvg"):
+        pygame.draw.circle(surface, (120, 230, 160),
+                           (int(cx + w0 * 0.22), shell.top + max(1, int(h0 * 0.06))),
+                           max(1, int(h0 * 0.05)))
+
+
 def draw_item_icon(surface, item, x, y, cell=CELL):
-    """按类别画简单图标:武器=枪形,弹药=子弹,医疗=十字,护甲=背心,值钱品=菱形。"""
+    """按类别画图标:武器=枪形,弹药=子弹,医疗=十字,护甲/头盔=分级配色,值钱品=菱形。"""
     w, h = item.size()
     wpx, hpx = w * cell, h * cell
     rect = pygame.Rect(x, y, wpx, hpx)
@@ -99,9 +162,7 @@ def draw_item_icon(surface, item, x, y, cell=CELL):
         pygame.draw.rect(surface, (240, 240, 240), (cx - 9, cy - 3, 18, 6), border_radius=2)
         pygame.draw.rect(surface, (240, 240, 240), (cx - 3, cy - 9, 6, 18), border_radius=2)
     elif cat == "armor":
-        pygame.draw.polygon(surface, (36, 36, 42), [
-            (inner.left + 4, cy - 12), (inner.right - 4, cy - 12),
-            (inner.right - 4, cy + 2), (cx, cy + 13), (inner.left + 4, cy + 2)])
+        draw_armor_icon(surface, item, inner, cx, cy)
     elif cat == "pack":
         # 背包:主体 + 顶部提手 + 横带
         pygame.draw.rect(surface, (32, 32, 38),
@@ -137,14 +198,7 @@ def draw_item_icon(surface, item, x, y, cell=CELL):
             (cx, cy + 11), (cx - 9, cy + 5), (cx - 9, cy - 5)])
         pygame.draw.circle(surface, (26, 26, 30), (cx, cy), 4)
     elif cat == "helmet":
-        # 头盔:圆顶 + 下沿 + 护颚
-        pygame.draw.arc(surface, (30, 30, 36),
-                        (inner.left + 2, inner.top + 2, inner.w - 4, inner.h),
-                        0.15, 3.0, 4)
-        pygame.draw.rect(surface, (30, 30, 36),
-                         (inner.left + 3, cy - 1, inner.w - 6, 6), border_radius=3)
-        pygame.draw.rect(surface, (30, 30, 36),
-                         (cx - 5, cy + 5, 10, 9), border_radius=2)
+        draw_helmet_icon(surface, item, inner, cx, cy)
     else:  # valuable
         pygame.draw.polygon(surface, (255, 255, 255),
                             [(cx, cy - 11), (cx + 10, cy), (cx, cy + 11), (cx - 10, cy)])
@@ -157,6 +211,20 @@ def draw_item_icon(surface, item, x, y, cell=CELL):
         t = get_font(13, bold=True).render(f"{mag}", True,
                                            (120, 255, 120) if mag else (255, 120, 110))
         surface.blit(t, (rect.x + 6, rect.bottom - t.get_height() - 3))
+    # 护甲 / 头盔:底部耐久条(绿→黄→红),打光了整条变空
+    if cat in ("armor", "helmet"):
+        mx = item.armor_max_dur()
+        if mx > 0:
+            r = item.armor_dur_ratio()
+            bh = max(2, int(rect.h * 0.08))
+            bar = pygame.Rect(rect.left + 4, rect.bottom - bh - 4,
+                              max(4, rect.w - 8), bh)
+            pygame.draw.rect(surface, (22, 22, 26), bar)
+            col = ((150, 220, 150) if r > 0.6 else
+                   (240, 200, 90) if r > 0.25 else (230, 90, 80))
+            if r > 0:
+                pygame.draw.rect(surface, col,
+                                 (bar.x, bar.y, max(1, int(bar.w * r)), bar.h))
 
 
 def draw_button(surface, rect, text, hover=False, enabled=True, small=False):
@@ -189,6 +257,22 @@ def draw_slot(surface, rect, item, label, hover=False):
         t2 = get_font(13).render("空", True, (90, 94, 102))
         surface.blit(t2, t2.get_rect(center=(rect.centerx, rect.bottom - 26)))
     return rect
+
+
+def armor_dur_line(item):
+    """护甲/头盔的耐久说明行(给悬浮提示用)。"""
+    mx = item.armor_max_dur()
+    if mx <= 0:
+        return ""
+    cur = item.armor_dur()
+    ratio = item.armor_dur_ratio()
+    eff = int(round(item.armor_effective_reduce() * 100))
+    s = f"耐久 {cur}/{mx}({int(ratio * 100)}%)  实际减伤 {eff}%"
+    if cur <= 0:
+        s += "  —— 已损毁,去藏身处修"
+    elif ratio <= 0.3:
+        s += "  —— 快报废了,记得修"
+    return s
 
 
 def item_info_lines(item):
@@ -269,6 +353,7 @@ def item_info_lines(item):
         if d.get("slow"):
             txt += f"  移速 -{int(d['slow'] * 100)}%"
         sub.append(txt)
+        sub.append(armor_dur_line(item))
         if d.get("revive"):
             sub.append("★ 倒地自救 ×1(每局一次)")
     elif item.cat == "helmet":
@@ -279,6 +364,7 @@ def item_info_lines(item):
             txt += f"额外减伤 {int(d['reduce'] * 100)}%"
         if txt:
             sub.append(txt.strip())
+        sub.append(armor_dur_line(item))
         if d.get("nvg"):
             sub.append(f"★ 夜视:周围 {int(d['nvg'][0])} 全向可见(黑暗模式)")
     elif item.cat == "pack":

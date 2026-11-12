@@ -70,6 +70,7 @@ def _layout():
         story=pygame.Rect(1086, 548, 72, 46),
         options=pygame.Rect(1164, 548, 72, 46),
         organize=pygame.Rect(374, 106, 116, 24),      # 仓库:一键整理
+        repair=pygame.Rect(498, 106, 116, 24),        # 仓库:维修护甲/头盔耐久
         stash_all=pygame.Rect(712, 106, 184, 24),     # 出战配置:放回仓库并整理
         trade_stash=pygame.Rect(30, 100, 470, 570),
         trade_goods=pygame.Rect(530, 100, 720, 570),
@@ -836,6 +837,38 @@ class Hideout:
         audio.play("click")
         return True, (f"仓库已整理:{before} 件 → {len(sd.stash.items)} 件"
                       "(子弹并组 · 背包卷起 · 枪/甲/子弹各归一片)")
+
+    def repair_armor(self):
+        """维修护甲/头盔耐久:当前穿戴的 + 仓库里的,按缺失比例收费,修到 92%。
+
+        一次结算:先把费用算清(避免修到一半钱不够),再逐件修。
+        """
+        sd = self.game.save
+        targets = []
+        for it in (sd.armor, sd.helmet):
+            if it is not None:
+                targets.append(it)
+        for p in list(sd.stash.items):
+            it = getattr(p, "item", None)
+            if it is not None and getattr(it, "cat", "") in ("armor", "helmet"):
+                targets.append(it)
+        if not targets:
+            return False, "没有护甲/头盔可修"
+        plan = [(it, it.armor_repair_cost()) for it in targets]
+        plan = [(it, c) for it, c in plan if c > 0]
+        if not plan:
+            return False, f"{len(targets)} 件护甲/头盔都已是满耐久(修到 92% 上限)"
+        cost = sum(c for _it, c in plan)
+        if sd.rubles < cost:
+            return False, (f"维修要 {fmt_rub(cost)},你只有 {fmt_rub(sd.rubles)}"
+                           f" —— 修不了 {len(plan)} 件")
+        sd.rubles -= cost
+        for it, _c in plan:
+            it.armor_repair()
+        save_mod.save_data(sd)
+        audio.play("click")
+        return True, (f"维修 {len(plan)} 件护甲/头盔,花费 {fmt_rub(cost)}"
+                      f"(耐久修到上限 92%)")
 
     def stash_all_and_organize(self):
         """把出战背包 + 武器/护甲/背包全部放回仓库并整理。
@@ -1762,6 +1795,10 @@ class Hideout:
             ok, msg = self.organize_stash()
             self.say(msg, COL["good"] if ok else COL["bad"], 3.4)
             return
+        if lay["repair"].collidepoint(pos):
+            ok, msg = self.repair_armor()
+            self.say(msg, COL["good"] if ok else COL["bad"], 3.6)
+            return
         if lay["stash_all"].collidepoint(pos):
             ok, msg = self.stash_all_and_organize()
             self.say(msg, COL["good"] if ok else COL["bad"], 3.6)
@@ -2193,6 +2230,8 @@ class Hideout:
                   scroll=self.stash_scroll, view_h=self.stash_view_h)
         draw_button(screen, lay["organize"], "一键整理",
                     lay["organize"].collidepoint(mx, my), small=True)
+        draw_button(screen, lay["repair"], "维修装备",
+                    lay["repair"].collidepoint(mx, my), small=True)
         if self.stash_max_scroll() > 0:
             t = get_font(13).render(
                 f"滚轮上下翻(仓库共 {sd.stash.h} 行)",

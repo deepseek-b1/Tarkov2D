@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """战局:搜刮-战斗-撤离。玩家操作、子弹、战利品、撤离引导、阵亡结算。"""
 import math
 import random
@@ -200,7 +200,41 @@ class Player:
         self.burst_left = 0
         return cycle_fire_mode(self.weapon)
 
-    def take_damage(self, dmg, raid, rpg=False):
+    def _absorb_with_armor(self, dmg, raid, pen=True):
+        """护甲/头盔结算:按耐久算实际减伤,被穿甲时打折,并按挡下的伤害磨耐久。
+
+        规则:
+          - 实际减伤 = 标称 reduce × 耐久系数(见 Item.armor_effective_reduce);
+          - 单次伤害 >= 等级 × ARMOR_PEN_PER_LEVEL 判定为穿甲,只保留 ARMOR_PEN_KEEP 的减伤;
+          - 每挡掉 1 点伤害磨 ARMOR_WEAR_ABSORB 点耐久,穿甲时按 ARMOR_WEAR_PEN_RATIO 打折;
+          - 耐久打光那一刻提示一次。
+        返回剩余伤害。
+        """
+        from settings import (ARMOR_PEN_KEEP, ARMOR_PEN_PER_LEVEL, ARMOR_WEAR_ABSORB,
+                              ARMOR_WEAR_MIN, ARMOR_WEAR_PEN_RATIO, HELMET_WEAR_RATIO)
+        left = float(dmg)
+        for piece, wear_ratio in ((self.armor, 1.0), (self.helmet, HELMET_WEAR_RATIO)):
+            if piece is None:
+                continue
+            eff = piece.armor_effective_reduce()
+            if eff <= 0:
+                continue
+            level = int(piece.def_.get("level", 0) or 0)
+            pierced = bool(pen) and level > 0 and dmg >= level * ARMOR_PEN_PER_LEVEL
+            absorbed = left * eff * (ARMOR_PEN_KEEP if pierced else 1.0)
+            if absorbed <= 0:
+                continue
+            left -= absorbed
+            wear = max(ARMOR_WEAR_MIN, absorbed * ARMOR_WEAR_ABSORB) * wear_ratio
+            if pierced:
+                wear *= ARMOR_WEAR_PEN_RATIO
+            before, after = piece.armor_wear(wear)
+            if before > 0 and after <= 0:
+                raid.add_toast(f"{piece.name} 耐久耗尽 —— 不再提供防护",
+                               COL["bad"], 3.2)
+        return left
+
+    def take_damage(self, dmg, raid, rpg=False, pen=True):
         if self.out:       # 双人合作里已经倒下 / 已经撤离的不再吃伤害
             return
         if rpg:
@@ -227,11 +261,8 @@ class Player:
                 self.hp = 0
                 raid.player_down(self)
             return
-        if self.armor is not None:
-            dmg *= (1 - self.armor.def_.get("reduce", 0))
-        if self.helmet is not None:
-            # 头盔再分担一部分伤害(乘在护甲减伤之后;火箭弹规则只看护甲等级)
-            dmg *= (1 - self.helmet.def_.get("reduce", 0))
+        # 护甲/头盔:按耐久算减伤 + 穿甲判定 + 磨损(以前是死的 reduce,现在会掉耐久)
+        dmg = self._absorb_with_armor(dmg, raid, pen=pen)
         dmg = max(1, round(dmg))
         self.hp -= dmg
         self.hurt_flash = 0.45
@@ -1621,7 +1652,9 @@ class Raid:
                 if friendly:
                     if self.mode == "assault":
                         self.add_toast("被友军火力波及!", COL["bad"], 2.6)
-                    q.take_damage(dmg * 0.5, self)
+                    # 爆炸不吃穿甲判定:威力大(空袭 260)不等于子弹穿甲,
+                    # 否则 6 级甲会因「这一炮威力超过穿甲线」被判定穿透而被打死
+                    q.take_damage(dmg * 0.5, self, pen=False)
                 else:
                     q.take_damage(dmg, self, rpg=True)
 

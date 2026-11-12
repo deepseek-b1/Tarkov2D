@@ -1381,6 +1381,86 @@ def run():
     check("实时更新-运行期轮询/后台下载/就绪/提示条", t_runtime_update)
 
 
+    def t_armor_durability():
+        """护甲耐久:满耐久减伤 -> 磨损衰减 -> 穿甲打折 -> 打光只剩保底 -> 可维修。"""
+        import settings
+        from inventory import Item
+        from raid import Player
+
+        lv3 = settings.ARMOR_DUR_BY_LEVEL[3]
+        it = Item("paca")                     # 3 级软质背心,标称 reduce 0.28
+        assert it.armor_max_dur() == lv3, it.armor_max_dur()
+        assert it.armor_dur() == lv3
+        assert abs(it.armor_dur_ratio() - 1.0) < 1e-9
+        full = it.armor_effective_reduce()
+        assert abs(full - 0.28) < 0.02, full
+
+        # 磨损 -> 实际减伤下降;存档往返保住耐久
+        before, after = it.armor_wear(30)
+        assert before == lv3 and after == lv3 - 30, (before, after)
+        assert it.armor_effective_reduce() < full
+        assert Item.from_dict(it.serialize()).armor_dur() == after
+
+        # 维修:按缺失比例收费,修到 92% 上限,修满后再修不要钱
+        cost = it.armor_repair_cost()
+        assert cost > 0, cost
+        assert it.armor_repair() == cost
+        assert it.armor_dur() == int(round(lv3 * settings.ARMOR_REPAIR_CAP))
+        assert it.armor_repair_cost() == 0
+
+        class _Raid:
+            def __init__(self):
+                self.toasts = []
+
+            def add_toast(self, *a, **k):
+                self.toasts.append(a)
+
+        class _Holder:
+            pass
+
+        raid_stub = _Raid()
+        # 未穿甲:30 < 3 级 × 14 = 42,挡掉约 28%
+        h = _Holder()
+        h.armor, h.helmet = Item("paca"), None
+        left = Player._absorb_with_armor(h, 30, raid_stub)
+        frac = (30 - left) / 30.0
+        assert abs(frac - 0.28) < 0.03, frac
+        assert h.armor.armor_dur() < lv3, h.armor.armor_dur()
+
+        # 穿甲:120 >= 42,只保留 ARMOR_PEN_KEEP 的减伤
+        h2 = _Holder()
+        h2.armor, h2.helmet = Item("paca"), None
+        left2 = Player._absorb_with_armor(h2, 120, raid_stub)
+        frac2 = (120 - left2) / 120.0
+        assert frac2 < frac * 0.6, (frac, frac2)
+
+        # 耐久打光:只剩标称 × 下限;用 20 点伤害(低于穿甲线 42)才能单独验证下限
+        h3 = _Holder()
+        h3.armor, h3.helmet = Item("paca"), None
+        h3.armor.state["dur"] = 0
+        left3 = Player._absorb_with_armor(h3, 20, raid_stub)
+        expect = 0.28 * settings.ARMOR_DUR_FLOOR
+        assert abs((20 - left3) / 20.0 - expect) < 0.02, (20 - left3) / 20.0
+        assert h3.armor.armor_dur() == 0
+
+        # 头盔也吃耐久,且磨损比护甲快
+        helm_id = next(k for k, v in settings.ITEMS.items() if v.get("cat") == "helmet")
+        h4 = _Holder()
+        h4.armor, h4.helmet = None, Item(helm_id)
+        hd = h4.helmet.armor_max_dur()
+        assert hd > 0
+        Player._absorb_with_armor(h4, 20, raid_stub)
+        assert h4.helmet.armor_dur() < hd, h4.helmet.armor_dur()
+
+        # 图标:护甲/头盔在几种格子尺寸下都能画出来
+        from uikit import draw_item_icon
+        surf = pygame.Surface((240, 240))
+        for cell in (10, 22, 40):
+            draw_item_icon(surf, Item("paca"), 0, 0, cell)
+            draw_item_icon(surf, Item(helm_id), 0, 0, cell)
+
+    check("护甲耐久-磨损/穿甲/打光/维修/存档/图标", t_armor_durability)
+
     def t_boss():
         """三张地图的头目系统:5 级甲(89/81/75%)+ 专属枪械掉落。"""
         from game import Game
@@ -2375,6 +2455,11 @@ def run():
         r.player.armor = Item("b45")
         r.player.hp = 100
         for o in r.objectives:
+            # 每座设施都从满血满耐久开始:这条用例测的是 C4 安放/起爆机制,
+            # 不是「连吃三发贴脸 C4 还能不能活」(爆炸伤害由后面的爆区用例单独覆盖)
+            r.player.hp = r.player.max_hp
+            r.player.armor = Item("b45")
+            r.player.helmet = None
             r.player.x, r.player.y = o.x, o.y + 24
             r.interact()
             assert r.channel is not None and r.channel["kind"] == "destroy", o.name
@@ -4204,7 +4289,8 @@ def run():
             assert len(by_lv) >= 5, (cat, sorted(by_lv))
             for lv in sorted(by_lv)[:-1]:
                 assert min(by_lv[lv]) < min(by_lv[lv + 1]), (cat, lv)
-        # 6) 头盔减伤生效:乘在护甲减伤之后
+        # 6) 头盔减伤生效:乘在护甲减伤之后(按耐久模型计算,100 点会判定穿甲)
+        import settings as _st
         g = Game()
         g.save = save_mod.reset_data()
         g.save.seen_intro = True
@@ -4214,16 +4300,30 @@ def run():
         p.armor = Item("paca")
         p.helmet = None
         p.hp = p.max_hp
+        eff_a = p.armor.armor_effective_reduce()             # 满耐久时的实际减伤
+        assert eff_a > 0
         p.take_damage(100, r)
-        assert p.max_hp - p.hp == 72, (p.max_hp - p.hp)     # 100 × (1-0.28)
+        # 100 >= 3 级 × ARMOR_PEN_PER_LEVEL,判定穿甲 → 只挡 eff × ARMOR_PEN_KEEP
+        expect = max(1, round(100 * (1 - eff_a * _st.ARMOR_PEN_KEEP)))
+        assert p.max_hp - p.hp == expect, (p.max_hp - p.hp, expect)
         p.hp = p.max_hp
-        p.helmet = Item("h_6bnt")                            # 6 级盔:再减 40%
+        p.armor = Item("paca")
+        p.helmet = Item("h_6bnt")                            # 6 级盔:标称再减 40%
+        ea = p.armor.armor_effective_reduce()
+        eh = p.helmet.armor_effective_reduce()
         p.take_damage(100, r)
-        assert p.max_hp - p.hp == 43, (p.max_hp - p.hp)     # 100 × 0.72 × 0.60
+        dmg = 100.0
+        dmg -= dmg * ea * _st.ARMOR_PEN_KEEP                  # 100 >= 42,护甲被穿
+        dmg -= dmg * eh * _st.ARMOR_PEN_KEEP                  # 100 >= 84,头盔也被穿
+        expect = max(1, round(dmg))
+        assert p.max_hp - p.hp == expect, (p.max_hp - p.hp, expect)
         p.hp = p.max_hp
         p.armor = None                                       # 只戴头盔
+        p.helmet = Item("h_6bnt")
+        eh = p.helmet.armor_effective_reduce()
         p.take_damage(100, r)
-        assert p.max_hp - p.hp == 60, (p.max_hp - p.hp)
+        expect = max(1, round(100 * (1 - eh * _st.ARMOR_PEN_KEEP)))
+        assert p.max_hp - p.hp == expect, (p.max_hp - p.hp, expect)
         assert p.hp > 0, "这里不该被打死"
         # 7) 悬浮信息与 HUD 渲染(普通头盔显示减伤,夜视头盔显示夜视)
         lines = _uk.item_info_lines(Item("h_03"))

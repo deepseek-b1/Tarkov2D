@@ -59,6 +59,78 @@ class Item:
     def total_price(self):
         return self.price * self.count
 
+    # ---- 护甲耐久:存档里挂在 state["dur"],没写过就是满耐久 ----
+    def armor_max_dur(self):
+        """这件护甲/头盔的满耐久;非护具返回 0。"""
+        from settings import ARMOR_DUR_BY_LEVEL, HELMET_DUR_RATIO
+        d = self.def_
+        cat = d.get("cat")
+        if cat not in ("armor", "helmet"):
+            return 0
+        lv = int(d.get("level", 1) or 1)
+        base = float(ARMOR_DUR_BY_LEVEL.get(lv, ARMOR_DUR_BY_LEVEL[1]))
+        if cat == "helmet":
+            base *= HELMET_DUR_RATIO
+        return max(10, int(round(base)))
+
+    def armor_dur(self):
+        mx = self.armor_max_dur()
+        if mx <= 0:
+            return 0
+        try:
+            v = float(self.state.get("dur", mx))
+        except (TypeError, ValueError):
+            v = mx
+        return max(0, min(mx, int(round(v))))
+
+    def armor_dur_ratio(self):
+        mx = self.armor_max_dur()
+        if mx <= 0:
+            return 0.0
+        return max(0.0, min(1.0, self.armor_dur() / float(mx)))
+
+    def armor_effective_reduce(self):
+        """按耐久折算的实际减伤:满耐久 = 标称 reduce,打光 = 标称 × 下限。"""
+        from settings import ARMOR_DUR_FLOOR
+        d = self.def_
+        if d.get("cat") not in ("armor", "helmet"):
+            return 0.0
+        base = float(d.get("reduce", 0) or 0)
+        if base <= 0:
+            return 0.0
+        r = self.armor_dur_ratio()
+        return base * (ARMOR_DUR_FLOOR + (1.0 - ARMOR_DUR_FLOOR) * r)
+
+    def armor_wear(self, amount):
+        """扣耐久;返回 (扣前, 扣后)。"""
+        mx = self.armor_max_dur()
+        if mx <= 0:
+            return 0, 0
+        before = self.armor_dur()
+        after = max(0, int(round(before - max(0.0, float(amount)))))
+        self.state["dur"] = after
+        return before, after
+
+    def armor_repair_cost(self):
+        """修到上限要多少钱(已到上限返回 0)。"""
+        from settings import ARMOR_REPAIR_CAP, ARMOR_REPAIR_RATE
+        mx = self.armor_max_dur()
+        if mx <= 0:
+            return 0
+        target = mx * ARMOR_REPAIR_CAP
+        miss = max(0.0, target - self.armor_dur()) / float(mx)
+        return int(round(self.price * miss * ARMOR_REPAIR_RATE))
+
+    def armor_repair(self):
+        """维修到上限(ARMOR_REPAIR_CAP);返回实际花费。"""
+        from settings import ARMOR_REPAIR_CAP
+        mx = self.armor_max_dur()
+        if mx <= 0:
+            return 0
+        cost = self.armor_repair_cost()
+        self.state["dur"] = int(round(mx * ARMOR_REPAIR_CAP))
+        return cost
+
     def clone(self):
         return Item(self.iid, self.count, self.rot, dict(self.state))
 

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Tarkov2D 全局配置:常量、物品定义、地图、拾荒者定义。"""
 import os
 
@@ -7,7 +7,7 @@ import pygame
 from inventory import Item      # 装备位里的武器要在槽之间搬(inventory 不反向依赖本模块)
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.13.2"
+GAME_VERSION = "2.13.3"
 # 更新清单地址(留空则只认 EXE 同目录的 version.json)。
 # 默认指向仓库里的 update_server/version.json —— 推到 main 就生效,不用再发服务器。
 # 也可以换成本机自建服务器(如 http://127.0.0.1:8765/version.json)。
@@ -36,6 +36,22 @@ FOG_VIS_RADIUS = 840
 RAID_TIME = 12 * 60          # 战局时长(秒)
 EXTRACT_TIME = 3.0           # 撤离引导(秒)
 INTERACT_DIST = 56           # 搜刮交互距离(像素)
+
+# ---------- 护甲耐久与防护 ----------
+# 以前护甲只有一个静态 reduce,挨一万枪也不掉一点;现在每件护甲/头盔有耐久,
+# 挡伤害会磨耐久,耐久越低实际减伤越低,打光就只剩保底的那一点点。
+ARMOR_DUR_BY_LEVEL = {1: 45, 2: 60, 3: 75, 4: 90, 5: 110, 6: 130}  # 满耐久
+HELMET_DUR_RATIO = 0.6       # 同等级头盔的满耐久 = 护甲 × 该系数
+ARMOR_DUR_FLOOR = 0.25       # 耐久打光后仍保留的名义减伤比例(0 = 完全不挡)
+ARMOR_PEN_PER_LEVEL = 14     # 单次伤害 >= 等级 × 该值 = 判定为穿甲
+ARMOR_PEN_KEEP = 0.35        # 被穿甲时还能挡下的比例(相对正常减伤)
+ARMOR_WEAR_ABSORB = 0.55     # 每挡掉 1 点伤害消耗的耐久
+ARMOR_WEAR_MIN = 0.4         # 单次命中的最低耐久损耗(避免刮痧不掉耐久)
+ARMOR_WEAR_PEN_RATIO = 0.55  # 被穿甲时的耐久损耗倍率
+HELMET_WEAR_RATIO = 1.3      # 头盔磨损比护甲快(同样伤害吃更多耐久)
+ARMOR_REPAIR_RATE = 0.35     # 维修费 = 价格 × 缺失耐久比例 × 该系数
+ARMOR_REPAIR_CAP = 0.92      # 维修最多回到 92%(旧甲修不回全新)
+ARMOR_BROKEN_RATIO = 0.0     # 耐久 <= 该比例视为彻底损坏
 # 搜刮/打药读条(秒):以前是瞬发,现在要花时间
 LOOT_TAKE_TIME = 1.0         # 搜刮单件的基础时间
 LOOT_TAKE_PER_CELL = 0.16    # 每多占一格多花的时间(大件更慢)
