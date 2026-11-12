@@ -303,6 +303,21 @@ async def run_game():
         _trace("构造 Game(screen) ...")
         game = Game(screen)
         _trace("Game() 构造完成")
+
+        # 实时更新看门狗:运行期定时重查清单,--no-update / 网页 / 安卓不启用
+        rt_update = None
+        if "--no-update" not in sys.argv and not _is_web() and not on_android:
+            try:
+                import updater as _rt_updater
+                if _rt_updater.start_watchdog():
+                    rt_update = _rt_updater
+                    _trace(f"实时更新看门狗已启动(每 "
+                           f"{getattr(_rt_updater._settings(), 'UPDATE_POLL_INTERVAL', 0)}s)")
+                else:
+                    _trace("实时更新看门狗未启用(interval<=0 或已启动)")
+            except Exception:
+                _trace("实时更新看门狗启动失败:\n" + traceback.format_exc())
+
         if migrated:
             game.hideout.say("原来那份存档已并进这个账号 —— 进度、仓库、钱都在",
                              None, ttl=9.0)
@@ -333,6 +348,10 @@ async def run_game():
                            (240, 200, 90) if fps >= 55 else (240, 90, 80))
                     t = get_font(15, bold=True).render(f"{fps:.0f} FPS", True, col)
                     screen.blit(t, (W - t.get_width() - 12, 8))
+                # 实时更新提示条 / F9 一键更新(触发后跳出循环,交给批处理替换 EXE)
+                if rt_update is not None and rt_update.watchdog_tick(screen, game):
+                    _trace("退出原因: 实时更新触发就地替换(进程退出后由批处理重启)")
+                    break
                 pygame.display.flip()
                 n += 1
                 if n % 300 == 0:

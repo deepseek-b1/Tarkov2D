@@ -8,9 +8,17 @@ from inventory import Item      # 装备位里的武器要在槽之间搬(invent
 
 # ---------- 版本与更新 ----------
 GAME_VERSION = "2.13.1"
-# 更新清单地址(可换成自建服务器 / GitHub raw;留空则只认 EXE 同目录的 version.json)
-UPDATE_MANIFEST_URL = "http://127.0.0.1:8765/version.json"
-UPDATE_TIMEOUT = 3   # 检查 / 下载超时(秒)
+# 更新清单地址(留空则只认 EXE 同目录的 version.json)。
+# 默认指向仓库里的 update_server/version.json —— 推到 main 就生效,不用再发服务器。
+# 也可以换成本机自建服务器(如 http://127.0.0.1:8765/version.json)。
+UPDATE_MANIFEST_URL = ("https://raw.githubusercontent.com/deepseek-b1/Tarkov2D/"
+                       "main/update_server/version.json")
+UPDATE_TIMEOUT = 3   # 单次检查 / 下载连接超时(秒)
+
+# ---------- 实时更新(运行期轮询) ----------
+UPDATE_POLL_INTERVAL = 300   # 游戏跑起来后每隔多少秒问一次清单;0 = 只在启动时检查
+UPDATE_POLL_QUIET = 20       # 启动后先安静多少秒再开始轮询(避开开局)
+UPDATE_HOTKEY = "f9"         # 局内一键更新:按一次下载,下完再按一次重启安装
 
 # ---------- 基础常量 ----------
 W, H = 1280, 720

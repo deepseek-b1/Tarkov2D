@@ -106,12 +106,37 @@ buildozer -v android debug      # 产出 bin/tarkov2d-1.0.7-debug.apk
 
 ## 自动更新
 
+两条路径:**启动时**检查一次,**游戏跑起来之后**还会定时重查(实时更新)。
+
 启动时读取更新清单,发现更高版本就自动下载、替换自身并重启:
 
-1. 检查顺序:EXE 同目录的 `version.json` → `settings.UPDATE_MANIFEST_URL`(默认 `http://127.0.0.1:8765/version.json`)
+1. 检查顺序:EXE 同目录的 `version.json` → `settings.UPDATE_MANIFEST_URL`
+   (默认指向仓库里的 `update_server/version.json`,推到 main 就生效)
 2. 清单格式:`{"version": "1.0.2", "url": "Tarkov2D.exe", "notes": "更新说明"}`
 3. 找到新版 → 下载为 `Tarkov2D.new.exe` → 批处理等本进程退出后**重试覆盖**旧 EXE → 自动重启游戏
 4. 没有服务器 / 检查失败时静默跳过,不影响正常游戏
+
+### 实时更新(运行期轮询)
+
+启动后 `UPDATE_POLL_QUIET` 秒(默认 20)开始,每隔 `UPDATE_POLL_INTERVAL` 秒(默认 300)
+在**后台线程**重查一次清单 —— 检查和下载都不在主线程,不卡帧:
+
+- 发现新版本 → 右上角常驻提示条 `发现新版本 vX.Y.Z · 按 F9 更新`,藏身处同时弹一条 toast
+- 按 **F9** → 后台下载(提示条带进度条,可继续玩)
+- 下完再按 **F9** → 就地替换并重启(和启动时那条路径同一套批处理)
+
+后台线程只读写状态快照,`watchdog_tick()` 在主循环里画提示条 + 收热键。
+网络失败时保留已发现的更新(下次按 F9 还能下),只有远端版本真正追平才撤掉提示。
+
+**相关配置**(`settings.py`):
+
+| 常量 | 默认 | 说明 |
+|---|---|---|
+| `UPDATE_MANIFEST_URL` | 仓库 `update_server/version.json` 的 raw 地址 | 实时更新的清单源 |
+| `UPDATE_POLL_INTERVAL` | `300` | 运行期重查间隔(秒);`0` = 只在启动时查 |
+| `UPDATE_POLL_QUIET` | `20` | 启动后先安静多少秒再开始轮询 |
+| `UPDATE_HOTKEY` | `"f9"` | 局内一键更新热键 |
+| `UPDATE_TIMEOUT` | `3` | 单次连接超时(秒) |
 
 **发布一次更新**:
 ```
@@ -121,7 +146,11 @@ serve_update.bat                                 # 启动本地更新服务器(8
 把 `update_server\` 里的 `Tarkov2D.exe` 与 `version.json` 放到任意 HTTP 服务器(或 GitHub raw),
 再把 `settings.UPDATE_MANIFEST_URL` 改成对应地址,玩家端下次启动就会自动升级。
 
-**其他参数**:`--no-update`(跳过更新检查)、`--version`(输出版本号;
+> 用 GitHub 托管 EXE 时,EXE 有 10 MB 左右,不适合直接提交进仓库:
+> 建议传成 Release 附件,并把清单里的 `url` 写成完整的 `https://...` 下载地址
+> ——`updater` 对绝对 URL 不会再做相对拼接。
+
+**其他参数**:`--no-update`(跳过更新检查与实时轮询)、`--version`(输出版本号;
 运行版本会记录到 `%LOCALAPPDATA%\Tarkov2D\last_run_version.txt`)。
 
 ## 游戏模式(藏身处右侧「游戏模式」切换)
