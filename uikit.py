@@ -128,11 +128,53 @@ def draw_helmet_icon(surface, item, inner, cx, cy):
                            max(1, int(h0 * 0.05)))
 
 
+
+# ---------- 外部图标(assets/icons/<物品id>.png 优先,没有就用程序化图标) ----------
+_ICON_DIR = None
+_ICON_CACHE = {}
+
+
+def _icon_dir():
+    """图标目录:exe 同级 assets/icons(打包后也能用)。"""
+    global _ICON_DIR
+    if _ICON_DIR is None:
+        import os as _os
+        import sys as _sys
+        base = _os.path.dirname(_os.path.abspath(
+            getattr(_sys, "executable", _sys.argv[0])))
+        _ICON_DIR = _os.path.join(base, "assets", "icons")
+    return _ICON_DIR
+
+
+def load_item_image(iid, wpx, hpx):
+    """按物品 id 找 png,缩放到目标尺寸;没有就返回 None。"""
+    import os as _os
+    if not iid:
+        return None
+    key = (iid, wpx, hpx)
+    if key in _ICON_CACHE:
+        return _ICON_CACHE[key]
+    path = _os.path.join(_icon_dir(), "%s.png" % iid)
+    img = None
+    if _os.path.isfile(path):
+        try:
+            raw = pygame.image.load(path)
+            img = pygame.transform.smoothscale(raw, (wpx, hpx))
+        except Exception:
+            img = None
+    _ICON_CACHE[key] = img
+    return img
+
+
 def draw_item_icon(surface, item, x, y, cell=CELL):
     """按类别画图标:武器=枪形,弹药=子弹,医疗=十字,护甲/头盔=分级配色,值钱品=菱形。"""
     w, h = item.size()
     wpx, hpx = w * cell, h * cell
     rect = pygame.Rect(x, y, wpx, hpx)
+    _img = load_item_image(item.iid, wpx, hpx)
+    if _img is not None:
+        surface.blit(_img, (x, y))
+        return
     col = item.def_["color"]
     pygame.draw.rect(surface, col, rect.inflate(-6, -6), border_radius=4)
     pygame.draw.rect(surface, (20, 20, 24), rect.inflate(-6, -6), 2, border_radius=4)

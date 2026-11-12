@@ -99,7 +99,12 @@ class Hideout:
             row, col = divmod(i, 3)
             self.map_rects.append(pygame.Rect(
                 sp.x + 18 + col * 100, sp.y + 62 + row * 34, 92, 30))
-        self.mode_rects = [pygame.Rect(sp.x + 18 + i * 58, sp.y + 172, 55, 30)
+        # 3 种模式:整排居中,单个按钮加宽到 64px
+        _mw, _mg, _mn = 64, 8, max(1, len(MODE_ORDER))
+        _mtotal = _mw * _mn + _mg * (_mn - 1)
+        _mx0 = sp.x + max(0, (sp.w - _mtotal) // 2)
+        self.mode_rects = [pygame.Rect(_mx0 + i * (_mw + _mg), sp.y + 172,
+                                       _mw, 30)
                            for i in range(len(MODE_ORDER))]
         # 双人合作开关(同一台电脑两人玩;搜打撤 / 夜战都能开,见 coop.py)
         self.coop_rect = pygame.Rect(sp.x + 220, sp.y + 146, 92, 26)
