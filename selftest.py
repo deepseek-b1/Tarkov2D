@@ -3165,8 +3165,8 @@ def run():
             gd.save.difficulty = diff
             gd.save.seen_intro = True
             gd.start_raid()
-            # assert gd.raid.diff_key == "assault", diff
-            # assert len(gd.raid.scavs) == ASSAULT_ENEMIES + 6, (diff, len(gd.raid.scavs))
+            assert gd.raid.diff_key == "assault", diff
+            assert len(gd.raid.scavs) == ASSAULT_ENEMIES + 6, (diff, len(gd.raid.scavs))
             assert gd.raid.commander() is not None
         # 9) 渲染:突袭 HUD / 援兵行 / 支援面板 / 设施血条 / C4 爆区圈 / 结算页
         screen = pygame.display.set_mode((SW, SH))
@@ -4576,7 +4576,7 @@ def run():
         r.update(1 / 60, [pygame.event.Event(pygame.KEYDOWN, key=pygame.K_g)])
         assert p.fire_mode() == "semi"
         assert p.burst_left == 0, "切模式/换枪要清掉三连发计数"
-        # assert any("单发" in t[0] for t in r.toasts), r.toasts
+        assert any("单发" in t[0] for t in r.toasts), r.toasts
 
         # 4) 手机:多一个「模式」按钮(写着当前模式),点它能切
         for name, d in touch_mod.merged_layout(False).items():
@@ -5237,7 +5237,7 @@ def run():
         assert n0 == 2, n0
         r.p2_interact()
         assert r.p2_take is not None
-        # assert "自动" in r.toasts[-1][0] or "搜刮" in r.toasts[-1][0]
+        assert "自动" in r.toasts[-1][0] or "搜刮" in r.toasts[-1][0]
         for _ in range(60 * 30):
             r.update(1 / 60, [])
             if r.p2_take is None or r.over:
@@ -5460,7 +5460,7 @@ def run():
         p2.weapon.state["mag"] = _cap(p2.weapon)
         r.toasts = []
         r.update(1 / 60, [_key_event(COOP["keys"]["reload"][0])])
-        # assert any("满" in t[0] for t in r.toasts), r.toasts
+        assert any("满" in t[0] for t in r.toasts), r.toasts
         # P1 开着背包/搜刮窗也不影响 P2 操作(双人各干各的)
         p2.reloading = False
         p2.reload_t = 0.0
@@ -5674,7 +5674,7 @@ def run():
             client.update(1 / 60.0, [])
             time.sleep(1 / 240.0)
         assert client.phase == "raid" and client.raid is not r1, "第二局客户端没跟上"
-        # assert len(client.raid.scavs) == len(host.raid.scavs), "第二局敌人数不一致"
+        assert len(client.raid.scavs) == len(host.raid.scavs), "第二局敌人数不一致"
         assert client.raid.map_key == host.raid.map_key
         # 6) 断开:客户端应该回到藏身处
         host.net.close()
