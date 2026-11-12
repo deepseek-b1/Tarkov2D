@@ -1275,26 +1275,81 @@ def run():
         finally:
             updater.local_manifest_path = old_local
 
-        # ---- 实时更新(运行期看门狗) ----
-        # 轮询能发现新版本 -> 状态快照 -> 提示文字;开发模式不下载但要说清原因
-        updater._set(remote=None, download=None, ready=None, notified=False, installing=False)
-        settings.UPDATE_MANIFEST_URL = "file:///" + man_path.replace("\\", "/")
-        updater.local_manifest_path = lambda: os.path.join(d, "none.json")
+    check("更新-版本比较与清单读取", t_updater)
+
+    def t_runtime_update():
+        """实时更新:运行期轮询 -> 后台下载 -> 就绪 -> 提示条。全程不碰真实 EXE。"""
+        import json
+        import updater
+        import settings
+
+        d = tempfile.mkdtemp(prefix="tarkov_rt_")
+        man_path = os.path.join(d, "version.json")
+        payload = os.path.join(d, "Tarkov2D-9.9.9.exe")
+        with open(payload, "wb") as f:
+            f.write(b"MZ" + b"\0" * 4096)
+        with open(man_path, "w", encoding="utf-8") as f:
+            json.dump({"version": "9.9.9", "url": os.path.basename(payload)}, f)
+
+        old_local = updater.local_manifest_path
+        old_base = updater._base_dir
+        old_url = settings.UPDATE_MANIFEST_URL
+        had_frozen = hasattr(sys, "frozen")
+        old_frozen = getattr(sys, "frozen", None)
+        old_exe = sys.executable
+        updater._set(remote=None, download=None, ready=None, notified=False,
+                     installing=False, last_error="")
         try:
+            updater.local_manifest_path = lambda: os.path.join(d, "none.json")
+            settings.UPDATE_MANIFEST_URL = "file:///" + man_path.replace("\\", "/")
+
+            # 1) 轮询发现新版本 -> 状态快照 -> 提示文字
             assert updater.poll_once() is True
             s = updater._snapshot()
             assert s["remote"] and s["remote"]["version"] == "9.9.9", s["remote"]
             text, ratio = updater._hud_text(s)
             assert "9.9.9" in text and ratio is None, (text, ratio)
-            from settings import W, H
-            assert updater.watchdog_tick(pygame.Surface((W, H))) is False
+
+            # 2) 开发模式(python 运行)不下载,但要说明原因
             ok, msg = updater.start_download()
             assert ok is False and "开发" in msg, msg
-            # 网络失败不该把已发现的更新丢掉(下次还能按 F9 下)
-            settings.UPDATE_MANIFEST_URL = "file:///" + os.path.join(d, "nope.json").replace("\\", "/")
+
+            # 3) 模拟打包后的 EXE:后台线程下载到 Tarkov2D.new.exe 并进入就绪
+            sys.frozen = True
+            updater._base_dir = lambda: d
+            ok, msg = updater.start_download()
+            assert ok is True, msg
+            for _ in range(300):
+                s = updater._snapshot()
+                if s["ready"] or s["download"] is None:
+                    break
+                time.sleep(0.02)
+            s = updater._snapshot()
+            assert s["ready"], (s["download"], s["last_error"])
+            new_exe = s["ready"]["path"]
+            assert os.path.basename(new_exe) == "Tarkov2D.new.exe", new_exe
+            assert os.path.getsize(new_exe) == os.path.getsize(payload), "下载大小不一致"
+            text, ratio = updater._hud_text(s)
+            assert "F9" in text and ratio == 1.0, (text, ratio)
+
+            # 4) 提示条能画出来;F9 未按下时不该触发安装
+            class _NoKey:
+                def __getitem__(self, k):
+                    return False
+            old_get = pygame.key.get_pressed
+            pygame.key.get_pressed = lambda: _NoKey()
+            try:
+                assert updater.watchdog_tick(
+                    pygame.Surface((settings.W, settings.H))) is False
+            finally:
+                pygame.key.get_pressed = old_get
+
+            # 5) 网络失败保留已知更新;只有远端版本真正追平才撤掉提示
+            updater._set(ready=None, download=None)
+            settings.UPDATE_MANIFEST_URL = ("file:///" +
+                                            os.path.join(d, "nope.json").replace("\\", "/"))
             assert updater.poll_once() is False
             assert updater._snapshot()["remote"] is not None, "网络失败时丢失了已知更新"
-            # 远端真的不再更新(版本已追平)才清掉提示
             old_man = os.path.join(d, "version_old.json")
             with open(old_man, "w", encoding="utf-8") as f:
                 json.dump({"version": "0.0.1", "url": "Tarkov2D.exe"}, f)
@@ -1304,10 +1359,21 @@ def run():
             assert updater._hud_text(updater._snapshot())[0] == ""
         finally:
             updater.local_manifest_path = old_local
+            updater._base_dir = old_base
             settings.UPDATE_MANIFEST_URL = old_url
-            updater._set(remote=None, download=None, ready=None, notified=False, installing=False)
+            if had_frozen:
+                sys.frozen = old_frozen
+            else:
+                try:
+                    del sys.frozen
+                except Exception:
+                    pass
+            sys.executable = old_exe
+            updater._set(remote=None, download=None, ready=None, notified=False,
+                         installing=False, last_error="")
 
-    check("更新-版本比较与清单读取", t_updater)
+    check("实时更新-运行期轮询/后台下载/就绪/提示条", t_runtime_update)
+
 
     def t_boss():
         """三张地图的头目系统:5 级甲(89/81/75%)+ 专属枪械掉落。"""
