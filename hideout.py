@@ -1135,6 +1135,30 @@ class Hideout:
                 y += 44
         return out
 
+    def _wd_btn(self):
+        r = self._wd_rect()
+        return pygame.Rect(r.right - 150, r.y + 46, 128, 28)
+
+    def _wd_strip_all(self):
+        """把当前武器的配件全部卸回仓库(放不下就留在枪上)。"""
+        from settings import ITEMS, weapon_attach
+        sd = self.game.save
+        w = self.weapon_detail
+        att = weapon_attach(w)
+        moved, kept = 0, 0
+        for key in list(att.keys()):
+            iid = att[key]
+            if sd.stash.add_item(Item(iid)):
+                del att[key]
+                moved += 1
+            else:
+                kept += 1
+        save_mod.save_data(sd)
+        msg = f"卸下 {moved} 个配件"
+        if kept:
+            msg += f"(仓库放不下 {kept} 个)"
+        self.say(msg, COL["good"] if moved else COL["bad"], 2.6)
+
     def _wd_stash_rects(self):
         """窗口下方「仓库里的配件」格子。"""
         import settings as S
@@ -1170,6 +1194,9 @@ class Hideout:
                 if box.collidepoint(mx, my):
                     self._wd_install(key)
                     return True
+            if self._wd_btn().collidepoint(mx, my):
+                self._wd_strip_all()
+                return True
             for iid, pl, box in self._wd_stash_rects():
                 if box.collidepoint(mx, my):
                     self.drag_item = (iid, pl)
@@ -1253,6 +1280,13 @@ class Hideout:
             vt = get_font(15, bold=True).render(
                 nm, True, COL["text"] if got else COL["text_dim"])
             screen.blit(vt, (box.x + 120, box.y + 10))
+        b = self._wd_btn()
+        hover = b.collidepoint(pygame.mouse.get_pos())
+        pygame.draw.rect(screen, COL["panel_hi"] if hover else COL["panel"], b,
+                         border_radius=6)
+        pygame.draw.rect(screen, COL["border"], b, 1, border_radius=6)
+        bt = get_font(13, bold=True).render("卸下全部配件", True, COL["text"])
+        screen.blit(bt, bt.get_rect(center=b.center))
         lbl = get_font(13, bold=True).render("仓库里的配件(按住拖到上面的槽位)",
                                              True, COL["text_dim"])
         screen.blit(lbl, (r.x + 20, r.y + 306))
