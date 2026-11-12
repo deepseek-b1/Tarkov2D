@@ -2286,6 +2286,31 @@ class Raid:
             self.heal_ch = None
             self.use_med(placed)
 
+    def equip_to_slot(self, placed):
+        """Shift+左键:把背包里的枪装到空着的装备位(副武器优先),不抢手里的枪。"""
+        sd = self.game.save
+        p = self.player
+        item = placed.item
+        if not armor_allows(p.armor, item.def_):
+            self.add_toast(
+                f"需 {item.def_['req_armor_level']} 级护甲才能持用 {item.name}",
+                COL["bad"], 3.0)
+            return False
+        for slot in ("side", "main2"):
+            if loadout_get(sd, slot) is not None:
+                continue
+            p.bag.remove_placed(placed)
+            loadout_set(sd, slot, item)
+            audio.play("click")
+            self.add_toast(
+                f"{item.name} 已装到{LOADOUT_SLOT_NAMES.get(slot, slot)}"
+                f" · 按 {LOADOUT_SLOTS.index(slot) + 1} 切换",
+                COL["good"], 3.2)
+            return True
+        self.add_toast("副武器位和第二主武器位都占着 —— 先把一把换下来",
+                       COL["text_dim"], 2.8)
+        return False
+
     def equip_from_bag(self, placed):
         p = self.player
         item = placed.item
@@ -4315,6 +4340,10 @@ class Raid:
             elif placed.item.cat == "med":
                 self.start_heal(placed)      # 打药要读条
             elif placed.item.cat in ("weapon", "armor", "helmet", "attach"):
+                if placed.item.cat == "weapon" and (
+                        pygame.key.get_mods() & pygame.KMOD_SHIFT):
+                    if self.equip_to_slot(placed):
+                        return
                 self.equip_from_bag(placed)
             else:
                 self.add_toast(f"{placed.item.name}:自动装填消耗 / 右键丢弃",
