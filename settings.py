@@ -7,7 +7,7 @@ import pygame
 from inventory import Item      # 装备位里的武器要在槽之间搬(inventory 不反向依赖本模块)
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.13.10"
+GAME_VERSION = "2.13.11"
 # 更新清单地址(留空则只认 EXE 同目录的 version.json)。
 # 默认指向仓库里的 update_server/version.json —— 推到 main 就生效,不用再发服务器。
 # 也可以换成本机自建服务器(如 http://127.0.0.1:8765/version.json)。
@@ -2306,3 +2306,42 @@ CONTAINER_INFO = {
     "boss_corpse": ("头目尸体", 8, 5),
     "ground": ("地面", 8, 5),   # 丢在地上的东西:要放得下大枪/重甲
 }
+
+# ---------- 真实型号扩充(数据来源 eftarkov.com 目录,2026-02 抓取) ----------
+# 头盔 / 背包 / 防弹衣:按等级与容量铺满梯队,字段与引擎表一致。
+ITEMS["h_6b47_ratnik_bsh"] = dict(name="6B47 Ratnik-BSh 头盔", cat="helmet", w=2, h=2, color=(84,92,104), price=134100, level=3, reduce=0.15, desc="3 级防弹头盔 · 耐久 45")
+TRADE_GOODS.append(("h_6b47_ratnik_bsh", 1))
+ITEMS["h_altyn"] = dict(name="Altyn 突击头盔", cat="helmet", w=2, h=2, color=(84,92,104), price=224580, level=5, reduce=0.30, desc="5 级防弹头盔 · 耐久 81")
+TRADE_GOODS.append(("h_altyn", 1))
+ITEMS["h_atlant_armour_tita"] = dict(name="Atlant Armour Titan（泰坦）芳纶头盔", cat="helmet", w=2, h=2, color=(84,92,104), price=182040, level=4, reduce=0.22, desc="4 级防弹头盔 · 耐久 78")
+TRADE_GOODS.append(("h_atlant_armour_tita", 1))
+ITEMS["h_bomber"] = dict(name="Bomber 无檐小便帽", cat="helmet", w=2, h=2, color=(84,92,104), price=69000, level=1, reduce=0.06, desc="1 级防弹头盔 · 耐久 150")
+TRADE_GOODS.append(("h_bomber", 1))
+ITEMS["h_kolpak_1s"] = dict(name="Kolpak -1S防暴头盔", cat="helmet", w=2, h=2, color=(84,92,104), price=92100, level=2, reduce=0.10, desc="2 级防弹头盔 · 耐久 45")
+TRADE_GOODS.append(("h_kolpak_1s", 1))
+ITEMS["p_3v_gear_paratus_3"] = dict(name="3V Gear Paratus 3 日干员战术背包", cat="pack", w=2, h=2, color=(74,82,92), price=147000, grid=(6,6), desc="容量 35 格")
+TRADE_GOODS.append(("p_3v_gear_paratus_3", 1))
+ITEMS["p_5_11_tactical_rush"] = dict(name="5.11 Tactical RUSH 100 背包", cat="pack", w=2, h=2, color=(74,82,92), price=189000, grid=(6,6), desc="容量 45 格")
+TRADE_GOODS.append(("p_5_11_tactical_rush", 1))
+ITEMS["p_ana_tactical_beta_"] = dict(name="ANA Tactical Beta 2 战斗背包", cat="pack", w=2, h=2, color=(74,82,92), price=126000, grid=(5,5), desc="容量 30 格")
+TRADE_GOODS.append(("p_ana_tactical_beta_", 1))
+ITEMS["p_direct_action_mark"] = dict(name="Direct Action 龙蛋 Mark II 背包", cat="pack", w=2, h=2, color=(74,82,92), price=105000, grid=(5,5), desc="容量 25 格")
+TRADE_GOODS.append(("p_direct_action_mark", 1))
+ITEMS["p_eberlestock_f4"] = dict(name="Eberlestock F4 终结者 承重背包", cat="pack", w=2, h=2, color=(74,82,92), price=168000, grid=(6,6), desc="容量 40 格")
+TRADE_GOODS.append(("p_eberlestock_f4", 1))
+ITEMS["p_flyye_mbss"] = dict(name="Flyye MBSS 背包", cat="pack", w=2, h=2, color=(74,82,92), price=67200, grid=(4,4), desc="容量 16 格")
+TRADE_GOODS.append(("p_flyye_mbss", 1))
+ITEMS["p_hazard_4_pillbox"] = dict(name="Hazard 4 Pillbox 背包", cat="pack", w=2, h=2, color=(74,82,92), price=84000, grid=(4,4), desc="容量 20 格")
+TRADE_GOODS.append(("p_hazard_4_pillbox", 1))
+ITEMS["p_lolkek_3f_transfer"] = dict(name="LolKek 3F Transfer 旅行背包", cat="pack", w=2, h=2, color=(74,82,92), price=50400, grid=(3,3), desc="容量 12 格")
+TRADE_GOODS.append(("p_lolkek_3f_transfer", 1))
+ITEMS["a_5_11_hexgrid"] = dict(name="5.11 Hexgrid 插板背心", cat="armor", w=2, h=2, color=(82,88,96), price=352000, level=6, reduce=0.75, slow=0.24, revive=True, desc="6 级防弹衣 · 耐久 100")
+TRADE_GOODS.append(("a_5_11_hexgrid", 1))
+ITEMS["a_6b13_m"] = dict(name="6B13 M 突击甲", cat="armor", w=2, h=2, color=(82,88,96), price=329780, level=5, reduce=0.62, slow=0.20, desc="5 级防弹衣 · 耐久 249")
+TRADE_GOODS.append(("a_6b13_m", 1))
+ITEMS["a_6b13"] = dict(name="6B13 突击甲", cat="armor", w=2, h=2, color=(82,88,96), price=264660, level=4, reduce=0.45, slow=0.16, desc="4 级防弹衣 · 耐久 203")
+TRADE_GOODS.append(("a_6b13", 1))
+ITEMS["a_6b2"] = dict(name="6B2 防弹衣", cat="armor", w=2, h=2, color=(82,88,96), price=138160, level=2, reduce=0.18, slow=0.08, desc="2 级防弹衣 · 耐久 128")
+TRADE_GOODS.append(("a_6b2", 1))
+ITEMS["a_6b23_1"] = dict(name="6B23-1 防弹衣", cat="armor", w=2, h=2, color=(82,88,96), price=210320, level=3, reduce=0.28, slow=0.12, desc="3 级防弹衣 · 耐久 206")
+TRADE_GOODS.append(("a_6b23_1", 1))
