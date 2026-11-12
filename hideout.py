@@ -121,7 +121,7 @@ class Hideout:
         self.stash_scroll = 0.0
         self.stash_grid = (66, 176)
         self.stash_view_h = 40 * STASH_VIEW_ROWS
-        # 保险箱(阵亡不丢):仓库面板底部一条;40 个承包商任务全部完成升 4 格
+        # 保险箱(阵亡不丢):仓库面板底部一条;50 个承包商任务全部完成升 6 格
         self.safe_in = False                 # 存入模式:点仓库物品进保险箱
         self.safe_grid = (66, 478)
         self.safe_cell = 24
@@ -141,6 +141,10 @@ class Hideout:
         self.gift_btn = pygame.Rect(560, 578, 660, 44)
         # 等级手册:一键领取
         self.level_claim_all = pygame.Rect(60, 520, 200, 40)
+        # 承包商:任务 / 商店 切换
+        self.contractor_shop_mode = False
+        self.con_tab_tasks = pygame.Rect(1028, 164, 104, 20)
+        self.con_tab_shop = pygame.Rect(1138, 164, 104, 20)
         # 交易所:一页 —— 左边你的仓库(点物品出售 / 批量出售),右边分区 + 商品。
         # 分区标签横排一行、商品网格在右半屏:这样「点仓库物品」和「点分区标签」
         # 各占一块地方,谁也不会盖住谁(分成购买/出售两页时两块都落在左面板上)。
@@ -1234,6 +1238,9 @@ class Hideout:
         if self.task_dept == "instructor":
             return [(t, quests.task_state(self.game.save, t)) for t in TASKS]
         if self.task_dept == "contractor":
+            if self.contractor_shop_mode:
+                from settings import CONTRACTOR_SHOP
+                return [(iid, "shop", None, None) for iid in CONTRACTOR_SHOP]
             return [(t, quests.task_state(self.game.save, t))
                     for t in SAFE_CONTRACT]
         if self.task_dept in ("gift", "level"):
@@ -1396,11 +1403,23 @@ class Hideout:
         if self.task_dept == "level":
             self._level_click(pos)
             return
+        if self.task_dept == "contractor":
+            # 任务 / 商店 切换
+            if self.con_tab_tasks.collidepoint(pos):
+                self.contractor_shop_mode = False
+                self.task_scroll = 0.0
+                return
+            if self.con_tab_shop.collidepoint(pos):
+                self.contractor_shop_mode = True
+                self.task_scroll = 0.0
+                return
         entries, per = self.task_rows()
         for i, entry in enumerate(entries):
             if not self.task_row_rect(i).collidepoint(pos):
                 continue
-            if self.task_dept in ("instructor", "contractor"):
+            if self.task_dept == "contractor" and self.contractor_shop_mode:
+                ok, msg = self.buy_contractor_item(entry[0])
+            elif self.task_dept in ("instructor", "contractor"):
                 task = entry[0]
                 ok, msg = quests.claim(sd, task, self.task_dept)
             else:
@@ -1409,6 +1428,57 @@ class Hideout:
             save_mod.save_data(sd)
             self.say(msg, COL["good"] if ok else COL["bad"], 3.4)
             return
+
+    def buy_contractor_item(self, iid):
+        """在承包商的商店里买东西(用卢布;买价比回收价贵 100%)。"""
+        from settings import ITEMS as _ITEMS, contractor_price
+        sd = self.game.save
+        price = contractor_price(iid)
+        name = _ITEMS[iid]["name"]
+        if sd.rubles < price:
+            return False, f"钱不够:{name} 要 {fmt_rub(price)},你只有 {fmt_rub(sd.rubles)}"
+        it = Item(iid)
+        if not sd.stash.add_item(it):
+            return False, f"仓库放不下 {name},先清点空间"
+        sd.rubles -= price
+        return True, f"购买 {name} · {fmt_rub(price)}(回收价 ×2)"
+
+    def _draw_contractor_shop(self, screen, mx, my):
+        """承包商的商店页:只卖专供件,买价 = 回收价 ×2。"""
+        from settings import ITEMS as _ITEMS, contractor_price
+        sd = self.game.save
+        t = get_font(13).render(
+            "承包商专供:买价 = 回收价 ×2(比卖出去贵 100%)· 左键购买",
+            True, COL["text_dim"])
+        screen.blit(t, (556, 168))
+        vid = pygame.Rect(530, self.task_view_top, 728,
+                          self.task_view_bottom - self.task_view_top)
+        screen.set_clip(vid)
+        for i, (iid, _k, _a, _b) in enumerate(self.task_entries()):
+            r = self.task_row_rect(i)
+            if r.bottom < vid.y or r.top > vid.bottom:
+                continue
+            d = _ITEMS[iid]
+            price = contractor_price(iid)
+            afford = sd.rubles >= price
+            hover = r.collidepoint(mx, my)
+            pygame.draw.rect(screen,
+                             COL["panel_hi"] if (hover and afford) else COL["panel"],
+                             r, border_radius=6)
+            pygame.draw.rect(screen,
+                             COL["accent"] if (hover and afford) else COL["border"],
+                             r, 2 if (hover and afford) else 1, border_radius=6)
+            pygame.draw.rect(screen, d["color"], (r.x + 10, r.y + 12, 8, 26),
+                             border_radius=2)
+            t = get_font(16, bold=True).render(
+                d["name"], True, COL["text"] if afford else COL["text_dim"])
+            screen.blit(t, (r.x + 26, r.y + 8))
+            t = get_font(13).render(d.get("desc", ""), True, COL["text_dim"])
+            screen.blit(t, (r.x + 26, r.y + 32))
+            t = get_font(15, bold=True).render(
+                fmt_rub(price), True, COL["accent"] if afford else COL["bad"])
+            screen.blit(t, (r.right - t.get_width() - 16, r.y + 16))
+        screen.set_clip(None)
 
     # ---- 出战背包网格(容量随装备的背包变化) ----
     def bag_cell(self):
@@ -2149,7 +2219,7 @@ class Hideout:
                         save_mod.save_data(sd)
                         self.say(f"{item.name} 已存入保险箱(阵亡不丢)")
                     else:
-                        self.say("保险箱放不下(40 个承包商任务完成后扩为 4 格)",
+                        self.say("保险箱放不下(50 个承包商任务完成后扩为 2×3)",
                                  COL["bad"], 3.2)
                     return
                 if item.cat == "weapon":
@@ -2484,7 +2554,7 @@ class Hideout:
                             self.stash_grid[1] + self.stash_view_h + 4))
         self._draw_scroll_buttons(screen, [("stash", 0)])
 
-        # ---- 保险箱条(阵亡不丢;40 个承包商任务升 4 格) ----
+        # ---- 保险箱条(阵亡不丢;50 个承包商任务升 6 格) ----
         sr = self.safe_rect()
         draw_grid(screen, sr.x, sr.y, sd.safe, self.safe_cell,
                   title=None)
@@ -2493,8 +2563,8 @@ class Hideout:
             f"保险箱 {sd.safe.w}×{sd.safe.h}(阵亡不丢)", True,
             COL["good"] if up else COL["accent"])
         screen.blit(t, (sr.right + 10, sr.y + 1))
-        sub = ("已升级 4 格:承包商 40 项全部完成!" if up else
-               f"承包商任务 {quests.safe_done_count(sd)}/40 → 全完成扩为 4 格")
+        sub = ("已升级 2×3 共 6 格:承包商 50 项全部完成!" if up else
+               f"承包商任务 {quests.safe_done_count(sd)}/50 → 全完成扩为 2×3")
         t = get_font(12).render(sub, True, COL["text_dim"])
         screen.blit(t, (sr.right + 10, sr.y + 20))
         draw_button(screen, self.safe_toggle,
@@ -2788,7 +2858,24 @@ class Hideout:
         if self.task_dept == "level":
             self._draw_level(screen, mx, my)
             return
-        hint = ("左键:领取奖励 · 全部 40 项完成解锁 4 格保险箱"
+        # 承包商:任务 / 商店 两个子页
+        if self.task_dept == "contractor":
+            for r, label, on in (
+                    (self.con_tab_tasks, "任务", not self.contractor_shop_mode),
+                    (self.con_tab_shop, "商店", self.contractor_shop_mode)):
+                hover = r.collidepoint(mx, my)
+                pygame.draw.rect(screen,
+                                 COL["panel_hi"] if (hover or on) else COL["panel"],
+                                 r, border_radius=6)
+                pygame.draw.rect(screen, COL["accent"] if on else COL["border"],
+                                 r, 2 if on else 1, border_radius=6)
+                ft = get_font(14, bold=True).render(
+                    label, True, COL["accent"] if on else COL["text"])
+                screen.blit(ft, ft.get_rect(center=r.center))
+            if self.contractor_shop_mode:
+                self._draw_contractor_shop(screen, mx, my)
+                return
+        hint = ("左键:领取奖励 · 全部 50 项完成解锁 2×3 保险箱"
                 if self.task_dept == "contractor"
                 else "左键:领取奖励" if self.task_dept == "instructor"
                 else "左键:交货换东西(材料从仓库+背包里扣)")

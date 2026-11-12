@@ -7,7 +7,7 @@ import pygame
 from inventory import Item      # 装备位里的武器要在槽之间搬(inventory 不反向依赖本模块)
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.13.7"
+GAME_VERSION = "2.13.8"
 # 更新清单地址(留空则只认 EXE 同目录的 version.json)。
 # 默认指向仓库里的 update_server/version.json —— 推到 main 就生效,不用再发服务器。
 # 也可以换成本机自建服务器(如 http://127.0.0.1:8765/version.json)。
@@ -444,9 +444,9 @@ ITEMS[CLASSIFIED] = dict(name="机密文件", cat="misc", w=1, h=1,
 DOC_SPAWN_CHANCE = 0.001  # 每局(仅强化封锁)整体判定一次:命中才刷在随机保险箱
 
 # ---------- 保险箱(阵亡不丢的贴身安全格) ----------
-# 默认 2 格;40 个「保险承包商」任务全部完成 -> 升为 4 格(2×2)
+# 默认 2 格;50 个「保险承包商」任务全部完成 -> 升为 2×3(6 格)
 SAFE_BASE = (2, 1)
-SAFE_UPGRADED = (2, 2)
+SAFE_UPGRADED = (2, 3)
 
 
 def pack_grid(iid):
@@ -1324,6 +1324,44 @@ for _iid, (_cal, _pen, _desc) in AMMO_INFO.items():
 TRADE_GOODS += [(iid, 30) for iid in NEW_AMMO]
 
 
+# ---------- 高价值杂物(保险箱/贵重品点专用) ----------
+# 保险箱不再刷护甲,改成这些值钱玩意儿 —— 摸到就是赚到。
+HIGH_VALUE_ITEMS = {
+    "gpu_mil": dict(name="军用显卡", cat="valuable", w=2, h=2, color=(96, 210, 160),
+                    price=220000, desc="军工级算力卡,黑市抢手"),
+    "keycard": dict(name="红卡·实验室通行证", cat="valuable", w=1, h=1,
+                    color=(224, 72, 84), price=350000, desc="只在保险箱里出现的通行证"),
+    "gold_ak": dict(name="黄金 AK 摆件", cat="valuable", w=2, h=2,
+                    color=(246, 200, 92), price=480000, desc="土豪收藏品,纯金打造"),
+    "diamond": dict(name="裸钻", cat="valuable", w=1, h=1, color=(200, 236, 248),
+                    price=260000, desc="小到能塞进弹匣袋,值一套房"),
+    "watch_lux": dict(name="名表", cat="valuable", w=1, h=1, color=(226, 214, 186),
+                      price=120000, desc="走得准,卖得贵"),
+    "hdd": dict(name="服务器硬盘", cat="misc", w=1, h=2, color=(120, 132, 148),
+                price=96000, desc="里面也许有数据,反正有人收"),
+}
+for _iid, _d in HIGH_VALUE_ITEMS.items():
+    ITEMS[_iid] = _d
+
+# ---------- 保险承包商商店(用卢布买,全游戏只此一家) ----------
+# 买价 = 回收价 × 该倍率(用户要求:比卖出去贵 100%)
+CONTRACTOR_BUY_MULT = 2.0
+ITEMS["auto_trigger_sn"] = dict(
+    name="承包商定制扳机组", cat="attach", slot="trigger", w=2, h=1,
+    color=(240, 170, 90), price=240000, auto_convert=True,
+    class_only=("狙击步枪", "反器材步枪"),
+    hip_mul=1.30, brace_mul=1.22,
+    desc="狙击/反器材步枪 → 全自动 · 腰射 +30% 架枪 +22% 散布(承包商专供)")
+CONTRACTOR_SHOP = ["auto_trigger_sn"]
+
+
+def contractor_price(iid):
+    """承包商商店的售价 = 回收价 × CONTRACTOR_BUY_MULT。"""
+    base = ITEMS[iid]["price"]
+    sell = int(base * SELL_RATE)
+    return max(1, int(sell * CONTRACTOR_BUY_MULT))
+
+
 def ammo_caliber(iid):
     """弹种所属口径;不是弹药返回 None。"""
     d = ITEMS.get(iid) or {}
@@ -1678,18 +1716,27 @@ AUTO_TRIGGER_CLASSES = ("精确射手步枪", "狙击步枪", "反器材步枪")
 
 
 def has_auto_trigger(item_or_def):
-    """检查这件武器有没有装「全自动扳机组件」(且类别符合)。"""
+    """检查这件武器有没有装「全自动扳机组」(且枪械类别符合组件的限制)。"""
     if not hasattr(item_or_def, "state"):       # 只传了 def 的场合:没有配件信息
         return False
     d = item_or_def.def_
     if d.get("auto"):
         return False                            # 本来就是全自动,不需要
     try:
-        if weapon_class(item_or_def.iid) not in AUTO_TRIGGER_CLASSES:
-            return False
+        cls = weapon_class(item_or_def.iid)
     except Exception:
         return False
-    return AUTO_TRIGGER_IID in weapon_attach(item_or_def).values()
+    # 逐件看装上的配件:auto_convert 且类别匹配就算能全自动。
+    # (教官的全自动扳机组件认射手/狙击/反器材;承包商的定制扳机只认狙击/反器材)
+    for aid in weapon_attach(item_or_def).values():
+        ad = ITEMS.get(aid) or {}
+        if not ad.get("auto_convert"):
+            continue
+        only = ad.get("class_only")
+        if only and cls not in only:
+            continue
+        return True
+    return False
 
 
 def weapon_fire_modes(item_or_def):
@@ -1940,49 +1987,40 @@ TASKS = [
          kind="value", need=30000000, req="t9",
          reward=dict(rubles=400000, attachments=["auto_trigger"])),
 ]
-# 保险承包商:40 个长线任务。全部完成后,保险箱从 2 格升为 4 格(2×2,阵亡不丢)
-# (id, 名字, 类型, 数量, 奖励卢布)
+# 保险承包商:50 个长线任务(原来 40 条)。全部完成后保险箱升为 2×3(6 格,阵亡不丢)。
+# 注意:承包商链里**不含人质解救任务**(hostage_win 已移除)。
+# (id, 名字, 类型, 数量, 奖励卢布) 由下面按顺序生成,数量/奖励随序号递增。
+_SAFE_NAMES = [
+    "清理门户", "顺藤摸瓜", "小有积蓄", "枪声渐密", "弹无虚发",
+    "全身而退", "满载而归", "硬碰硬", "深入虎穴", "兵贵神速",
+    "盆满钵满", "百步穿杨", "穷追不舍", "稳扎稳打", "雁过拔毛",
+    "寸土必争", "以战养战", "虎口夺食", "势如破竹", "铁壁清剿",
+    "血债血偿", "雷霆扫穴", "寸步不让", "锋芒毕露", "守土有责",
+    "猎影行动", "断其补给", "正面强攻", "釜底抽薪", "固若金汤",
+    "斩草除根", "秋毫无犯", "以牙还牙", "横扫千军", "未雨绸缪",
+    "摧枯拉朽", "富甲一方", "浴血奋战", "最后的障碍", "承包商认证",
+    "暗巷清道", "高地压制", "物资猎手", "无声收割", "铁血效率",
+    "补给破坏", "据点清扫", "价值收集", "终极考核", "承包商之证",
+]
+# 种类轮转(击杀/撤离/物资/突袭),不含 hostage_win
+_SAFE_CYCLE = ["kills", "kills", "extracts", "value", "kills",
+               "value", "extracts", "kills", "assault_win", "value"]
+
+
+def _safe_need(kind, idx):
+    if kind == "kills":
+        return 5 + int(idx * 1.7)
+    if kind == "extracts":
+        return 2 + idx // 4
+    if kind == "value":
+        return 80000 + idx * 32000
+    return 1 + idx // 16          # assault_win
+
+
 _SAFE_CHAIN = [
-    ("sc1", "清理门户", "kills", 5, 8000),
-    ("sc2", "顺藤摸瓜", "extracts", 2, 10000),
-    ("sc3", "小有积蓄", "value", 80000, 12000),
-    ("sc4", "枪声渐密", "kills", 8, 14000),
-    ("sc5", "弹无虚发", "kills", 10, 16000),
-    ("sc6", "全身而退", "extracts", 3, 18000),
-    ("sc7", "满载而归", "value", 150000, 20000),
-    ("sc8", "硬碰硬", "kills", 12, 22000),
-    ("sc9", "深入虎穴", "kills", 15, 24000),
-    ("sc10", "路见不平", "hostage_win", 1, 30000),
-    ("sc11", "兵贵神速", "extracts", 5, 26000),
-    ("sc12", "盆满钵满", "value", 250000, 28000),
-    ("sc13", "百步穿杨", "kills", 18, 30000),
-    ("sc14", "血的教训", "kills", 20, 32000),
-    ("sc15", "险中求胜", "extracts", 6, 34000),
-    ("sc16", "战地医生", "hostage_win", 2, 40000),
-    ("sc17", "移山填海", "kills", 25, 36000),
-    ("sc18", "金玉满堂", "value", 400000, 38000),
-    ("sc19", "狭路相逢", "kills", 30, 42000),
-    ("sc20", "插翅难逃", "assault_win", 1, 50000),
-    ("sc21", "行军床", "extracts", 8, 44000),
-    ("sc22", "满载而返", "value", 600000, 46000),
-    ("sc23", "弹雨穿行", "kills", 35, 48000),
-    ("sc24", "一夫当关", "kills", 40, 52000),
-    ("sc25", "力挽狂澜", "hostage_win", 3, 60000),
-    ("sc26", "夜以继日", "kills", 45, 54000),
-    ("sc27", "富可敌国", "value", 800000, 58000),
-    ("sc28", "险象环生", "extracts", 10, 56000),
-    ("sc29", "尸山血海", "kills", 50, 62000),
-    ("sc30", "攻坚克难", "assault_win", 2, 70000),
-    ("sc31", "横扫千军", "kills", 55, 66000),
-    ("sc32", "腰缠万贯", "value", 1100000, 68000),
-    ("sc33", "十死一生", "extracts", 12, 72000),
-    ("sc34", "百战余生", "kills", 60, 74000),
-    ("sc35", "救死扶伤", "hostage_win", 4, 80000),
-    ("sc36", "摧枯拉朽", "kills", 70, 78000),
-    ("sc37", "富甲一方", "value", 1500000, 82000),
-    ("sc38", "浴血奋战", "kills", 80, 88000),
-    ("sc39", "最后的障碍", "assault_win", 3, 95000),
-    ("sc40", "承包商认证", "kills", 90, 120000),
+    ("sc%d" % i, name, _SAFE_CYCLE[(i - 1) % len(_SAFE_CYCLE)],
+     _safe_need(_SAFE_CYCLE[(i - 1) % len(_SAFE_CYCLE)], i), 8000 + i * 2600)
+    for i, name in enumerate(_SAFE_NAMES, 1)
 ]
 
 
@@ -2207,6 +2245,19 @@ LOOT = {
             ("nvg_pnv", 1, 2), ("nvg_gpnvg", 1, 1),
             ("clock", 1, 4), ("calculator", 1, 3), ("battery", 1, 3)],
 }
+# 保险箱 / 贵重品点:全是值钱货,没有护甲、没有背包
+LOOT["val"] = [
+    ("gold", 1, 6), ("cpu", 1, 5), ("btc", 1, 2), ("vase", 1, 3),
+    ("gpu", 1, 5), ("gpu_mil", 1, 3), ("keycard", 1, 2), ("gold_ak", 1, 1),
+    ("diamond", 1, 2), ("watch_lux", 1, 4), ("hdd", 1, 5),
+    ("tools", 1, 4), ("solar", 1, 4), ("oscilloscope", 1, 5), ("motor", 1, 4),
+    ("filter", 1, 3), ("fuelcan", 1, 3), ("battery", 1, 3), ("clock", 1, 3),
+    ("calculator", 1, 3),
+]
+# 普通补给箱也掺一点高价值杂物(权重低,但有惊喜)
+LOOT["crate"] += [("gpu_mil", 1, 1), ("diamond", 1, 1), ("watch_lux", 1, 2),
+                  ("hdd", 1, 2)]
+
 
 CONTAINER_INFO = {
     # kind -> (名称, 容器格宽, 格高)

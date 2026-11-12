@@ -2,7 +2,7 @@
 """任务系统:教官发任务(进度由战局结算累计),医疗/后勤用局内材料交货换东西。
 
 奖励/交货都是"先试算再落盘":仓库放不下就不发,绝不让玩家白交材料或白领奖励。
-保险承包商:40 个长线任务,全部完成后保险箱(阵亡不丢)从 2 格升为 4 格。
+保险承包商:50 个长线任务,全部完成后保险箱(阵亡不丢)从 2 格升为 2×3(6 格)。
 """
 import settings
 from settings import (TASKS, DEPARTMENT_BARTERS, ITEMS, SAFE_CONTRACT,
@@ -53,24 +53,24 @@ def safe_done_count(sd):
 
 
 def safe_upgraded(sd):
-    """40 个承包商任务是否全部完成(保险箱 4 格)。"""
+    """50 个承包商任务是否全部完成(保险箱 2×3)。"""
     return safe_done_count(sd) >= len(SAFE_CONTRACT)
 
 
 def check_safe_upgrade(sd):
-    """全部完成 -> 把保险箱从 2 格升为 4 格(2×2)。幂等;返回提示或 ""。"""
+    """全部完成 -> 把保险箱从 2 格升为 2×3(6 格)。幂等;返回提示或 ""。"""
     if not safe_upgraded(sd):
         return ""
     if (sd.safe.w, sd.safe.h) == tuple(SAFE_UPGRADED):
         return ""
     new_safe, overflow = sd.safe.resized(SAFE_UPGRADED[0], SAFE_UPGRADED[1])
     for it in overflow:
-        # 2×1 -> 2×2 是超集,理论上不会放不下;万一放不下退回仓库
+        # 2×1 -> 2×3 是超集,理论上不会放不下;万一放不下退回仓库
         if not sd.stash.add_item(it):
             sd.safe = new_safe
             return "★ 保险箱扩容完成,但有物品没能安置(仓库也满)"
     sd.safe = new_safe
-    return "★ 保险承包商 40 项任务全部完成:保险箱已扩为 4 格(2×2,阵亡不丢)!"
+    return "★ 保险承包商 50 项任务全部完成:保险箱已扩为 2×3(6 格,阵亡不丢)!"
 
 
 def reward_text(reward):
@@ -137,7 +137,7 @@ def claim(sd, task, dept="instructor"):
     if new_t > old_t:
         msg += (f"  ★{settings.FAVOR_NAMES.get(dept, dept)}好感升到 {new_t} 级"
                 f"(交易所 -{int(settings.favor_discount(sd, dept) * 100)}%)")
-    extra = check_safe_upgrade(sd)               # 承包商 40 项齐全 -> 保险箱扩容
+    extra = check_safe_upgrade(sd)               # 承包商 50 项齐全 -> 保险箱扩容
     return True, (msg + "  " + extra) if extra else msg
 
 

@@ -115,7 +115,7 @@ class SaveData:
     def __init__(self):
         self.stash = Container(STASH_W, STASH_H)
         self.bag = Container(BAG_W, BAG_H)   # 容量由装备的背包决定
-        # 保险箱:贴身安全格(阵亡不丢);默认 2 格,40 个承包商任务全完成升 4 格
+        # 保险箱:贴身安全格(阵亡不丢);默认 2 格,50 个承包商任务全完成升 6 格
         self.safe = Container(SAFE_BASE[0], SAFE_BASE[1])
         self.weapon = None   # Item 或 None(出战武器槽)
         self.armor = None    # Item 或 None(出战护甲槽)
@@ -125,7 +125,7 @@ class SaveData:
         self.map_key = "border"        # 出战地图(border / tv / port / indoor / base)
         self.mode = "raid"             # raid 搜打撤 / hostage 人质解救 / assault 突袭
         self.coop = False              # 双人合作(同一台电脑两人玩,只对搜打撤生效)
-        self.touch = False             # 手机(触屏)模式:虚拟摇杆 + 按钮 + 自动锁敌
+        self.touch = False             # 手机(触屏)模式:虚拟摇杆 + 按钮 + 动动锁敌
         self.seen_intro = False        # 是否看过玩法简介
         self.rubles = 20000  # 货币
         self.xp = 0            # 等级经验(见 progress.py:每级一份奖励)
@@ -241,7 +241,7 @@ class SaveData:
     @staticmethod
     def deserialize(data):
         sd = SaveData()
-        # repair=True:玩家自己的仓库/背包读档时,越界/重叠的物品挪到空位而不是丢掉
+        # repair=True:玩家动己的仓库/背包读档时,越界/重叠的物品挪到空位而不是丢掉
         sd.stash = Container.deserialize(STASH_W, STASH_H, data.get("stash"),
                                          repair=True)
         # 存了容器尺寸(新档)就按存的来,否则旧档按 6×4 兼容
@@ -310,7 +310,7 @@ class SaveData:
                     if isinstance(v, (int, float))}
         done = data.get("tasks_done") or []
         sd.tasks_done = [str(t) for t in done]
-        # 承包商 40 项已完成但保险箱还是 2 格(旧档/异常)→ 自动升到 4 格
+        # 承包商 50 项已完成但保险箱还是 2 格(旧档/异常)→ 自动升到 2×3
         from quests import check_safe_upgrade
         check_safe_upgrade(sd)
         mystery = data.get("mystery")

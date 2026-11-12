@@ -1750,6 +1750,54 @@ def run():
 
     check("好感度-任务涨好感/分级/交易所折扣/存档", t_favor)
 
+    def t_contractor_shop():
+        """承包商商店(买价=回收价×2)/ 狙击专用扳机组 / 保险箱不再刷护甲。"""
+        import settings
+        from settings import (CONTRACTOR_SHOP, ITEMS, LOOT, SAFE_CONTRACT,
+                              SELL_RATE, contractor_price)
+        from inventory import Item
+        from game import Game
+
+        # 1) 商店价格 = 回收价 ×2(比卖出去贵 100%)
+        iid = CONTRACTOR_SHOP[0]
+        sell = int(ITEMS[iid]["price"] * SELL_RATE)
+        assert contractor_price(iid) == int(sell * 2), contractor_price(iid)
+        assert contractor_price(iid) > sell * 1.9
+        # 2) 狙击专用扳机组:只认狙击 / 反器材,装别的枪无效
+        def _with_attach(wid):
+            it = Item.weapon(wid)
+            it.state.setdefault("attach", {})["trigger"] = iid
+            return it
+        assert "auto" in settings.weapon_fire_modes(_with_attach("m24"))
+        assert "auto" in settings.weapon_fire_modes(_with_attach("ax50"))
+        assert "auto" not in settings.weapon_fire_modes(_with_attach("sks"))
+        assert ITEMS[iid].get("auto_convert") and ITEMS[iid].get("class_only")
+        # 3) 购买:钱够就进仓库并扣钱;钱不够一律不动
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        h = g.hideout
+        sd = g.save
+        sd.stash.clear()
+        sd.rubles = contractor_price(iid)
+        ok, msg = h.buy_contractor_item(iid)
+        assert ok, msg
+        assert any(p.item.iid == iid for p in sd.stash.items)
+        assert sd.rubles == 0, sd.rubles
+        sd.rubles = 1
+        ok2, msg2 = h.buy_contractor_item(iid)
+        assert not ok2 and "钱不够" in msg2, msg2
+        # 4) 保险箱掉落:没有护甲/头盔,但有高价值杂物
+        cats = {ITEMS[i]["cat"] for i, _c, _w in LOOT["val"]}
+        assert "armor" not in cats and "helmet" not in cats, cats
+        assert any(i in settings.HIGH_VALUE_ITEMS for i, _c, _w in LOOT["val"]), \
+            "保险箱里应该有新的高价值杂物"
+        # 5) 承包商任务:50 条、没有人质任务
+        assert len(SAFE_CONTRACT) == 50, len(SAFE_CONTRACT)
+        assert not any(t["kind"] == "hostage_win" for t in SAFE_CONTRACT)
+
+    check("承包商-商店/狙击扳机组/50任务/保险箱掉落", t_contractor_shop)
+
     def t_boss():
         """三张地图的头目系统:5 级甲(89/81/75%)+ 专属枪械掉落。"""
         from game import Game
@@ -4644,7 +4692,7 @@ def run():
     check("防具目录-暗区护甲头盔级别与头盔减伤", t_gear_catalog)
 
     def t_safe_hold_rotate():
-        """保险箱(2格→40任务→4格)+ 触屏长按详情 + 物品横竖旋转。"""
+        """保险箱(2格→50任务→2×3)+ 触屏长按详情 + 物品横竖旋转。"""
         import json
         from game import Game
         from inventory import rotate_in_place, Container, Placed
@@ -4653,11 +4701,11 @@ def run():
         import quests
         import uikit as _uk
         import raid_ui as _rui
-        # 1) 40 项承包商任务:结构校验
-        assert len(SAFE_CONTRACT) == 40, len(SAFE_CONTRACT)
+        # 1) 50 项承包商任务:结构校验(且不含人质任务)
+        assert len(SAFE_CONTRACT) == 50, len(SAFE_CONTRACT)
         ids = [t["id"] for t in SAFE_CONTRACT]
-        assert len(set(ids)) == 40, "任务 id 不能重复"
-        kinds = {"kills", "extracts", "value", "hostage_win", "assault_win"}
+        assert len(set(ids)) == 50, "任务 id 不能重复"
+        kinds = {"kills", "extracts", "value", "assault_win"}
         for t in SAFE_CONTRACT:
             assert t["kind"] in kinds, t
             assert int(t["need"]) > 0 and t["name"] and t["desc"], t
@@ -4685,7 +4733,7 @@ def run():
         sd.wipe_loadout()
         assert [p.item.iid for p in sd.safe.items] == ["gold", "btc"], \
             "阵亡必须保住保险箱"
-        # 3) 40 项全完成 -> 4 格(幂等;物品保留)
+        # 3) 50 项全完成 -> 2×3(幂等;物品保留)
         assert quests.safe_done_count(sd) == 0
         assert not quests.safe_upgraded(sd)
         for t in SAFE_CONTRACT[:-1]:
@@ -4695,12 +4743,12 @@ def run():
         sd.tasks_done.append(SAFE_CONTRACT[-1]["id"])
         assert quests.safe_upgraded(sd)
         msg = quests.check_safe_upgrade(sd)
-        assert msg and "4 格" in msg, msg
+        assert msg and "2×3" in msg, msg
         assert (sd.safe.w, sd.safe.h) == tuple(SAFE_UPGRADED)
         assert [p.item.iid for p in sd.safe.items] == ["gold", "btc"], \
             "升级不能丢东西"
         assert quests.check_safe_upgrade(sd) == "", "重复调用应无副作用"
-        # 存读之后再升的旧档:读档自动补齐到 4 格
+        # 存读之后再升的旧档:读档自动补齐到 2×3
         snap = sd.serialize()
         snap["safe_w"], snap["safe_h"] = SAFE_BASE
         sd3 = save_mod.SaveData.deserialize(snap)
@@ -4737,15 +4785,15 @@ def run():
         h.task_dept = "contractor"
         h.task_scroll = h.task_max_scroll()
         entries, per = h.task_rows()
-        assert len(entries) == 40, len(entries)
-        rect = h.task_row_rect(39)
+        assert len(entries) == 50, len(entries)
+        rect = h.task_row_rect(49)
         h._task_click(rect.center)
         assert (sdg.safe.w, sdg.safe.h) == tuple(SAFE_UPGRADED), \
-            "领完 40 项应升到 4 格"
+            "领完 50 项应升到 2×3"
         assert "保险箱" in h.msg, h.msg
         h.task_dept = "instructor"
         h.view = "stash"
-        # 5) 藏身处渲染冒烟(保险箱条 + 4 格)
+        # 5) 藏身处渲染冒烟(保险箱条 + 2×3)
         scr = pygame.display.set_mode((SW, SH))
         h.draw(scr)
         h.view = "task"
@@ -4873,7 +4921,7 @@ def run():
                                               synthetic=True)])
         assert not r5.over
 
-    check("保险箱-40任务解锁/长按详情/横竖旋转", t_safe_hold_rotate)
+    check("保险箱-50任务解锁/长按详情/横竖旋转", t_safe_hold_rotate)
     check("礼品-神秘人10星收集/每轮刷新/全装包/机密文件", t_mystery)
     def t_accounts():
         """账号:多档隔离 / 密码校验 / 老存档并入 / 登录界面交互。"""

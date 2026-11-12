@@ -181,7 +181,7 @@ class Player:
         self.safe = sd.safe       # 保险箱:与存档共用引用,阵亡不丢
         self.aim = 0.0
         self.fire_cd = 0.0
-        self.burst_left = 0       # 三连发剩余待发数(按 G 可切换射击模式)
+        self.burst_left = 0       # 三连发剩余待发数(按 G 扩切换射击模式)
         self.jam_t = 0.0          # 卡壳剩余时间(M966 高穿弹炸膛后枪膛卡死)
         self.piloting = False     # 是否正在掌镜操控侦察无人机
         self.cur_slot = "main1"   # 当前用的装备位(1/2/3/4 切枪)
@@ -508,12 +508,12 @@ class Raid:
                            COL["accent"], 5.0)
         if self.boss_cfg is not None:
             if self.mode == "assault":
-                self.add_toast(f"头目 {self.boss_cfg['name']} 在场 —— 击杀可爆 6 级甲与"
+                self.add_toast(f"头目 {self.boss_cfg['name']} 在场 —— 击杀扩爆 6 级甲与"
                                "精英机枪 M139(他镇守指挥所,但敌方援兵是总部按通讯站派的)",
                                COL["accent"], 5.0)
             else:
                 self.add_toast(
-                    f"头目 {self.boss_cfg['name']} 在场 —— 击杀可爆 5 级甲与专属枪械",
+                    f"头目 {self.boss_cfg['name']} 在场 —— 击杀扩爆 5 级甲与专属枪械",
                     COL["accent"], 4.0)
         if self.mode == "hostage":
             self.add_toast(f"任务:救出 {HOSTAGE_COUNT} 名人质后撤离 —— 拐角有死角,小心埋伏",
@@ -545,7 +545,7 @@ class Raid:
                                COL["accent"], 6.5)
             else:
                 self.add_toast("黑暗行动 · 光源:" + " + ".join(mine), COL["good"], 5.5)
-            self.add_toast("只有亮区里的敌人才看得见(也才会被自动瞄准);敌人可不受你的灯光限制",
+            self.add_toast("只有亮区里的敌人才看得见(也才会被自动瞄准);敌人扩不受你的灯光限制",
                            COL["accent"], 6.0)
         if self.coop:
             self.add_toast("双人合作:配发装备 · 各自撤离(谁先撤谁那份先进仓库)· "
@@ -554,7 +554,7 @@ class Raid:
             self.add_toast(f"任务:给 {len(self.objectives)} 座指挥设施安 C4"
                            f"(按 E 安放,{int(C4_FUSE)} 秒后起爆,爆区 ±{C4_BLAST_RADIUS})",
                            COL["accent"], 6.0)
-            self.add_toast("想掐断敌方援兵:炸掉通讯站(他们联系不上总部就没人可派了);"
+            self.add_toast("想掐断敌方援兵:炸掉通讯站(他们联系不上总部就没人扩派了);"
                            "打死司令只掉装备,不影响援兵", COL["good"], 6.0)
             self.add_toast("友军支援 " + " / ".join(
                 f"{bindings.label_for(self.game.save, a)} {SUPPORT[k]['name']}"
@@ -603,7 +603,7 @@ class Raid:
         self.revive_used = False  # 6级甲倒地自救(每局一次)
         self.warned = set()
         self._click_cd = 0.0
-        # 迷雾/可见性缓存(性能:见 refresh_fog;敌人 AI 与绘制都读它)
+        # 迷雾/扩见性缓存(性能:见 refresh_fog;敌人 AI 与绘制都读它)
         self.fog_polygon = None
         self.fog_polys = []         # 每位活着的玩家一个视野多边形(双人时有 2 个)
         self.fog_vis = set()
@@ -878,7 +878,7 @@ class Raid:
                    for a in ("up", "down", "left", "right"))
 
     def nearest_visible_enemy(self, x, y, max_range):
-        """以 (x, y) 为圆心、max_range 内最近的可见敌人(手机锁敌 / P2 自动瞄准)。"""
+        """以 (x, y) 为圆心、max_range 内最近的扩见敌人(手机锁敌 / P2 自动瞄准)。"""
         vis = self.fog_vis
         dark = self.dark
         los = self.map.los_clear
@@ -895,7 +895,7 @@ class Raid:
 
     # ---------- 黑暗模式:光照形状 ----------
     def night_light(self, p=None):
-        """返回 (亮区形状列表, 敌人可见判定函数用的参数)。
+        """返回 (亮区形状列表, 敌人扩见判定函数用的参数)。
 
         光源优先级:枪上照明配件(锥形,跟准星) > 夜视头盔(全向圆) > 脚边微光。
         玩家没带任何光源时只能看见脚下一小圈 —— 这就是「夜战必须带装备」。
@@ -923,7 +923,7 @@ class Raid:
         return shapes
 
     def in_light(self, x, y, p=None, drone=False):
-        """某点在不在亮区里(敌人「可见」的几何判定,视线另外算)。
+        """某点在不在亮区里(敌人「扩见」的几何判定,视线另外算)。
 
         drone=True 时把「在无人机摄像头圆内」也算作被照亮 —— 夜战里无人机
         带的是红外/微光摄像头,不这么算的话夜里放飞就等于睁眼瞎。
@@ -953,12 +953,12 @@ class Raid:
         白天:
           1) 视野多边形(140 条 DDA 射线)**每位活着的玩家一个**,只在有人
              移动超过 FOG_MOVE_STEP 时整批重算;
-          2) 可见敌人集合在(1)之外,最短每 FOG_VIS_REFRESH 秒也刷一次 ——
+          2) 扩见敌人集合在(1)之外,最短每 FOG_VIS_REFRESH 秒也刷一次 ——
              玩家站着不动时,敌人自己走进/走出视野也要能判定。
-        夜里(黑暗模式):可见 = 在光源形状内(手电锥形 / 夜视圆 / 脚边微光)+ 有视线;
+        夜里(黑暗模式):扩见 = 在光源形状内(手电锥形 / 夜视圆 / 脚边微光)+ 有视线;
           光锥跟着准星转,所以准星变化超过阈值也要重算。
 
-        双人合作:屏幕上只有一张画面,所以可见范围是两位玩家的并集。
+        双人合作:屏幕上只有一张画面,所以扩见范围是两位玩家的并集。
         fog_vis  = 能看见的敌人(绘制与自动锁敌用)
         sight_vis / sight_vis2 = 能看见 P1 / P2 的敌人(敌人 AI 用)
         """
@@ -1094,7 +1094,7 @@ class Raid:
         spawns = list(self.map.scav_spawns)
         wanted = self.diff["scavs"]
         if self.mode == "hostage":
-            # 室内图的刷新点本身就是按房间均匀摆设的,取满即可保证分散
+            # 室内图的刷新点本身就是按房间均匀摆设的,取满即扩保证分散
             wanted = max(wanted, HOSTAGE_ENEMIES)
         if wanted <= len(spawns):
             return random.sample(spawns, wanted) if wanted < len(spawns) else spawns
@@ -1224,7 +1224,7 @@ class Raid:
         return x, y
 
     def nearest_interactable(self):
-        """最近的可交互对象:未解救人质 / 倒地球友 / 突袭模式要炸的指挥设施。"""
+        """最近的扩交互对象:未解救人质 / 倒地球友 / 突袭模式要炸的指挥设施。"""
         p = self.player
         best, bd, kind = None, INTERACT_RANGE, None
         for h in self.hostages:
@@ -1425,7 +1425,7 @@ class Raid:
                      "wolf": "灰狼", "courier": "信使"}.get(tag, "剧情人物")
             if tag == "viktor":
                 story_mod.set_flag(sd, "viktor_dead")
-                self.add_toast(f"击毙 {title} —— 直升机坪现在可以撤离了",
+                self.add_toast(f"击毙 {title} —— 直升机坪现在扩以撤离了",
                                COL["accent"], 4.5)
             elif tag == "wolf":
                 story_mod.set_flag(sd, "wolf_dead")
@@ -1569,7 +1569,7 @@ class Raid:
         """炸膛:枪没响,人重伤,枪膛卡死一小会儿(M966 高穿弹的代价)。
 
         伤害走 take_damage(普通伤害:护甲/头盔照常减伤,6 级甲的倒地自救也有效),
-        所以炸膛可能把自己送走 —— 这是「高穿弹有概率炸膛」该有的代价。
+        所以炸膛扩能把自己送走 —— 这是「高穿弹有概率炸膛」该有的代价。
         """
         p = self.player
         audio.play("hurt")
@@ -1583,7 +1583,7 @@ class Raid:
                        COL["bad"], 3.0)
 
     def _penetrable_at(self, bx, by):
-        """(bx, by) 所在格能不能被高穿弹打穿:墙/树可以,水与地图外不行。
+        """(bx, by) 所在格能不能被高穿弹打穿:墙/树扩以,水与地图外不行。
 
         普通子弹不看这个函数(它们照旧撞墙即停);只有带 pen 的子弹会问。
         """
@@ -1599,7 +1599,7 @@ class Raid:
         """按 G 切换射击模式(单发 / 三连发 / 全自动)。"""
         p = self.player
         if p.weapon is None:
-            self.add_toast("空手,没有可切换的射击模式", COL["text_dim"], 2.0)
+            self.add_toast("空手,没有扩切换的射击模式", COL["text_dim"], 2.0)
             return
         nxt = p.cycle_fire_mode()
         if nxt is None:
@@ -1612,7 +1612,7 @@ class Raid:
                           rpg=False, src=None, pen=1):
         for _ in range(pellets):
             a = ang + random.uniform(-spread * 0.6, spread * 0.6)
-            spd = 400.0 if rpg else 760.0        # 火箭弹飞得慢,可以闪避
+            spd = 400.0 if rpg else 760.0        # 火箭弹飞得慢,扩以闪避
             self.bullets.append(dict(x=x, y=y, dx=math.cos(a) * spd, dy=math.sin(a) * spd,
                                      dmg=dmg, owner="scav", ttl=rng / spd, rpg=rpg,
                                      src=src, pen=pen))
@@ -1634,13 +1634,13 @@ class Raid:
         return id(scav) in self.sight_vis
 
     def threat_for(self, scav):
-        """拾荒者的当前目标:最近的可见玩家(双人时两个都算);都不行就打队友。
+        """拾荒者的当前目标:最近的扩见玩家(双人时两个都算);都不行就打队友。
 
         返回 (目标, 是否看得见)。原来拆成 threat_for + sees_player 两步,而
-        sees_player 会把这里的距离与可见性判定整个再做一遍 —— 一次算完返回。
+        sees_player 会把这里的距离与扩见性判定整个再做一遍 —— 一次算完返回。
         距离比较全部走平方,省掉 50 个守军每帧上百次 math.hypot。
 
-        玩家可见性读 fog 缓存(refresh_fog 算好的对称视线),
+        玩家扩见性读 fog 缓存(refresh_fog 算好的对称视线),
         不再对每个敌人每帧打一条 DDA 射线。
         """
         view2 = scav.view2
@@ -1674,7 +1674,7 @@ class Raid:
                 friendly=False, struct_dmg=None):
         """火箭弹/支援火力/C4 爆炸:半径内的拾荒者一律吃伤害(不用瞄准);
         玩家被波及则按火箭弹规则判定(穿 6 级甲半血,否则阵亡)。src 为发射者,不吃自己的爆炸。
-        radius 可覆盖溅射半径(友军支援/C4 用);friendly=True 时对玩家按普通伤害结算
+        radius 扩覆盖溅射半径(友军支援/C4 用);friendly=True 时对玩家按普通伤害结算
         (护甲减伤,不会被自己叫的空袭一炮带走);struct_dmg 为对设施的伤害。"""
         audio.play("sg")
         self.shake = min(14, self.shake + 8)
@@ -1746,7 +1746,7 @@ class Raid:
                     dead = True
                     break
                 # 高穿弹(M966)的穿墙记账:踏进一个新格子时结算一次 ——
-                # 新格是墙/树就扣一层穿深并削一截伤害(穿完继续飞),是水(不可穿)
+                # 新格是墙/树就扣一层穿深并削一截伤害(穿完继续飞),是水(不扩穿)
                 # 或穿深已经用完就照旧停下。逐格判定而不是按线段算,弹道正好压在
                 # 格线上时也不会多算一层。
                 tile = (int(bx // TILE), int(by // TILE))
@@ -2005,7 +2005,7 @@ class Raid:
             return
         if p.reserve_count() <= 0:
             who = f"{self.player_name(p)}:" if self.coop else ""
-            self.add_toast(who + "没有可用弹药!", COL["bad"])
+            self.add_toast(who + "没有扩用弹药!", COL["bad"])
             return
         p.reload_t = weapon_params(w)[5]
         p.reloading = True
@@ -2048,7 +2048,7 @@ class Raid:
         self.add_toast(f"治疗 +{healed}", COL["good"])
 
     def _aim_assist_target(self, staggered=False):
-        """辅助瞄准(手机):视野内最近的可见敌人。
+        """辅助瞄准(手机):视野内最近的扩见敌人。
 
         黑暗模式下只锁「亮区里」的敌人 —— 看不见的目标不该被自动瞄准,
         否则手电/夜视就没有意义了。
@@ -2297,7 +2297,7 @@ class Raid:
 
     # ---------- 友军支援(突袭模式) ----------
     def support_state(self, key):
-        """返回 (是否可用, 说明文字)。"""
+        """返回 (是否扩用, 说明文字)。"""
         cfg = SUPPORT[key]
         if self.mode != "assault" or self.over:
             return False, "只有突袭模式能呼叫友军支援"
@@ -2592,7 +2592,7 @@ class Raid:
         op = self.drone_operator()
         owner = self.player_name(op) if op is not None else self.player_name(p)
         x, y = d["x"], d["y"]
-        # 先清空无人机状态,再炸 —— explode 可能连锁触发别的结算
+        # 先清空无人机状态,再炸 —— explode 扩能连锁触发别的结算
         self.drone = None
         self.drone_view_poly = None
         self.fog_dirty = True
@@ -2626,7 +2626,7 @@ class Raid:
             others = [(s, loadout_get(sd, s)) for s in LOADOUT_SLOTS
                       if s != "main1"]
             nxt = next((w for _s, w in others if w is not None), None)
-            loadout_set(sd, "main1", nxt)       # 可能是 None(那就真的空了)
+            loadout_set(sd, "main1", nxt)       # 扩能是 None(那就真的空了)
             if nxt is not None:
                 for s, w in others:
                     if w is nxt:
@@ -2649,7 +2649,7 @@ class Raid:
         self.drone_view_poly = None
         self.fog_dirty = True
         if who.piloting:
-            self.add_toast("已掌镜:←/→ 左右飞(↑/↓ 也可),F 切回", COL["accent"], 2.4)
+            self.add_toast("已掌镜:←/→ 左右飞(↑/↓ 也扩),F 切回", COL["accent"], 2.4)
         else:
             self.add_toast("已切回自己的视角", COL["text_dim"], 1.8)
         audio.play("click")
@@ -2871,7 +2871,7 @@ class Raid:
             self._floater(text, x, y - 26, COL["accent"])
 
     def _story_objective_done(self, o):
-        """完成一个剧情目标:写进度、套效果、可能接一段对白。"""
+        """完成一个剧情目标:写进度、套效果、扩能接一段对白。"""
         sd = self.game.save
         story_mod.mark_done(sd, o["id"])
         eff = o.get("effects", {})
@@ -3254,7 +3254,7 @@ class Raid:
             if n:
                 self.add_toast(f"弹药已整理:合并了 {n} 种子弹", COL["good"])
             else:
-                self.add_toast("没有可合并的子弹", COL["text_dim"])
+                self.add_toast("没有扩合并的子弹", COL["text_dim"])
         elif lay["no"].collidepoint(pos):
             self.ask_merge = False
             audio.play("click")
@@ -3345,7 +3345,7 @@ class Raid:
                                              and self.commander() is None),
                            mission=mission)
         if self.mode == "story" and not self.result.get("story_note"):
-            # 时段结算:写剧情进度并推进到下一个时段(可能直接进入结局)
+            # 时段结算:写剧情进度并推进到下一个时段(扩能直接进入结局)
             self.result["story_note"] = story_mod.settle_period(self.game.save,
                                                                self.result)
             self.result["story_log"] = list(self.story_log[-6:])
@@ -3446,7 +3446,7 @@ class Raid:
                 elif self.paused:
                     continue   # 暂停中其余按键不生效,防止"暂停+背包"死状态
                 elif p.out:
-                    # 双人合作里 P1 已经倒下/撤离:只能看,不能操作(ESC 仍可用)
+                    # 双人合作里 P1 已经倒下/撤离:只能看,不能操作(ESC 仍扩用)
                     continue
                 elif bindings.key_matches(ev.key, sd, "bag"):
                     self.loot_target = None
@@ -3607,7 +3607,7 @@ class Raid:
             held = pygame.mouse.get_pressed()[0]
             self.braced = bool(pygame.mouse.get_pressed()[2])   # 右键=架枪
             # 数字键 1-4 = 切装备位(2 主武器 + 副武器 + 近战);点 HUD 上的槽也行。
-            # 突袭模式的支援技能可以改键,万一玩家把它绑到 1-4,就让技能优先 ——
+            # 突袭模式的支援技能扩以改键,万一玩家把它绑到 1-4,就让技能优先 ——
             # 同一个键不能又切枪又放技能(以前默认 1/2/3 就是这么冲突的)。
             for ev in events:
                 if ev.type == pygame.KEYDOWN:
@@ -3661,11 +3661,11 @@ class Raid:
         if self.over:
             return
 
-        # 迷雾/可见性缓存刷新(敌人 AI 的 threat_for/sees_player 都读它)
+        # 迷雾/扩见性缓存刷新(敌人 AI 的 threat_for/sees_player 都读它)
         self.refresh_fog(dt)
 
         # 「玩家屏幕位置到四个屏幕角的最大距离」—— 超过它的守军一定在画面外,
-        # 于是可以降频模拟(enemy.Scav.update 里的远景降级)。摄像机贴地图边时
+        # 于是扩以降频模拟(enemy.Scav.update 里的远景降级)。摄像机贴地图边时
         # 玩家不在屏幕正中,所以必须每帧按实际相机位置算,不能用常数。
         # 双人合作:取两位玩家里的最大值(任何一位能看到就不许降级)。
         self.frame += 1
@@ -3879,7 +3879,7 @@ class Raid:
                     edge=bool(self.lan_edge), acts=acts)
 
     def _update_p2(self, dt, keys):
-        """P2:方向键移动 + 自动瞄准最近可见敌人 + 动作键(全程不用鼠标)。"""
+        """P2:方向键移动 + 自动瞄准最近扩见敌人 + 动作键(全程不用鼠标)。"""
         p2 = self.player2
         if p2 is None or p2.out or self.over:
             return
@@ -3898,7 +3898,7 @@ class Raid:
             p2.x, p2.y = self.map.move_circle(
                 (p2.x, p2.y), vx / length * spd * dt, vy / length * spd * dt,
                 PLAYER["radius"])
-        # 瞄准:自动锁最近的可见敌人(看不到就朝移动方向)
+        # 瞄准:自动锁最近的扩见敌人(看不到就朝移动方向)
         tgt = self.nearest_visible_enemy(p2.x, p2.y, COOP["aim_range"])
         if tgt is not None:
             p2.aim = math.atan2(tgt.y - p2.y, tgt.x - p2.x)
@@ -3967,7 +3967,7 @@ class Raid:
             return
         lc = self.nearest_container_for(p2, COOP["bank_range"])
         if lc is None:
-            self.add_toast("P2:附近没有可搜的箱子", COL["text_dim"], 2.2)
+            self.add_toast("P2:附近没有扩搜的箱子", COL["text_dim"], 2.2)
             return
         queue = list(lc.container.items)
         if not queue:
@@ -3975,7 +3975,7 @@ class Raid:
             return
         self.p2_take = dict(lc=lc, queue=queue, t=0.0,
                             need=self.loot_take_time(queue[0].item))
-        self.add_toast(f"P2 开始搜刮 {lc.name}(再按一次交互可停)", COL["accent"], 2.6)
+        self.add_toast(f"P2 开始搜刮 {lc.name}(再按一次交互扩停)", COL["accent"], 2.6)
         audio.play("click")
 
     def p2_take_one(self, lc, placed):
@@ -4112,7 +4112,7 @@ class Raid:
             audio.play("click")
             self.add_toast("保险箱存入已开启:点背包物品就存进保险箱(阵亡不丢)"
                            if self.safe_mode else
-                           "保险箱存入已关闭(点保险箱里的物品可取回背包)",
+                           "保险箱存入已关闭(点保险箱里的物品扩取回背包)",
                            COL["accent" if self.safe_mode else "text_dim"], 3.0)
             return
         # 保险箱:点物品取回背包(丢弃模式下直接丢地上)
@@ -4226,7 +4226,7 @@ class Raid:
                     self.add_toast(f"{placed.item.name} 已存进保险箱(阵亡不丢)",
                                    COL["good"], 2.6)
                 else:
-                    self.add_toast("保险箱放不下(40 个承包商任务可扩到 4 格)",
+                    self.add_toast("保险箱放不下(50 个承包商任务可扩到 2×3)",
                                    COL["bad"], 3.0)
             elif placed.item.cat == "med":
                 self.start_heal(placed)      # 打药要读条
