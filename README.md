@@ -3,6 +3,8 @@
 纯 Python (pygame) 制作的俯视角"搜刮-战斗-撤离"(Extraction Shooter)游戏。
 无任何外部素材:地图、图标、音效全部程序生成。
 
+> 版本更新明细见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 启动
 
 - **直接双击 EXE**:`dist\Tarkov2D.exe`(单文件、免安装);每次启动会先**检查更新**
