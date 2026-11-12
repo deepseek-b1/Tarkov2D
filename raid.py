@@ -20,6 +20,11 @@ from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       RPG_HALF_HP_ARMOR_LEVEL, TOUCH, MODES, MODE_MAP,
                       TOWER_FLOORS, TOWER_FLOOR_MAP, TOWER_FLOOR_NAME,
                       EXPLORE_STAIR_RANGE,
+                      RESEARCHER_TOTAL, RESEARCHER_RESCUE_TIME,
+                      RESEARCHER_LOST_DIST, RESEARCHER_BONUS,
+                      RESEARCHER_ALL_BONUS, HELI_ROOF_FLOOR, HELI_PAD_RANGE,
+                      HELI_CALL_TIME, HELI_DEFEND_TIME, HELI_WAVE_INTERVAL,
+                      HELI_WAVE_SIZE, HELI_WAVE_MAX, HELI_WINDOW_TIME,
                       ALLY_COUNT,
                       REVIVE_TIME, INTERACT_RANGE, ALLY_DMG,
                       ASSAULT_ENEMIES, ASSAULT_ALLIES, ASSAULT_PLANT_TIME,
@@ -52,7 +57,7 @@ import bindings
 from inventory import Item, try_move
 from world import GameMap, LootContainer
 from enemy import Scav
-from npc import Ally
+from npc import Ally, Researcher
 import touch as touch_mod
 from touch import TouchUI
 
@@ -144,6 +149,15 @@ class StairWell:
     @property
     def name(self):
         return ("上楼 → " if self.up else "下楼 → ") + self.label
+
+
+class HeliPad:
+    """天台停机坪:站上去按交互键呼叫直升机。"""
+
+    def __init__(self, x, y):
+        self.x, self.y = x, y
+        self.r = HELI_PAD_RANGE
+        self.name = "停机坪"
 
 
 class StoryPoint:
@@ -410,6 +424,17 @@ class Raid:
         # 楼梯口(探索模式):U/D 瓦片 -> 可交互的上下楼点
         self.stairs = self._make_stairs() if self.mode == "explore" else []
         self.pending_floor = None      # 交互键按下的换层请求(下一帧开头处理)
+        # 研究员 / 直升机(探索模式)
+        self.researchers = []          # 本层在场的研究员(含跟着你走的)
+        self.escorts = []              # 已经救出、跟着你的那几位(每层重建在出生点旁)
+        self.pad = None                # 6F 停机坪交互点
+        self.heli_state = "none"       # none / defend / arrived / gone
+        self.heli_t = 0.0
+        self.heli_wave_t = 0.0
+        self.heli_wave = []            # 防守波次刷出来的敌人(算上限用)
+        if self.mode == "explore":
+            self._init_researchers()
+            self._init_helipad()
         # 剧情模式的装备由 game.start_raid 里的系统配发负责(这里只留提示清单)
         self.story_issued = list(getattr(game, "story_issued", []) or [])
         self.player = Player(game.save)
@@ -603,9 +628,12 @@ class Raid:
             self.add_toast("探索模式 · " + TOWER_FLOOR_NAME[self.explore_floor]
                            + " —— 东北楼梯间按交互键上下楼(共 6 层)",
                            COL["accent"], 6.5)
+            self.add_toast(f"研究员 {self.rescued_count()}/{RESEARCHER_TOTAL}"
+                           " —— 倒地的研究员蹲在原地,按交互键营救(救出后跟着你)",
+                           COL["good"], 6.0)
             if self.explore_floor == 6:
-                self.add_toast("天台停机坪就是撤离点:站进去别动就能撤",
-                               COL["good"], 6.0)
+                self.add_toast("天台停机坪:站上去按交互键呼叫直升机,守 60 秒",
+                               COL["accent"], 6.0)
         if self.mode == "assault":
             self.add_toast(f"任务:给 {len(self.objectives)} 座指挥设施安 C4"
                            f"(按 E 安放,{int(C4_FUSE)} 秒后起爆,爆区 ±{C4_BLAST_RADIUS})",
@@ -707,7 +735,7 @@ class Raid:
         return out
 
     def _explore_cache(self):
-        """跨楼层的本局状态:{楼层号: {scavs, containers, searched}}。"""
+        """跨楼层的本局状态:{楼层号: {scavs, containers, searched, researchers}}。"""
         cache = getattr(self.game, "_explore_cache", None)
         if cache is None:
             cache = {}
@@ -727,13 +755,132 @@ class Raid:
             self.containers = st["containers"]
         if st.get("searched") is not None:
             self.searched = st["searched"]
+        if st.get("researchers") is not None:
+            # 本层没救的留下来;跟着你的那几位按上面的 escorts 重新补上
+            self.researchers = list(st["researchers"]) + list(self.escorts)
 
     def _save_floor_state(self):
         """离开这一层:把它现在的样子存起来(下一层用不着,回来时要用)。"""
         if self.mode != "explore":
             return
         self._explore_cache()[self.explore_floor] = dict(
-            scavs=self.scavs, containers=self.containers, searched=self.searched)
+            scavs=self.scavs, containers=self.containers, searched=self.searched,
+            researchers=[r for r in self.researchers if not r.rescued])
+
+    # ---------- 探索模式:研究员与直升机 ----------
+    def rescued_count(self):
+        """本局已经救出的研究员人数(存在 game 上,跨楼层/跨战局实例)。"""
+        return len(getattr(self.game, "_explore_rescued", ()) or ())
+
+    def rescued_set(self):
+        s = getattr(self.game, "_explore_rescued", None)
+        if s is None:
+            s = set()
+            self.game._explore_rescued = s
+        return s
+
+    def _init_researchers(self):
+        """本层待救援的 + 已经救出跟着你的(救出的不重复放在楼层里)。"""
+        rescued = getattr(self.game, "_explore_rescued", None)
+        if rescued is None:
+            rescued = set()
+            self.game._explore_rescued = rescued
+        for i, (x, y) in enumerate(self.map.researcher_spawns):
+            uid = "%d-%d" % (self.explore_floor, i)
+            if uid in rescued:
+                continue
+            self.researchers.append(Researcher(x, y, uid, self.explore_floor))
+        # 已救出的在楼梯口/出生点旁边围一圈(换层后还跟着)
+        sx, sy = self.map.spawn
+        for j, uid in enumerate(sorted(rescued)):
+            ang = j * 0.9
+            rad = 26 + 6 * (j % 4)
+            ex, ey = sx + math.cos(ang) * rad, sy + math.sin(ang) * rad
+            if self.map.collides(ex, ey, 10):
+                ex, ey = sx + 18, sy + 18
+            r = Researcher(ex, ey, uid, self.explore_floor)
+            r.rescued = True
+            r.repath_t = random.uniform(0.0, 0.4)
+            self.escorts.append(r)
+        self.researchers.extend(self.escorts)
+
+    def _init_helipad(self):
+        if self.explore_floor != HELI_ROOF_FLOOR or not self.map.extracts:
+            return
+        rect = self.map.extracts[0][1]
+        self.pad = HeliPad(rect.centerx, rect.centery)
+
+    def _update_researchers(self, dt):
+        """救出的研究员跟着你走;掉队太远(卡在别的房间)直接拉回来。"""
+        if self.mode != "explore" or not self.researchers:
+            return
+        p = self.player
+        for r in self.researchers:
+            if not r.rescued:
+                continue
+            r.update(self, dt)
+            if math.hypot(r.x - p.x, r.y - p.y) > RESEARCHER_LOST_DIST:
+                r.x, r.y = p.x - 24, p.y - 24
+                r.path = []
+                r.path_i = 0
+
+    def _start_heli_defend(self):
+        self.heli_state = "defend"
+        self.heli_t = float(HELI_DEFEND_TIME)
+        self.heli_wave_t = HELI_WAVE_INTERVAL * 0.5
+        audio.play("extract")
+        self.add_toast(f"直升机已呼叫 —— 守住停机坪 {int(HELI_DEFEND_TIME)} 秒!",
+                       COL["accent"], 5.0)
+        self.add_toast("敌人会一波一波冲上天台,别站在空地上", COL["good"], 5.0)
+
+    def _spawn_heli_wave(self):
+        """防守期间的一波援兵:刷在 6F 离你远一点的刷新点上。"""
+        alive = [s for s in self.heli_wave if s in self.scavs]
+        self.heli_wave = alive
+        room = HELI_WAVE_MAX - len(alive)
+        if room <= 0:
+            return
+        want = min(HELI_WAVE_SIZE, room)
+        spawns = list(self.map.scav_spawns)
+        random.shuffle(spawns)
+        p = self.player
+        made = 0
+        for _k, (sx, sy) in spawns:
+            if made >= want:
+                break
+            if math.hypot(sx - p.x, sy - p.y) < 260:
+                continue
+            s = Scav(random.choice(("pistol", "shotgun", "ar")), sx, sy, self.diff)
+            self.scavs.append(s)
+            self.heli_wave.append(s)
+            made += 1
+        if made:
+            self.add_toast(f"一波敌人冲上天台({made} 名)", COL["bad"], 3.2)
+
+    def _update_heli(self, dt):
+        """直升机阶段:防守倒计时 -> 落地限时登机 -> 飞走(可再呼叫)。"""
+        if self.mode != "explore" or self.over:
+            return
+        if self.heli_state == "defend":
+            self.heli_t -= dt
+            self.heli_wave_t -= dt
+            if self.heli_wave_t <= 0:
+                self.heli_wave_t = HELI_WAVE_INTERVAL
+                if self.pad is not None:
+                    self._spawn_heli_wave()
+            if self.heli_t <= 0:
+                self.heli_state = "arrived"
+                self.heli_t = float(HELI_WINDOW_TIME)
+                audio.play("extract")
+                self.add_toast(f"直升机到了!{int(HELI_WINDOW_TIME)} 秒内登机撤离",
+                               COL["good"], 6.0)
+        elif self.heli_state == "arrived":
+            self.heli_t -= dt
+            if self.heli_t <= 0:
+                self.heli_state = "gone"
+                self.heli_t = 0.0
+                self.add_toast("直升机等不到人飞走了 —— 回停机坪重新呼叫",
+                               COL["bad"], 6.0)
 
     def switch_floor(self, target):
         """换层:玩家状态与本层敌人/物资都留着,重建一份目标楼层的战局。
@@ -768,6 +915,11 @@ class Raid:
         new.kills = old.kills
         new.loot_log = old.loot_log
         new.time_left = old.time_left
+        # 直升机阶段跟着走(下楼躲一阵再上来,计时不会重来)
+        new.heli_state = old.heli_state
+        new.heli_t = old.heli_t
+        new.heli_wave_t = old.heli_wave_t
+        new.heli_wave = []
         new.add_toast(f"到达 {TOWER_FLOOR_NAME[target]}", COL["accent"], 3.2)
         self.game.raid = new
         return True
@@ -1415,6 +1567,16 @@ class Raid:
             d = math.hypot(st.x - p.x, st.y - p.y)
             if d < EXPLORE_STAIR_RANGE and d < bd:
                 best, bd, kind = st, d, "stairs"
+        for r in self.researchers:
+            if r.rescued:
+                continue
+            d = math.hypot(r.x - p.x, r.y - p.y)
+            if d < bd:
+                best, bd, kind = r, d, "research"
+        if self.pad is not None and self.heli_state in ("none", "gone"):
+            d = math.hypot(self.pad.x - p.x, self.pad.y - p.y)
+            if d < self.pad.r and (best is None or d < bd):
+                best, bd, kind = self.pad, d, "heli"
         for h in self.hostages:
             if h.rescued:
                 continue
@@ -1457,6 +1619,8 @@ class Raid:
             o = self.channel["ent"].obj
             return float(o.get("need", 2.0)) if o else 2.0
         return {"rescue": REVIVE_TIME, "revive": REVIVE_TIME,
+                "research": RESEARCHER_RESCUE_TIME,
+                "heli_call": HELI_CALL_TIME,
                 "destroy": ASSAULT_PLANT_TIME}.get(k, 1.0)
 
     def channel_label(self, kind=None):
@@ -1465,14 +1629,19 @@ class Raid:
             o = self.channel["ent"].obj
             return f"{o['name']}中" if o else "进行中"
         return {"rescue": "解救人质中", "revive": "拉起队友中",
+                "research": "营救研究员中", "heli_call": "呼叫直升机中",
                 "destroy": "安放炸药中"}.get(k, "进行中")
 
     def objectives_done(self):
         return len(self.objectives) > 0 and all(o.destroyed for o in self.objectives)
 
     def allows_extract(self):
-        """突袭模式必须先把指挥设施全炸掉才能撤离。"""
-        return self.mode != "assault" or self.objectives_done()
+        """突袭要炸完设施;探索 6F 要等直升机落地;其余随时能撤。"""
+        if self.mode == "assault":
+            return self.objectives_done()
+        if self.mode == "explore" and self.explore_floor == HELI_ROOF_FLOOR:
+            return self.heli_state == "arrived"
+        return True
 
     def _extract_tick(self, p, cur, dt, moving=None):
         """一位玩家的撤离引导进度。返回 (新进度, 是否站满)。
@@ -1487,10 +1656,14 @@ class Raid:
                 zone = name
                 break
         if zone is not None and not self.allows_extract():
-            # 突袭模式:指挥设施没炸完不让撤
+            # 突袭模式:指挥设施没炸完不让撤;探索 6F:直升机还没落地
             if "locked" not in self.warned:
                 self.warned.add("locked")
-                self.add_toast("先炸掉全部指挥设施才能撤离!", COL["bad"], 3.6)
+                if self.mode == "explore":
+                    self.add_toast("直升机还没到 —— 站在停机坪按交互键呼叫",
+                                   COL["bad"], 4.0)
+                else:
+                    self.add_toast("先炸掉全部指挥设施才能撤离!", COL["bad"], 3.6)
             zone = None
             cur = max(0.0, cur - dt * 3)
         if zone is not None and self.mode == "story":
@@ -1524,6 +1697,10 @@ class Raid:
         if kind == "stairs":
             # 换层要重建整份战局:这里只记下请求,下一帧开头再做
             self.pending_floor = int(ent.target)
+            audio.play("click")
+            return
+        if kind == "heli":
+            self.channel = dict(kind="heli_call", ent=ent, t=0.0)
             audio.play("click")
             return
         if kind == "supply":
@@ -1592,6 +1769,21 @@ class Raid:
                 self.add_toast(f"解救人质 {done}/{len(self.hostages)}", COL["good"], 3.0)
                 if done >= len(self.hostages):
                     self.add_toast("全部人质已解救!带队撤离!", COL["accent"], 5.0)
+            elif kind == "research":
+                ent.rescued = True
+                ent.path = []
+                ent.path_i = 0
+                self.rescued_set().add(ent.uid)
+                audio.play("pickup")
+                done = self.rescued_count()
+                self.add_toast(f"救出研究员 {done}/{RESEARCHER_TOTAL}"
+                               + (" —— 全部救出!" if done >= RESEARCHER_TOTAL else ""),
+                               COL["good"], 4.0)
+                if done >= RESEARCHER_TOTAL:
+                    self.add_toast("13 名研究员全在你身后了 —— 上天台叫直升机",
+                                   COL["accent"], 5.5)
+            elif kind == "heli_call":
+                self._start_heli_defend()
             elif kind == "destroy":
                 # 安放 C4:25 秒后起爆,爆区半径内一律吃伤害
                 self.plant_c4(ent)
@@ -3514,6 +3706,15 @@ class Raid:
                                          - self.p_start_value(q)))
         else:
             gained = max(0, int(self._loadout_value() - self.start_value))
+        # 探索模式:救援奖金按救出人数结算(没救满也照给,13 名全救再补一笔)
+        rescue_bonus = 0
+        if self.mode == "explore":
+            _rescued = self.rescued_count()
+            if kind == "extract":
+                rescue_bonus = _rescued * RESEARCHER_BONUS
+                if _rescued >= RESEARCHER_TOTAL:
+                    rescue_bonus += RESEARCHER_ALL_BONUS
+                gained += rescue_bonus
         # 等级经验:击杀 + 撤离净值(见 progress.py:每级一份独立奖励)
         try:
             import progress
@@ -3526,11 +3727,15 @@ class Raid:
         except Exception:
             self.xp_gained = 0
         rescued = sum(1 for h in self.hostages if h.rescued)
+        if self.mode == "explore":
+            rescued = self.rescued_count()
         objs_done = sum(1 for o in self.objectives if o.destroyed)
         if self.mode == "hostage":
             mission = len(self.hostages) > 0 and rescued >= len(self.hostages)
         elif self.mode == "assault":
             mission = self.objectives_done()
+        elif self.mode == "explore":
+            mission = rescued >= RESEARCHER_TOTAL
         else:
             mission = True
         # 双人合作:每人各自的结局(撤离 / 阵亡 / 没撤出来),结算页照这个显示
@@ -3547,6 +3752,8 @@ class Raid:
                            n=len(self.loot_log), time=RAID_TIME - self.time_left,
                            entries=self.loot_log,
                            mode=self.mode, rescued=rescued,
+                           researcher_total=RESEARCHER_TOTAL,
+                           rescue_bonus=rescue_bonus,
                            hostages=len(self.hostages),
                            coop=self.coop,
                            coop_status=coop_status,
@@ -3914,6 +4121,8 @@ class Raid:
             a.update(self, dt)
         for h in self.hostages:
             h.update(self, dt)
+        self._update_researchers(dt)
+        self._update_heli(dt)
         self._update_burn(dt)
         self._update_channel(dt)
         self._update_take(dt)

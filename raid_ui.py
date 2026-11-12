@@ -8,6 +8,7 @@ import pygame
 import audio
 import bindings
 from settings import (W, H, COL, BAG_W, BAG_H, RAID_TIME, EXTRACT_TIME,
+                      RESEARCHER_TOTAL, RESEARCHER_BONUS,
                       ADRENALINE_SPEED_MUL, ADRENALINE_REGEN, ADRENALINE_HP_MUL,
                       REVIVE_TIME, C4_BLAST_RADIUS,
                       NIGHT_DARK_RGB, NIGHT_BEAM_RGB, PLAYER, COOP,
@@ -799,6 +800,18 @@ def draw_raid(raid, screen):
         t = get_font(12, bold=True).render("人质" if not h.rescued else "已解救", True, col)
         screen.blit(t, t.get_rect(center=(x, y - h.r - 12)))
 
+    # 探索模式:研究员(没救的蹲在原地,救出的跟着你)
+    for r in getattr(raid, "researchers", ()):
+        if not r.rescued and not raid.map.los_clear(p.x, p.y, r.x, r.y):
+            continue
+        x, y = r.x + ox, r.y + oy
+        col = (246, 240, 202) if not r.rescued else (156, 208, 250)
+        pygame.draw.circle(screen, col, (int(x), int(y)), r.r)
+        pygame.draw.circle(screen, (40, 40, 60), (int(x), int(y)), r.r, 2)
+        t = get_font(12, bold=True).render(
+            "研究员" if not r.rescued else "跟着你", True, col)
+        screen.blit(t, t.get_rect(center=(x, y - r.r - 12)))
+
     # 粒子:整批交给 Surface.blits() 一次贴完。
     # 原来每颗一次 screen.blit(...) —— 一场交火里每帧 180+ 颗,就是 180+ 次
     # Python→C 调用;blits() 让 C 循环跑完整批,顺带把屏幕外的裁掉
@@ -1348,9 +1361,31 @@ def _draw_hud(raid, screen):
     mm, ss = int(tl) // 60, int(tl) % 60
     txt = (f"剩余 {mm:02d}:{ss:02d}    {raid.map.map_name} · "
            f"{raid.diff['name']}    击杀 {raid.kills}")
+    if getattr(raid, "mode", None) == "explore":
+        txt += f"    研究员 {raid.rescued_count()}/{RESEARCHER_TOTAL}"
     t = get_font(20, bold=True).render(txt, True,
                                        COL["bad"] if tl < 60 else COL["text"])
     screen.blit(t, t.get_rect(center=(W // 2, 18)))
+
+    # 探索模式:6F 停机坪的直升机阶段(呼叫 / 防守倒计时 / 限时登机)
+    if getattr(raid, "mode", None) == "explore" and getattr(raid, "pad", None) is not None:
+        st = raid.heli_state
+        if st == "defend":
+            line = f"直升机 {int(raid.heli_t) + 1} 秒后到达 —— 守住停机坪!"
+            hcol = COL["bad"]
+        elif st == "arrived":
+            line = f"直升机已到达:{int(raid.heli_t)} 秒内站进停机坪撤离"
+            hcol = COL["good"]
+        elif st == "gone":
+            line = "直升机已飞走 —— 回停机坪按交互键重新呼叫"
+            hcol = COL["bad"]
+        else:
+            line = "停机坪:按交互键呼叫直升机(守 60 秒,落地后限时登机)"
+            hcol = COL["accent"]
+        ht = get_font(16, bold=True).render(line, True, hcol)
+        hbg = _hud_bg(ht.get_width() + 18, 26, (10, 10, 12, 170))
+        screen.blit(hbg, (W // 2 - hbg.get_width() // 2, 40))
+        screen.blit(ht, (W // 2 - ht.get_width() // 2, 45))
 
     # 黑暗行动:当前光源状态(没带光源就红字提醒;双人时两人各报一份)
     if getattr(raid, "dark", False) and not raid.over:
@@ -1537,8 +1572,17 @@ def _draw_hud(raid, screen):
         ik = bindings.label_for(raid.game.save, "interact")
         for name, r in raid.map.extracts:
             if r.collidepoint(raid.player.x, raid.player.y):
-                prompt = ("撤离区:保持不动完成撤离" if raid.allows_extract()
-                          else "先炸掉全部指挥设施才能撤离")
+                if getattr(raid, "mode", None) == "explore":
+                    if raid.heli_state == "arrived":
+                        prompt = "停机坪:站定登机撤离"
+                    elif raid.heli_state == "defend":
+                        prompt = f"直升机还有 {int(raid.heli_t) + 1} 秒到达 —— 守住!"
+                    else:
+                        prompt = (f"{ik}  呼叫直升机(研究员 "
+                                  f"{raid.rescued_count()}/{RESEARCHER_TOTAL})")
+                else:
+                    prompt = ("撤离区:保持不动完成撤离" if raid.allows_extract()
+                              else "先炸掉全部指挥设施才能撤离")
                 break
         if prompt is None and raid.channel is not None:
             need = raid.channel_need()
@@ -1556,6 +1600,11 @@ def _draw_hud(raid, screen):
                 prompt = f"{ik}  补充弹药(弹药库)"
             elif kind == "stairs":
                 prompt = f"{ik}  {_ent.name}"
+            elif kind == "research":
+                prompt = f"{ik}  营救研究员(研究员 {raid.rescued_count()}/{RESEARCHER_TOTAL})"
+            elif kind == "heli":
+                prompt = (f"{ik}  呼叫直升机(研究员 "
+                          f"{raid.rescued_count()}/{RESEARCHER_TOTAL})")
             elif kind == "story":
                 o = _ent.obj
                 if o is None or o["kind"] == "talk":
@@ -1581,8 +1630,9 @@ def _draw_hud(raid, screen):
     # 非常规武器:侦察无人机面板(有在飞的无人机时才出现)
     _draw_drone_panel(raid, screen)
 
-    # 通知
-    y = 56
+    # 通知(6F 停机坪多一行直升机状态,提示条整体下移,别盖住它)
+    y = 86 if (getattr(raid, "mode", None) == "explore"
+               and getattr(raid, "pad", None) is not None) else 56
     for row in raid.toasts:
         if not row or len(row) < 4:
             continue
@@ -2058,6 +2108,29 @@ def _draw_result(raid, screen):
         t = get_font(15).render("系统配发装备与战利品已回收,仓库配置未变动",
                                 True, COL["text_dim"])
         screen.blit(t, t.get_rect(center=(W // 2, 274)))
+
+    elif r.get("mode") == "explore":
+        total = r.get("researcher_total", 13)
+        got = r.get("rescued", 0)
+        ok = got >= total and r["kind"] == "extract"
+        obj = f"研究员救援 {got}/{total}    救援奖金 {fmt_rub(r.get('rescue_bonus', 0))}"
+        t = get_font(20, bold=True).render(obj, True,
+                                           COL["good"] if ok else COL["accent"])
+        screen.blit(t, t.get_rect(center=(W // 2, 244)))
+        if not r.get("entries"):
+            if r["kind"] == "extract" and got < total:
+                note = (f"没救满 {total} 名:每少一人只拿 "
+                        f"{fmt_rub(RESEARCHER_BONUS)} 的份,全救出另有重奖")
+                ncol = COL["text_dim"]
+            elif ok:
+                note = f"{total} 名研究员全部带出 —— 全员奖金已入账"
+                ncol = COL["good"]
+            else:
+                note = ""
+                ncol = COL["text_dim"]
+            if note:
+                t2 = get_font(15).render(note, True, ncol)
+                screen.blit(t2, t2.get_rect(center=(W // 2, 276)))
 
     elif r.get("mode") == "story":
         sd = raid.game.save

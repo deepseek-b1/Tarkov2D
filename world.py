@@ -17,7 +17,7 @@ _LOOT_LETTER = {"C": "crate", "M": "med", "G": "gun", "V": "val"}
 _SCAV_LETTER = {"p": "pistol", "g": "shotgun", "r": "ar", "m": "melee"}
 _SPECIAL = ("S", "1", "2", "3", "4", "5", "6", "7",
             "X", "Y", "Z", "H", "T", "c",
-            "O", "P", "Q", "o", "q", "A", "N", "K", "U", "D")
+            "O", "P", "Q", "o", "q", "A", "N", "K", "U", "D", "R")
 
 _INF = float("inf")
 _RAY_DIRS = {}
@@ -167,6 +167,7 @@ class GameMap:
         self.corners = []          # [(x, y)] 拐角死角(敌人偏好蹲守)
         self.stairs_up = []        # [(x, y)] 上楼口(探索模式:常务公司)
         self.stairs_down = []      # [(x, y)] 下楼口
+        self.researcher_spawns = []  # [(x, y)] 待救援研究员(探索模式)
         self.spawn = None          # (x, y) 像素坐标
 
         for ty, row in enumerate(rows):
@@ -252,6 +253,8 @@ class GameMap:
                     self.stairs_up.append((cx, cy))
                 elif ch == "D":
                     self.stairs_down.append((cx, cy))
+                elif ch == "R":
+                    self.researcher_spawns.append((cx, cy))
                 elif ch in ("1", "2", "3", "4", "5", "6", "7"):
                     r = pygame.Rect(0, 0, TILE * 3, TILE * 3)
                     r.center = (cx, cy)

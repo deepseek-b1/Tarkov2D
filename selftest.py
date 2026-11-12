@@ -6313,7 +6313,7 @@ def run():
         from settings import (W as SW, H as SH, MAPS as _MAPS, MAP_ORDER,
                               MODES, MODE_ORDER, MODE_MAP, MODE_DIFF,
                               TOWER_FLOORS, TOWER_FLOOR_MAP, TOWER_FLOOR_NAME,
-                              EXPLORE_STAIR_RANGE, EXTRACT_TIME)
+                              EXPLORE_STAIR_RANGE, EXTRACT_TIME, HELI_CALL_TIME)
 
         # 1) 模式与地图接线:4 个模式、探索固定进 1F、六层各一张图
         assert "explore" in MODES and "explore" in MODE_ORDER, MODE_ORDER
@@ -6412,16 +6412,28 @@ def run():
         assert r.explore_floor == 6
         assert r.containers is c6 and r.scavs is s6, "回层要接着上次的敌人/箱子"
 
-        # 7) 天台停机坪撤离
+        # 7) 天台停机坪撤离:先呼叫直升机(没直升机不给撤),落地后再登机
         r.scavs = []
         name, zone = r.map.extracts[0]
         r.player.x, r.player.y = zone.center
+        assert not r.allows_extract(), "直升机没到不能从停机坪撤"
+        r.interact()
+        assert r.channel and r.channel["kind"] == "heli_call", r.channel
+        r._update_channel(HELI_CALL_TIME + 0.1)
+        assert r.heli_state == "defend"
+        r.heli_t = 0.0
+        r.update(1 / 60, [])
+        assert r.heli_state == "arrived" and r.allows_extract()
+        r.scavs = []
         for _ in range(int((EXTRACT_TIME + 1) * 60)):
             r.update(1 / 60, [])
             if r.over:
                 break
         assert r.over and r.result["kind"] == "extract", r.result
-        assert r.result["mode"] == "explore" and r.result["mission"] is True
+        assert r.result["mode"] == "explore"
+        # 一 个人都没救:任务没完成,也没有救援奖金
+        assert r.result["mission"] is False and r.result["rescue_bonus"] == 0
+        assert r.result["rescued"] == 0
         assert g.save.stats["extracts"] == 1
         g.draw(screen)                       # 结算页能画
         # 撤离保留装备(不是突袭那种配发回收)
@@ -6447,6 +6459,205 @@ def run():
         assert g2.save.difficulty == before, g2.save.difficulty
 
     check("探索模式-六层切换/楼梯/撤离", t_explore)
+
+    def t_explore_rescue():
+        """探索模式第 2 步:13 名研究员 / 跟随与跨层 / 直升机防守 / 限时登机。"""
+        import raid as raid_mod
+        from game import Game
+        from world import GameMap
+        from settings import (W as SW, H as SH, TOWER_FLOORS, TOWER_FLOOR_MAP,
+                              TOWER_FLOOR_NAME, RESEARCHER_TOTAL,
+                              RESEARCHER_RESCUE_TIME, RESEARCHER_BONUS,
+                              RESEARCHER_ALL_BONUS, RESEARCHER_LOST_DIST,
+                              HELI_CALL_TIME, HELI_DEFEND_TIME, HELI_WAVE_MAX,
+                              HELI_WINDOW_TIME, HELI_ROOF_FLOOR, TILE,
+                              EXTRACT_TIME)
+
+        # 1) 研究员分布:全楼 13 名,都在 1F~5F,编号唯一,站得住
+        screen = pygame.display.set_mode((SW, SH))
+        total, uids = 0, set()
+        for n in TOWER_FLOORS:
+            m = GameMap(TOWER_FLOOR_MAP[n])
+            for i, (x, y) in enumerate(m.researcher_spawns):
+                uids.add("%d-%d" % (n, i))
+                tx, ty = int(x // TILE), int(y // TILE)
+                assert not m.tile_solid(tx, ty), (n, i, "研究员刷在墙里")
+            total += len(m.researcher_spawns)
+            assert (n == HELI_ROOF_FLOOR) == (len(m.researcher_spawns) == 0), \
+                (n, "只有天台不该有研究员")
+        assert total == RESEARCHER_TOTAL == 13, total
+        assert len(uids) == total, "编号要唯一"
+
+        def go_floor(g, target):
+            """按楼梯一层层走到目标楼层(真的按交互键换层)。"""
+            r = g.raid
+            guard = 0
+            while r.explore_floor != target:
+                guard += 1
+                assert guard < 12, ("走不到目标楼层", target, r.explore_floor)
+                up = r.explore_floor < target
+                st = next(s for s in r.stairs if s.up == up)
+                r.player.x, r.player.y = st.x, st.y
+                r.interact()
+                r.update(1 / 60, [])
+                r = g.raid
+            return r
+
+        def rescue_floor(g):
+            r = g.raid
+            for res in list(r.researchers):
+                if res.rescued:
+                    continue
+                r.player.x, r.player.y = res.x, res.y
+                r.interact()
+                assert r.channel and r.channel["kind"] == "research"
+                r._update_channel(RESEARCHER_RESCUE_TIME + 0.1)
+            return r
+
+        def rescue_all(g):
+            for n in TOWER_FLOORS[:-1]:
+                go_floor(g, n)
+                rescue_floor(g)
+            return g.raid
+
+        def climb(g):
+            return go_floor(g, HELI_ROOF_FLOOR)
+
+        # 2) 进楼:救 1 名,跟随 + 跨层带人
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.mode = "explore"
+        g.save.seen_intro = True
+        g.start_raid()
+        r = g.raid
+        r.player.hp = 9999           # 测试里不打架,只用来看流程
+        assert r.rescued_count() == 0 and len(r.researchers) == 2
+        first = r.researchers[0]
+        r.player.x, r.player.y = first.x, first.y
+        kind, ent = r.nearest_interactable()
+        assert kind == "research" and ent is first
+        r.interact()
+        assert r.channel["kind"] == "research"
+        r._update_channel(RESEARCHER_RESCUE_TIME + 0.1)
+        assert first.rescued and r.rescued_count() == 1
+        assert first.uid in g._explore_rescued
+        # 跟随:玩家走远 -> 研究员开始寻路
+        r.player.x += 260
+        for _ in range(20):
+            first.update(r, 1 / 60)
+        assert first.path, "救出的研究员要跟上来"
+        # 掉队太远直接拉回玩家身边
+        first.x, first.y = r.player.x + RESEARCHER_LOST_DIST + 200, r.player.y
+        r._update_researchers(1 / 60)
+        assert math.hypot(first.x - r.player.x, first.y - r.player.y) < 120
+        # 换层:救出的跟着到 2F(本层 3 个 + 跟来的 1 个)
+        st = next(s for s in r.stairs if s.up)
+        r.player.x, r.player.y = st.x, st.y
+        r.interact()
+        r.update(1 / 60, [])
+        r = g.raid
+        assert r.explore_floor == 2
+        assert len(r.researchers) == 4, len(r.researchers)
+        assert r.rescued_count() == 1
+        assert any(x.rescued and x.uid == first.uid for x in r.researchers)
+        g.draw(screen)                        # 带研究员的画面能画
+
+        # 3) 一路救满 13 名,再上天台
+        r = rescue_all(g)
+        assert g.raid is r
+        assert r.rescued_count() == RESEARCHER_TOTAL == 13, r.rescued_count()
+        assert all(x.rescued for x in r.researchers), "救满了本层不该还有站着的"
+        r = climb(g)
+        g.draw(screen)
+
+        # 4) 停机坪:呼叫 -> 防守 60 秒(刷波次)-> 落地 -> 登机撤离
+        assert r.pad is not None and r.heli_state == "none"
+        _, zone = r.map.extracts[0]
+        r.player.x, r.player.y = zone.center
+        assert not r.allows_extract()
+        r.interact()
+        assert r.channel["kind"] == "heli_call"
+        r._update_channel(HELI_CALL_TIME + 0.1)
+        assert r.heli_state == "defend" and r.heli_t >= HELI_DEFEND_TIME - 1
+        g.draw(screen)                        # 防守倒计时 HUD
+        # 波次:把间隔调小跑几十帧,场上敌人应该变多且不超过上限
+        old_int, old_max = raid_mod.HELI_WAVE_INTERVAL, HELI_WAVE_MAX
+        raid_mod.HELI_WAVE_INTERVAL = 0.2
+        try:
+            r.heli_wave_t = 0.0
+            base = len(r.scavs)
+            for _ in range(60):
+                r.update(1 / 60, [])
+        finally:
+            raid_mod.HELI_WAVE_INTERVAL = old_int
+        assert len(r.scavs) > base, (base, len(r.scavs))
+        assert len(r.heli_wave) <= old_max, len(r.heli_wave)
+        # 落地
+        r.heli_t = 0.0
+        r.update(1 / 60, [])
+        assert r.heli_state == "arrived" and r.allows_extract()
+        g.draw(screen)
+        # 飞走:再也不能撤,但可以重新呼叫
+        r.heli_t = 0.0
+        r.update(1 / 60, [])
+        assert r.heli_state == "gone" and not r.allows_extract()
+        r.player.x, r.player.y = zone.center
+        kind, ent = r.nearest_interactable()
+        assert kind == "heli", kind
+        r.interact()
+        assert r.channel["kind"] == "heli_call"
+        r._update_channel(HELI_CALL_TIME + 0.1)
+        assert r.heli_state == "defend"
+        # 直接落地并登机
+        r.heli_t = 0.0
+        r.update(1 / 60, [])
+        assert r.heli_state == "arrived"
+        r.scavs, r.heli_wave = [], []
+        r.player.x, r.player.y = zone.center
+        for _ in range(int((EXTRACT_TIME + 1) * 60)):
+            r.update(1 / 60, [])
+            if r.over:
+                break
+        assert r.over and r.result["kind"] == "extract", r.result
+        assert r.result["rescued"] == RESEARCHER_TOTAL
+        assert r.result["mission"] is True
+        assert r.result["rescue_bonus"] == (RESEARCHER_TOTAL * RESEARCHER_BONUS
+                                            + RESEARCHER_ALL_BONUS), r.result
+        g.draw(screen)                        # 结算页(全救出)
+        assert g.save.weapon is not None, "探索撤离保留装备"
+
+        # 5) 新一局:救援进度清零
+        g.start_raid()
+        assert g.raid.rescued_count() == 0 and g.raid.explore_floor == 1
+        assert len(g.raid.researchers) == 2
+
+        # 6) 只救 1 名就从 1F 正门撤:奖金按人数,任务未完成
+        g2 = Game()
+        g2.save = save_mod.reset_data()
+        g2.save.mode = "explore"
+        g2.save.seen_intro = True
+        g2.start_raid()
+        r2 = g2.raid
+        r2.player.hp = 9999
+        res = r2.researchers[0]
+        r2.player.x, r2.player.y = res.x, res.y
+        r2.interact()
+        r2._update_channel(RESEARCHER_RESCUE_TIME + 0.1)
+        name, zone = r2.map.extracts[0]
+        r2.player.x, r2.player.y = zone.center
+        assert r2.allows_extract(), "1F 正门随时能撤(不用直升机)"
+        r2.scavs = []
+        for _ in range(int((EXTRACT_TIME + 1) * 60)):
+            r2.update(1 / 60, [])
+            if r2.over:
+                break
+        assert r2.over and r2.result["kind"] == "extract", r2.result
+        assert r2.result["rescued"] == 1
+        assert r2.result["rescue_bonus"] == RESEARCHER_BONUS, r2.result
+        assert r2.result["mission"] is False
+        g2.draw(screen)                       # 结算页(只救 1 名)
+
+    check("探索模式-研究员救援/直升机防守/撤离", t_explore_rescue)
 
     check("键位-突袭支援(F1-F3)与切装备位(1-4)不冲突", t_key_conflict)
 

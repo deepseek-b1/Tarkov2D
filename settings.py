@@ -7,7 +7,7 @@ import pygame
 from inventory import Item      # 装备位里的武器要在槽之间搬(inventory 不反向依赖本模块)
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.13.21"
+GAME_VERSION = "2.13.22"
 # 更新清单地址(留空则只认 EXE 同目录的 version.json)。
 # 默认指向仓库里的 update_server/version.json —— 推到 main 就生效,不用再发服务器。
 # 也可以换成本机自建服务器(如 http://127.0.0.1:8765/version.json)。
@@ -1841,6 +1841,23 @@ MODE_ORDER = ["raid", "assault", "explore", "night"]
 # ---------- 探索模式(常务公司六层大楼) ----------
 # 楼层图与楼梯坐标在 maps.py(TOWER_*);这里只放玩法参数。
 EXPLORE_STAIR_RANGE = 64     # 站在楼梯口多近能按交互键上下楼(像素)
+
+# 研究员:13 名散在 1F~5F,救出后跟着你走;救满有额外奖金
+RESEARCHER_TOTAL = 13
+RESEARCHER_RESCUE_TIME = 2.5     # 营救读条(秒)
+RESEARCHER_LOST_DIST = 820       # 掉队这么远(卡在别的房间)就直接瞬移回来
+RESEARCHER_BONUS = 60000         # 每救出 1 名的救援奖金(卢布)
+RESEARCHER_ALL_BONUS = 600000    # 13 名全救出的额外奖金
+
+# 直升机:6F 停机坪呼叫 -> 防守 60 秒 -> 落地限时登机撤离
+HELI_ROOF_FLOOR = 6
+HELI_PAD_RANGE = 96              # 停机坪交互半径(像素)
+HELI_CALL_TIME = 3.0             # 呼叫读条(秒)
+HELI_DEFEND_TIME = 60.0          # 直升机到达前的防守时间(秒)
+HELI_WAVE_INTERVAL = 12.0        # 防守期间每隔多久刷一波敌人
+HELI_WAVE_SIZE = 4               # 每波人数
+HELI_WAVE_MAX = 10               # 波次敌人同时在场上限(不含初始守军)
+HELI_WINDOW_TIME = 45.0          # 直升机落地后停留多久,错过要重新呼叫
 
 # ---------- 黑暗模式(夜战) ----------
 # 全图压成漆黑:只有「光源范围」内能看见东西(敌人也只有亮区里才显示)。

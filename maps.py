@@ -754,6 +754,10 @@ def build_tower_f1():
                     (45, 33, "r")]:
         put(x, y, k)
 
+    # 待救援的研究员(全楼共 13 名,救出后跟着你走)
+    for x, y in [(25, 20), (45, 22)]:
+        put(x, y, "R")
+
     return ["".join(r) for r in g]
 
 
@@ -796,6 +800,9 @@ def build_tower_f2():
                     (45, 4, "p"), (6, 17, "r"), (16, 19, "g"), (26, 27, "r"),
                     (36, 19, "r"), (8, 37, "r"), (28, 37, "g"), (38, 37, "r")]:
         put(x, y, k)
+
+    for x, y in [(9, 17), (19, 27), (37, 37)]:
+        put(x, y, "R")
 
     return ["".join(r) for r in g]
 
@@ -851,6 +858,9 @@ def build_tower_f3():
                     (30, 20, "r")]:
         put(x, y, k)
 
+    for x, y in [(10, 17), (44, 22), (20, 36)]:
+        put(x, y, "R")
+
     return ["".join(r) for r in g]
 
 
@@ -883,6 +893,9 @@ def build_tower_f4():
                     (40, 16, "r"), (12, 26, "r"), (48, 26, "r"), (26, 32, "g"),
                     (36, 36, "r"), (14, 36, "p"), (50, 36, "r")]:
         put(x, y, k)
+
+    for x, y in [(18, 11), (44, 23)]:
+        put(x, y, "R")
 
     return ["".join(r) for r in g]
 
@@ -927,6 +940,9 @@ def build_tower_f5():
                     (52, 20, "r"), (22, 20, "r"), (40, 20, "r"), (28, 36, "r"),
                     (46, 36, "r"), (12, 38, "r"), (52, 30, "p")]:
         put(x, y, k)
+
+    for x, y in [(10, 8), (34, 10), (44, 36)]:
+        put(x, y, "R")
 
     return ["".join(r) for r in g]
 

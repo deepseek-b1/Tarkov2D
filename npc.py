@@ -182,3 +182,15 @@ class Hostage(Walker):
             self._follow(raid, dt, 150)
         else:
             self.path = []
+
+
+class Researcher(Hostage):
+    """探索模式的研究员:待救援时蹲在原地,救出后跟着玩家走(不还手)。"""
+
+    def __init__(self, x, y, uid="", floor=1):
+        super().__init__(x, y)
+        self.name = "研究员"
+        self.uid = uid           # 稳定编号 "<楼层>-<序号>":跨层恢复状态用
+        self.floor = floor
+        self.r = 10
+
