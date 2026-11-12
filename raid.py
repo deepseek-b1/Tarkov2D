@@ -10,6 +10,8 @@ import coop as coop_mod
 import story as story_mod
 import uikit
 from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
+                      ADRENALINE_TIME, ADRENALINE_MAX_STACK, ADRENALINE_SPEED_MUL,
+                      ADRENALINE_REGEN, ADRENALINE_HP_MUL,
                       INTERACT_DIST, ITEMS, LOOT, SCAV_DROPS, DIFFICULTIES,
                       CLASSIFIED, DOC_SPAWN_CHANCE, armor_allows,
                       MAPS, BOSSES, GUARD_ARMOR_DROP, GUARD_ARMORS,
@@ -187,6 +189,9 @@ class Player:
         self.reloading = False
         self.hurt_flash = 0.0
         self.dead = False         # 双人合作:倒下的玩家不再操作/不再被瞄准
+        # 肾上腺素:击杀叠层,短时加速/回血/减伤(见 settings.ADRENALINE_*)
+        self.adren = 0            # 当前层数
+        self.adren_t = 0.0        # 剩余时间(秒)
         self.extracted = False    # 已经撤出战场(双人合作:另一个还能继续打)
         self.out = False          # 已离场(阵亡或已撤离)—— 操作/AI/伤害一律忽略
         self.extract_gain = None  # 撤离那一刻的净收益(结算用)
@@ -217,6 +222,10 @@ class Player:
         from settings import (ARMOR_PEN_KEEP, ARMOR_PEN_PARTIAL, ARMOR_WEAR_ABSORB,
                               ARMOR_WEAR_MIN, ARMOR_WEAR_PEN_RATIO, HELMET_WEAR_RATIO)
         left = float(dmg)
+        # 肾上腺素:每层再减伤 ADRENALINE_HP_MUL(与护甲减伤乘算,先乘进去)
+        _adren = int(getattr(self, "adren", 0) or 0)
+        if _adren > 0:
+            left *= (1 - ADRENALINE_HP_MUL * _adren)
         for piece, wear_ratio in ((self.armor, 1.0), (self.helmet, HELMET_WEAR_RATIO)):
             if piece is None:
                 continue
@@ -302,7 +311,33 @@ class Player:
         s = PLAYER["walk"] if walking else PLAYER["speed"]
         if self.armor is not None:
             s *= (1 - self.armor.def_.get("slow", 0))
+        # 肾上腺素:每层 +ADRENALINE_SPEED_MUL 移速
+        s *= (1 + ADRENALINE_SPEED_MUL * self.adren)
         return s
+
+    def add_adrenaline(self, raid=None):
+        """击杀触发一层肾上腺素:叠层 + 刷新计时。"""
+        before = self.adren
+        self.adren = min(ADRENALINE_MAX_STACK, self.adren + 1)
+        self.adren_t = ADRENALINE_TIME
+        if raid is not None and self.adren != before:
+            raid.add_toast(f"肾上腺素 ×{self.adren}(移速 +"
+                           f"{int(ADRENALINE_SPEED_MUL * self.adren * 100)}% · "
+                           f"回血 {ADRENALINE_REGEN * self.adren:.1f}/s)",
+                           (255, 176, 90), 2.4)
+        return self.adren
+
+    def tick_adrenaline(self, dt):
+        """每帧推进肾上腺素:回血、倒计时、层数清零。"""
+        if self.adren <= 0:
+            return
+        self.adren_t -= dt
+        if self.hp < self.max_hp and not self.dead:
+            self.hp = min(self.max_hp,
+                          self.hp + ADRENALINE_REGEN * self.adren * dt)
+        if self.adren_t <= 0:
+            self.adren = 0
+            self.adren_t = 0.0
 
     def reserve_count(self):
         if self.weapon is None:
@@ -1375,6 +1410,10 @@ class Raid:
     def kill_scav(self, scav):
         self.scavs.remove(scav)
         self.kills += 1
+        # 击杀叠一层肾上腺素(短时加速/回血/减伤)
+        for p in self.players():
+            if not p.out and not p.dead:
+                p.add_adrenaline(self)
         if self.mode == "assault":
             # 击杀守军换支援积分(硬点子给得多)
             self.support_points += ASSAULT_KILL_POINTS.get(scav.kind, 1)
@@ -3317,6 +3356,9 @@ class Raid:
         p = self.player
         self._click_cd = max(0.0, self._click_cd - dt)
         self.now += dt                 # AI 错峰用的单调时钟
+        # 肾上腺素:回血 + 倒计时(双人合作时两个玩家各自计时)
+        for _pl in self.players():
+            _pl.tick_adrenaline(dt)
 
         # 结算页:任意键/任意触摸返回藏身处
         if self.over:

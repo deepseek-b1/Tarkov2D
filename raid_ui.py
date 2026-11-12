@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """战局渲染:世界+战争迷雾+HUD+背包/搜刮/暂停/结算界面。"""
 import math
 import os
@@ -8,6 +8,7 @@ import pygame
 import audio
 import bindings
 from settings import (W, H, COL, BAG_W, BAG_H, RAID_TIME, EXTRACT_TIME,
+                      ADRENALINE_SPEED_MUL, ADRENALINE_REGEN, ADRENALINE_HP_MUL,
                       HOSTAGE_RESCUE_TIME, REVIVE_TIME, C4_BLAST_RADIUS,
                       NIGHT_DARK_RGB, NIGHT_BEAM_RGB, PLAYER, COOP,
                       fmt_rub, get_font, to_display, fog_darken,
@@ -1251,6 +1252,15 @@ def _draw_hud(raid, screen):
                                           and not raid.revive_used) else COL["good"]
             t = get_font(13).render(txt, True, col)
             screen.blit(t, (26, H - 40))
+        # 肾上腺素:击杀后短时强化,层数 + 剩余秒数
+        if getattr(p, "adren", 0) > 0:
+            t = get_font(13, bold=True).render(
+                f"肾上腺素 ×{p.adren}  {p.adren_t:.1f}s"
+                f"(移速 +{int(ADRENALINE_SPEED_MUL * p.adren * 100)}% · "
+                f"回血 {ADRENALINE_REGEN * p.adren:.1f}/s · "
+                f"减伤 {int(ADRENALINE_HP_MUL * p.adren * 100)}%)",
+                True, (255, 176, 90))
+            screen.blit(t, (26, H - 24 if p.armor is not None else H - 40))
         # 快捷打药提示(血量过半以下且有医疗品时显示;键名跟玩家改键走)
         if p.hp < p.max_hp * 0.5 \
                 and any(pl.item.cat == "med" for pl in p.bag.items):

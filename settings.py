@@ -7,7 +7,7 @@ import pygame
 from inventory import Item      # 装备位里的武器要在槽之间搬(inventory 不反向依赖本模块)
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.13.4"
+GAME_VERSION = "2.13.5"
 # 更新清单地址(留空则只认 EXE 同目录的 version.json)。
 # 默认指向仓库里的 update_server/version.json —— 推到 main 就生效,不用再发服务器。
 # 也可以换成本机自建服务器(如 http://127.0.0.1:8765/version.json)。
@@ -53,6 +53,14 @@ HELMET_WEAR_RATIO = 1.3      # 头盔磨损比护甲快(同样伤害吃更多耐
 ARMOR_REPAIR_RATE = 0.35     # 维修费 = 价格 × 缺失耐久比例 × 该系数
 ARMOR_REPAIR_CAP = 0.92      # 维修最多回到 92%(旧甲修不回全新)
 ARMOR_BROKEN_RATIO = 0.0     # 耐久 <= 该比例视为彻底损坏
+
+# ---------- 肾上腺素(击杀触发,短时强化) ----------
+ADRENALINE_TIME = 7.0        # 每层持续时间(秒);再击杀会刷新计时并叠层
+ADRENALINE_MAX_STACK = 3     # 最大层数
+ADRENALINE_SPEED_MUL = 0.06  # 每层移速加成(+6%)
+ADRENALINE_REGEN = 1.2       # 每层每秒回血
+ADRENALINE_HP_MUL = 0.04     # 每层减伤(+4%),与护甲减伤乘算
+
 # 搜刮/打药读条(秒):以前是瞬发,现在要花时间
 LOOT_TAKE_TIME = 1.0         # 搜刮单件的基础时间
 LOOT_TAKE_PER_CELL = 0.16    # 每多占一格多花的时间(大件更慢)

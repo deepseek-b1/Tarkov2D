@@ -139,6 +139,11 @@ class SaveData:
         self.fps_cap = 120        # 帧率上限(0 = 不限)
         self.show_fps = True      # 画面右上角显示帧率
         self.scale_filter = "linear"   # 全屏缩放滤镜:linear 柔和 / nearest 锐利
+        # 音量(audio.py 用):总音量 / 枪声 / 界面 三档 + 静音
+        self.vol_master = 0.8
+        self.vol_gun = 1.0
+        self.vol_ui = 1.0
+        self.vol_muted = False
 
     def apply_pack(self):
         """按当前背包调整出战背包容量(先尽量扩容,收窄时放不下的退回仓库)。"""
@@ -221,6 +226,10 @@ class SaveData:
             "fps_cap": int(self.fps_cap),
             "show_fps": bool(self.show_fps),
             "scale_filter": str(self.scale_filter),
+            "vol_master": float(self.vol_master),
+            "vol_gun": float(self.vol_gun),
+            "vol_ui": float(self.vol_ui),
+            "vol_muted": bool(self.vol_muted),
         }
 
     @staticmethod
@@ -310,6 +319,22 @@ class SaveData:
         sd.show_fps = bool(data.get("show_fps", True))
         sf = str(data.get("scale_filter", "linear"))
         sd.scale_filter = sf if sf in ("linear", "nearest") else "linear"
+
+        def _vol(key, default):
+            try:
+                return max(0.0, min(1.0, float(data.get(key, default))))
+            except (TypeError, ValueError):
+                return default
+
+        sd.vol_master = _vol("vol_master", 0.8)
+        sd.vol_gun = _vol("vol_gun", 1.0)
+        sd.vol_ui = _vol("vol_ui", 1.0)
+        sd.vol_muted = bool(data.get("vol_muted", False))
+        try:                       # 读档即套上音量(不需要额外一步)
+            import audio
+            audio.apply_from_save(sd)
+        except Exception:
+            pass
         return sd
 
 

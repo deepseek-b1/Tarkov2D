@@ -1538,6 +1538,101 @@ def run():
 
     check("弹种-口径分组/穿甲等级/同口径通用/交易所口径目录", t_ammo)
 
+    def t_audio_volume():
+        """音量:三档分组 + 静音 + 存档往返 + 读档自动套用 + 设置页控件。"""
+        import audio
+        from settings import W as SW, H as SH
+        from game import Game
+
+        audio.set_volumes(master=0.8, gun=1.0, ui=1.0, muted=False)
+        sd = save_mod.reset_data()
+        audio.apply_from_save(sd)
+        v = audio.get_volumes()
+        assert abs(v["master"] - 0.8) < 1e-9 and not v["muted"]
+        # 分组:总音量 × 分组音量
+        sd.vol_master, sd.vol_gun, sd.vol_ui = 0.5, 0.5, 1.0
+        audio.apply_from_save(sd)
+        assert abs(audio.effective_volume("ar") - 0.25) < 1e-6
+        assert abs(audio.effective_volume("click") - 0.5) < 1e-6
+        assert audio.group_of("pm") == "gun" and audio.group_of("click") == "ui"
+        # 静音:一律 0
+        sd.vol_muted = True
+        audio.apply_from_save(sd)
+        assert audio.effective_volume("ar") == 0.0
+        assert audio.effective_volume("click") == 0.0
+        # 存档往返 + 读档自动套用
+        sd.vol_muted = False
+        sd.vol_master, sd.vol_gun, sd.vol_ui = 0.3, 0.6, 0.9
+        save_mod.save_data(sd)
+        audio.set_volumes(master=1.0, gun=1.0, ui=1.0, muted=False)   # 先打乱
+        sd2 = save_mod.load_data()
+        assert abs(sd2.vol_master - 0.3) < 1e-6, sd2.vol_master
+        assert abs(sd2.vol_gun - 0.6) < 1e-6 and abs(sd2.vol_ui - 0.9) < 1e-6
+        assert sd2.vol_muted is False
+        assert abs(audio.get_volumes()["master"] - 0.3) < 1e-6, "读档后没有套用音量"
+        # 越界夹紧
+        assert audio.set_volumes(master=5)["master"] == 1.0
+        assert audio.set_volumes(master=-1)["master"] == 0.0
+        # 设置页:画质页的音量控件矩形不重叠,画一遍不崩
+        g = Game()
+        g.save = save_mod.reset_data()
+        h = g.hideout
+        rects = [h.opt_mute, h.opt_vol_try]
+        for key, _label in h.opt_vol_names:
+            rects += [h.opt_vol_minus[key], h.opt_vol_plus[key]]
+        for i in range(len(rects)):
+            for j in range(i + 1, len(rects)):
+                assert not rects[i].colliderect(rects[j]), (i, j)
+        h.opt_tab = "video"
+        h.draw(pygame.display.set_mode((SW, SH)))
+        audio.set_volumes(master=0.8, gun=1.0, ui=1.0, muted=False)
+
+    check("音量-三档分组/静音/存档往返/设置页控件", t_audio_volume)
+
+    def t_adrenaline():
+        """肾上腺素:击杀叠层 -> 加速/回血/减伤 -> 计时结束清零。"""
+        import settings
+        from game import Game
+
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        g.start_raid()
+        r = g.raid
+        p = r.player
+        base_speed = p.speed(False)
+        assert p.adren == 0 and p.adren_t == 0.0
+        # 击杀叠层(直接调方法,不依赖刷怪位置)
+        p.add_adrenaline(r)
+        assert p.adren == 1
+        assert p.speed(False) > base_speed, (p.speed(False), base_speed)
+        assert abs(p.adren_t - settings.ADRENALINE_TIME) < 1e-6
+        # 叠到上限后不再涨
+        for _ in range(6):
+            p.add_adrenaline(r)
+        assert p.adren == settings.ADRENALINE_MAX_STACK, p.adren
+        # 回血:每秒按层数回
+        p.hp = p.max_hp - 20
+        p.tick_adrenaline(1.0)
+        assert p.hp > p.max_hp - 20, p.hp
+        # 计时走完 -> 清零并回到原速
+        p.tick_adrenaline(settings.ADRENALINE_TIME + 1.0)
+        assert p.adren == 0 and p.adren_t == 0.0
+        assert abs(p.speed(False) - base_speed) < 1e-9
+        # 减伤:有层数时同样的伤害掉血更少
+        p.armor, p.helmet = None, None
+        p.adren, p.adren_t = 2, settings.ADRENALINE_TIME
+        p.hp = 100
+        p.take_damage(20, r)
+        with_adren = 100 - p.hp
+        p.adren, p.adren_t = 0, 0.0
+        p.hp = 100
+        p.take_damage(20, r)
+        without = 100 - p.hp
+        assert with_adren < without, (with_adren, without)
+
+    check("肾上腺素-击杀叠层/加速/回血/减伤/计时清零", t_adrenaline)
+
     def t_boss():
         """三张地图的头目系统:5 级甲(89/81/75%)+ 专属枪械掉落。"""
         from game import Game
@@ -2605,6 +2700,10 @@ def run():
         r8.scavs = []
         r8.allies = []
         r8.player.armor = Item("bt201")
+        # 关掉肾上腺素(击杀援兵会叠层并回血):这条用例要精确验证 C4 爆炸的伤害数值
+        r8.player.adren = 0
+        r8.player.adren_t = 0.0
+        r8.player.add_adrenaline = lambda *a, **k: 0
         cmd = next(s for s in r8.objectives if s.role == "command")
         r8.player.x, r8.player.y = cmd.x, cmd.y + 20
         r8.interact()

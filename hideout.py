@@ -191,6 +191,17 @@ class Hideout:
         self.opt_fps_toggle = pygame.Rect(772, 274, 98, 34)
         self.opt_filter_rects = [pygame.Rect(772 + i * 134, 334, 124, 34)
                                  for i in range(2)]
+        # 音量(画质页下半部分):总音量 / 枪声 / 界面 三档 + 静音 / 试听
+        self.opt_vol_names = [("master", "总音量"), ("gun", "枪声音量"),
+                              ("ui", "界面音量")]
+        self.opt_vol_minus = {}
+        self.opt_vol_plus = {}
+        for i, (key, _label) in enumerate(self.opt_vol_names):
+            vy = 392 + i * 44
+            self.opt_vol_minus[key] = pygame.Rect(772, vy, 36, 30)
+            self.opt_vol_plus[key] = pygame.Rect(946, vy, 36, 30)
+        self.opt_mute = pygame.Rect(772, 524, 88, 30)
+        self.opt_vol_try = pygame.Rect(868, 524, 88, 30)
         # +/- 改大小。原来是 44x30 —— 在手机上折算下来只有约 3mm,
         # 远小于可点中的最小尺寸(7~9mm),屏幕稍微一点就点空/点错,所以放大。
         self.opt_minus = pygame.Rect(1040, 548, 84, 52)
@@ -334,8 +345,15 @@ class Hideout:
             sd.fps_cap = 120
             sd.show_fps = True
             sd.scale_filter = "linear"
+            sd.vol_master, sd.vol_gun, sd.vol_ui = 0.8, 1.0, 1.0
+            sd.vol_muted = False
+            try:
+                import audio as _audio
+                _audio.apply_from_save(sd)
+            except Exception:
+                pass
             save_mod.save_data(sd)
-            self.say("画质设置已恢复默认(默认 120 帧上限 · 显示帧率 · 柔和)",
+            self.say("画质与音量已恢复默认(120 帧 · 显示帧率 · 柔和 · 音量 80%)",
                      COL["accent"], 3.2)
 
     def _options_update(self, dt, events):
@@ -512,6 +530,38 @@ class Hideout:
             self.opt_sel = None
             return
         if self.opt_tab == "video":
+            import audio as _audio
+            sd = self.game.save
+            # 音量:−/+ 每次 10%,静音,试听
+            vols = _audio.get_volumes()
+            for key, label in self.opt_vol_names:
+                cur = float(vols.get(key, 1.0))
+                new = None
+                if self.opt_vol_minus[key].collidepoint(pos):
+                    new = max(0.0, round(cur - 0.1, 2))
+                elif self.opt_vol_plus[key].collidepoint(pos):
+                    new = min(1.0, round(cur + 0.1, 2))
+                if new is not None:
+                    setattr(sd, "vol_" + key, new)
+                    _audio.apply_from_save(sd)
+                    save_mod.save_data(sd)
+                    if key == "gun":
+                        _audio.preview("gun")
+                    else:
+                        _audio.preview("ui")
+                    self.say(f"{label} {int(round(new * 100))}%",
+                             COL["good"], 2.0)
+                    return
+            if self.opt_mute.collidepoint(pos):
+                sd.vol_muted = not bool(getattr(sd, "vol_muted", False))
+                _audio.apply_from_save(sd)
+                save_mod.save_data(sd)
+                self.say("已静音" if sd.vol_muted else "已取消静音",
+                         COL["good"], 2.0)
+                return
+            if self.opt_vol_try.collidepoint(pos):
+                _audio.preview("gun")
+                return
             from settings import FPS_CAP_CHOICES as CHOICES
             for i, cap in enumerate(CHOICES):
                 if self.opt_fps_rects[i].collidepoint(pos):
@@ -549,7 +599,7 @@ class Hideout:
         uikit.draw_panel(screen, self._options_panel(), "设置")
         draw_button(screen, self.opt_close, "返回",
                     self.opt_close.collidepoint(mx, my), small=True)
-        t = get_font(30, bold=True).render("设置 — 键位 / 触屏 / 画质", True,
+        t = get_font(30, bold=True).render("设置 — 键位 / 触屏 / 画质与声音", True,
                                            COL["accent"])
         screen.blit(t, t.get_rect(center=(W // 2, 44)))
 
@@ -561,7 +611,7 @@ class Hideout:
         draw_button(screen, self.opt_account, "切换账号",
                     self.opt_account.collidepoint(mx, my), small=True)
 
-        labels = {"controls": "控制(键盘)", "touch": "触屏按键", "video": "画质与帧率"}
+        labels = {"controls": "控制(键盘)", "touch": "触屏按键", "video": "画质与声音"}
         for i, key in enumerate(self.opt_tab_keys):
             r = self.opt_tab_rects[i]
             sel = self.opt_tab == key
@@ -711,17 +761,47 @@ class Hideout:
             screen.blit(ft, ft.get_rect(center=r.center))
         lines = [
             "· 帧率上限:高刷屏建议 120 或不锁;发热/掉电快就退回 60",
-            "· 显示帧率:右上角实时 FPS(绿 ≥110 · 黄 ≥55 · 红更低)",
-            "· 画面缩放滤镜 = 720p 画面拉到全屏时的采样方式(重启后生效)",
-            "   柔和=平滑;锐利=最近邻(边缘更硬,可能有锯齿)",
-            "· 手机屏幕分辨率高于 720p,任何滤镜都做不到像素级清晰;",
-            "   真正清晰要按原生分辨率重做界面(后续大工程,暂不做)",
+            "· 画面缩放滤镜 = 720p 拉到全屏的采样方式(重启后生效)",
         ]
-        y = 392
+        y = 566
         for ln in lines:
             t = get_font(14).render(ln, True, COL["text_dim"])
             screen.blit(t, (548, y))
-            y += 24
+            y += 22
+
+        # ---- 音量:三档 + 静音 + 试听 ----
+        import audio as _audio
+        vols = _audio.get_volumes()
+        for key, label in self.opt_vol_names:
+            row_y = self.opt_vol_minus[key].y
+            t = f.render(label, True, COL["text"])
+            screen.blit(t, (548, row_y + 4))
+            val = int(round(float(vols.get(key, 1.0)) * 100))
+            for r, sign in ((self.opt_vol_minus[key], "−"),
+                            (self.opt_vol_plus[key], "+")):
+                hover = r.collidepoint(mx, my)
+                pygame.draw.rect(screen,
+                                 COL["panel_hi"] if hover else COL["panel"],
+                                 r, border_radius=6)
+                pygame.draw.rect(screen, COL["border"], r, 1, border_radius=6)
+                st = get_font(18, bold=True).render(sign, True, COL["text"])
+                screen.blit(st, st.get_rect(center=r.center))
+            vt = get_font(16, bold=True).render(
+                f"{val}%", True, COL["accent"] if val else COL["text_dim"])
+            screen.blit(vt, vt.get_rect(center=(878, row_y + 15)))
+        # 静音 / 试听
+        for r, label, on in ((self.opt_mute,
+                              "静音:开" if vols.get("muted") else "静音:关",
+                              bool(vols.get("muted"))),
+                             (self.opt_vol_try, "试听", False)):
+            hover = r.collidepoint(mx, my)
+            pygame.draw.rect(screen, COL["panel_hi"] if (hover or on) else COL["panel"],
+                             r, border_radius=6)
+            pygame.draw.rect(screen, COL["accent"] if on else COL["border"], r,
+                             2 if on else 1, border_radius=6)
+            ft = get_font(15, bold=True).render(
+                label, True, COL["accent"] if on else COL["text"])
+            screen.blit(ft, ft.get_rect(center=r.center))
 
     # ---- 批量出售 ----
     def sell_selected(self):

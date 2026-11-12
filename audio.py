@@ -11,6 +11,74 @@ SR = 44100
 _enabled = False
 _snd = {}
 
+# ---------- 音量(仿合并版:总音量 / 枪声 / 界面 三档 + 静音) ----------
+VOL_DEFAULT = {"master": 0.8, "gun": 1.0, "ui": 1.0}
+# 音效分组:枪声类吃「枪声」音量,其余(打药/拾取/界面/受击)吃「界面」音量
+SFX_GROUP = {
+    "pm": "gun", "sg": "gun", "ar": "gun", "mp5": "gun",
+    "epm": "gun", "esg": "gun", "ear": "gun", "reload": "gun", "empty": "gun",
+    "hit": "ui", "hurt": "ui", "pickup": "ui", "heal": "ui",
+    "extract": "ui", "death": "ui", "click": "ui", "kill": "ui",
+}
+_vol = dict(VOL_DEFAULT)
+_muted = False
+
+
+def _clamp01(v):
+    try:
+        return max(0.0, min(1.0, float(v)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def set_volumes(master=None, gun=None, ui=None, muted=None):
+    """改音量;只传要改的那几项。返回改完的快照。"""
+    global _muted
+    if master is not None:
+        _vol["master"] = _clamp01(master)
+    if gun is not None:
+        _vol["gun"] = _clamp01(gun)
+    if ui is not None:
+        _vol["ui"] = _clamp01(ui)
+    if muted is not None:
+        _muted = bool(muted)
+    return get_volumes()
+
+
+def get_volumes():
+    d = dict(_vol)
+    d["muted"] = _muted
+    return d
+
+
+def apply_from_save(sd):
+    """把存档里的音量设置套上(启动/读档/保存并应用时调)。"""
+    if sd is None:
+        return get_volumes()
+    return set_volumes(
+        master=getattr(sd, "vol_master", VOL_DEFAULT["master"]),
+        gun=getattr(sd, "vol_gun", VOL_DEFAULT["gun"]),
+        ui=getattr(sd, "vol_ui", VOL_DEFAULT["ui"]),
+        muted=getattr(sd, "vol_muted", False))
+
+
+def effective_volume(name):
+    """某个音效此刻的最终音量(0~1)。"""
+    if _muted:
+        return 0.0
+    group = SFX_GROUP.get(name, "ui")
+    return _clamp01(_vol.get("master", 0.8) * _vol.get(group, 1.0))
+
+
+def group_of(name):
+    """这个音效属于哪一组(枪声 / 界面与提示)。"""
+    return SFX_GROUP.get(name, "ui")
+
+
+def preview(group="gun"):
+    """试听:枪声 / 界面提示音各放一个(音量页用)。"""
+    play("ar" if group == "gun" else "click")
+
 
 def _samples_to_sound(fn, dur):
     n = int(SR * dur)
@@ -78,7 +146,12 @@ def _build():
 
 def play(name):
     if _enabled and name in _snd:
+        v = effective_volume(name)
+        if v <= 0.0:
+            return
         try:
-            _snd[name].play()
+            s = _snd[name]
+            s.set_volume(min(1.0, v))
+            s.play()
         except Exception:
             pass
