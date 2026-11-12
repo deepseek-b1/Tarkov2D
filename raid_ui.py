@@ -1241,6 +1241,29 @@ def _draw_hud(raid, screen):
         f = get_font(15, bold=True)
         t = f.render(f"HP {int(p.hp)}/{p.max_hp}", True, (255, 255, 255))
         screen.blit(t, t.get_rect(center=hp_r.center))
+
+        # 装备位 1-4:数字键切换,常驻显示(空位画灰)
+        try:
+            from settings import LOADOUT_SLOTS, loadout_get
+            _sd = raid.game.save
+            _cur = getattr(p, "cur_slot", "main1")
+            for _i, _s in enumerate(LOADOUT_SLOTS):
+                _w = loadout_get(_sd, _s)
+                _r = pygame.Rect(300 + _i * 96, H - 74, 90, 30)
+                _on = (_cur == _s)
+                pygame.draw.rect(screen, COL["panel_hi"] if _on else COL["panel"],
+                                 _r, border_radius=5)
+                pygame.draw.rect(screen, COL["accent"] if _on else COL["border"],
+                                 _r, 2 if _on else 1, border_radius=5)
+                _nm = _w.name if _w is not None else "空"
+                if len(_nm) > 6:
+                    _nm = _nm[:5] + "…"
+                _t = get_font(12, bold=True).render(
+                    "%d %s" % (_i + 1, _nm), True,
+                    COL["accent"] if _on else COL["text_dim"])
+                screen.blit(_t, _t.get_rect(center=_r.center))
+        except Exception:
+            pass
         if p.armor is not None:
             ad = p.armor.def_
             txt = f"护甲:{p.armor.name}"
