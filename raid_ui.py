@@ -1544,7 +1544,7 @@ def _draw_hud(raid, screen):
             need = raid.channel_need()
             label = raid.channel_label()
             prompt = f"{label}…{int(min(1.0, raid.channel['t'] / need) * 100)}%"
-        if prompt is None and raid.mode in ("hostage", "assault", "story"):
+        if prompt is None and raid.mode in ("hostage", "assault", "story", "explore"):
             kind, _ent = raid.nearest_interactable()
             if kind == "rescue":
                 prompt = f"{ik}  解救人质"
@@ -1554,6 +1554,8 @@ def _draw_hud(raid, screen):
                 prompt = f"{ik}  安放炸药(摧毁设施)"
             elif kind == "supply":
                 prompt = f"{ik}  补充弹药(弹药库)"
+            elif kind == "stairs":
+                prompt = f"{ik}  {_ent.name}"
             elif kind == "story":
                 o = _ent.obj
                 if o is None or o["kind"] == "talk":

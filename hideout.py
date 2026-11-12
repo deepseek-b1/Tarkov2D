@@ -99,7 +99,7 @@ class Hideout:
             row, col = divmod(i, 3)
             self.map_rects.append(pygame.Rect(
                 sp.x + 18 + col * 100, sp.y + 62 + row * 34, 92, 30))
-        # 3 种模式:整排居中,单个按钮加宽到 64px
+        # 4 种模式:整排居中,单个按钮 64px
         _mw, _mg, _mn = 64, 8, max(1, len(MODE_ORDER))
         _mtotal = _mw * _mn + _mg * (_mn - 1)
         _mx0 = sp.x + max(0, (sp.w - _mtotal) // 2)
@@ -2231,17 +2231,13 @@ class Hideout:
         lay = self.lay
         audio.play("click")
 
-        # 地图选择(人质大楼/大本营/卡斯卡德 = 专用模式地图)
+        # 地图选择(大本营 = 专用模式地图;其余是常规搜打撤地图)
         for i, key in enumerate(MAP_ORDER):
             if self.map_rects[i].collidepoint(pos):
                 sd.map_key = key
-                if key == "indoor":
-                    sd.mode = "hostage"
-                elif key == "base":
+                if key == "base":
                     sd.mode = "assault"
-                elif key == "city":
-                    sd.mode = "story"
-                elif sd.mode in ("hostage", "assault", "story"):
+                elif sd.mode in ("assault", "explore"):
                     sd.mode = "raid"
                 save_mod.save_data(sd)
                 self.say(f"出战地图已设为「{MAPS[key]['name']}」:{MAPS[key]['desc']}",
@@ -2255,6 +2251,8 @@ class Hideout:
                 forced = MODE_MAP.get(key)
                 if forced:
                     sd.map_key = forced
+                elif sd.map_key not in MAP_ORDER:
+                    sd.map_key = "border"      # 从探索模式退出来:别把楼层图当常规图
                 save_mod.save_data(sd)
                 self.say(f"模式已设为「{MODES[key]['name']}」:{MODES[key]['desc']}",
                          COL["accent"], ttl=3.2)
@@ -2282,7 +2280,7 @@ class Hideout:
         if self._net_click(pos):
             return
 
-        # 难度选择(突袭/人质/剧情是固定强度,没有难度档)
+        # 难度选择(突袭/探索/夜战是固定强度,没有难度档)
         if sd.mode in ("assault", "story") or sd.mode in MODE_DIFF:
             fixed_txt = ("突袭模式是固定强度,不适用难度档(系统会配发满配装备)"
                          if sd.mode == "assault" else
@@ -2290,6 +2288,8 @@ class Hideout:
                          if sd.mode == "story" else
                          "黑暗行动默认强化封锁(漆黑里再放水就没意思了),不适用难度档"
                          if sd.mode == "night" else
+                         "探索模式固定为封锁强度(逐层打上去,不额外放水)"
+                         if sd.mode == "explore" else
                          "人质解救固定为强化封锁强度,不适用难度档")
             for r in self.diff_rects:
                 if r.collidepoint(pos):
@@ -2871,7 +2871,12 @@ class Hideout:
         draw_choice(self.map_rects, MAP_ORDER,
                     {k: MAPS[k].get("short", MAPS[k]["name"]) for k in MAP_ORDER},
                     sd.map_key)
-        t = get_font(13).render(MAPS[sd.map_key]["desc"], True, COL["text_dim"])
+        # 探索模式固定用楼层图,别把「1F 大厅」当成常规出战地图来读
+        if sd.mode == "explore":
+            map_desc = "探索模式固定:常务公司六层大楼(1F→6F 走楼梯)"
+        else:
+            map_desc = MAPS[sd.map_key]["desc"]
+        t = get_font(13).render(map_desc, True, COL["text_dim"])
         screen.blit(t, (sp.x + 18, sp.y + 132))
 
         t = get_font(17, bold=True).render("游戏模式", True, COL["accent"])
@@ -2902,6 +2907,9 @@ class Hideout:
         if sd.mode == "assault":
             fixed_lines = ("突袭模式为固定强度(不适用难度档)",
                            "系统随机配发满配高级装备,战后回收")
+        elif sd.mode == "explore":
+            fixed_lines = ("探索模式固定为封锁强度(不适用难度档)",
+                           "每层东北角是楼梯间,按交互键上下楼")
         elif sd.mode in MODE_DIFF:
             if sd.mode == "night":
                 fixed_lines = ("黑暗行动:全图漆黑,只有光源范围可见 ——",

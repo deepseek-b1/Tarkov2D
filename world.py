@@ -17,7 +17,7 @@ _LOOT_LETTER = {"C": "crate", "M": "med", "G": "gun", "V": "val"}
 _SCAV_LETTER = {"p": "pistol", "g": "shotgun", "r": "ar", "m": "melee"}
 _SPECIAL = ("S", "1", "2", "3", "4", "5", "6", "7",
             "X", "Y", "Z", "H", "T", "c",
-            "O", "P", "Q", "o", "q", "A", "N", "K")
+            "O", "P", "Q", "o", "q", "A", "N", "K", "U", "D")
 
 _INF = float("inf")
 _RAY_DIRS = {}
@@ -165,6 +165,8 @@ class GameMap:
         self.story_npcs = []       # [(x, y)] 剧情 NPC 站位(身份由 story.py 按坐标认领)
         self.story_points = []     # [(x, y)] 剧情交互点(搜索/下载/取得/炸药…)同理由坐标认领
         self.corners = []          # [(x, y)] 拐角死角(敌人偏好蹲守)
+        self.stairs_up = []        # [(x, y)] 上楼口(探索模式:常务公司)
+        self.stairs_down = []      # [(x, y)] 下楼口
         self.spawn = None          # (x, y) 像素坐标
 
         for ty, row in enumerate(rows):
@@ -246,6 +248,10 @@ class GameMap:
                     self.story_points.append((cx, cy))
                 elif ch == "S":
                     self.spawn = (cx, cy)
+                elif ch == "U":
+                    self.stairs_up.append((cx, cy))
+                elif ch == "D":
+                    self.stairs_down.append((cx, cy))
                 elif ch in ("1", "2", "3", "4", "5", "6", "7"):
                     r = pygame.Rect(0, 0, TILE * 3, TILE * 3)
                     r.center = (cx, cy)
@@ -552,6 +558,40 @@ class GameMap:
             if f:
                 t = f.render(name, True, COL["extract"])
                 surf.blit(t, t.get_rect(center=(r.centerx, r.y - 10)))
+        # 地图装饰(MAPS[key]["deco"]):画在撤离标记之后,停机坪的 H 才不会被盖住
+        for deco in MAPS[self.map_key].get("deco", ()):
+            if deco[0] == "circle":
+                _, tx, ty, trad, dcol, dw = deco
+                pygame.draw.circle(surf, dcol,
+                                   (tx * TILE + TILE // 2, ty * TILE + TILE // 2),
+                                   int(trad * TILE), dw)
+            elif deco[0] == "text":
+                _, tx, ty, txt, dcol, dsize = deco
+                try:
+                    from settings import get_font as _gf
+                    dt = _gf(dsize, bold=True).render(txt, True, dcol)
+                    surf.blit(dt, dt.get_rect(center=(tx * TILE + TILE // 2,
+                                                      ty * TILE + TILE // 2)))
+                except Exception:
+                    pass
+        # 楼梯口(探索模式):画台阶 + 「上楼/下楼」,否则玩家在图上找不到楼梯
+        for pts, is_up in ((self.stairs_up, True), (self.stairs_down, False)):
+            for (sx, sy) in pts:
+                r = pygame.Rect(0, 0, TILE * 2, TILE * 2)
+                r.center = (sx, sy)
+                pygame.draw.rect(surf, (52, 56, 70), r, border_radius=4)
+                pygame.draw.rect(surf, (168, 176, 200), r, 2, border_radius=4)
+                for i in range(3):
+                    y0 = r.bottom - 6 - i * 7
+                    pygame.draw.line(surf, (168, 176, 200),
+                                     (r.x + 5, y0), (r.right - 5, y0), 2)
+                try:
+                    from settings import get_font as _gf
+                    t = _gf(13, bold=True).render(
+                        "上楼" if is_up else "下楼", True, (235, 225, 180))
+                    surf.blit(t, t.get_rect(center=(sx, r.y + 10)))
+                except Exception:
+                    pass
         _PRERENDER_CACHE[self.map_key] = surf
         while len(_PRERENDER_CACHE) > _PRERENDER_MAX:
             _PRERENDER_CACHE.pop(next(iter(_PRERENDER_CACHE)))

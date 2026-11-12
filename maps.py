@@ -671,6 +671,316 @@ def build_city():
     return ["".join(r) for r in g]
 
 
+# ---------- 探索模式「常务公司」:一栋六层大楼,一层一张图 ----------
+# 每层都是 60×44;楼梯间固定在东北角(x48..58 / y2..10),U=上楼、D=下楼。
+# world.py 把 U/D 解析成 stairs_up / stairs_down,raid.py 在楼梯口按交互键换层;
+# 换层时本层的敌人与箱子状态原样保留(见 Raid._save_floor_state)。
+TOWER_FLOOR_INFO = {
+    1: ("1F 大厅", "正门大堂 · 前台安检 · 通往电梯与楼梯"),
+    2: ("2F 办公区", "十六间办公室 · 工位阵"),
+    3: ("3F 实验室", "长实验台 · 玻璃隔断 · 样本库"),
+    4: ("4F 服务器房", "机柜阵列 · 窄巷道"),
+    5: ("5F 高管层", "高管办公室 · 会议室 · 保险箱"),
+    6: ("6F 天台", "停机坪撤离点 · 空调机组"),
+}
+TOWER_FLOORS = tuple(sorted(TOWER_FLOOR_INFO))
+TOWER_FLOOR_MAP = {n: "tower_f%d" % n for n in TOWER_FLOORS}
+TOWER_FLOOR_NAME = {n: TOWER_FLOOR_INFO[n][0] for n in TOWER_FLOORS}
+
+
+def _tower_stairwell(put, outline, fill, up, down, spawn=False):
+    """东北角楼梯间:U 上楼、D 下楼,spawn=True 时在屋里放到达点。"""
+    outline(48, 2, 58, 10)
+    fill(49, 3, 57, 9, "B")
+    put(48, 6, "B")                     # 门(朝西开向楼层)
+    if down:
+        put(50, 4, "D")
+    if up:
+        put(50, 8, "U")
+    if spawn:
+        put(54, 6, "S")
+
+
+def build_tower_f1():
+    """1F 大厅:正门进出(撤离点)、前台、会议区、安保室、咖啡吧。"""
+    g = _grid()
+    put, hline, vline, outline, fill = _helpers(g)
+
+    outline(0, 0, 59, 43)
+    fill(1, 1, 58, 42, "B")
+
+    # 正门(南墙开两格)与前台安检通道
+    put(29, 43, "B"); put(30, 43, "B")
+    hline(20, 39, 12, "#")
+    put(29, 12, "B"); put(30, 12, "B")
+
+    # 西北会议区
+    outline(2, 2, 17, 9); fill(3, 3, 16, 8, "B")
+    put(17, 5, "B")
+    vline(9, 3, 8, "#"); put(9, 5, "B")
+
+    # 东北安保室
+    outline(20, 2, 39, 9); fill(21, 3, 38, 8, "B"); put(28, 9, "B")
+
+    # 西侧电梯井(实心)与大厅立柱
+    fill(3, 20, 8, 27, "#")
+    for x in (14, 22, 34, 42):
+        for y in (18, 26, 34):
+            put(x, y, "#")
+
+    # 东南咖啡吧
+    outline(40, 24, 56, 38); fill(41, 25, 55, 37, "B")
+    put(40, 30, "B"); put(48, 24, "B")
+    put(44, 28, "#"); put(46, 29, "#"); put(52, 34, "#")
+
+    # 楼梯间(只有上行)、出生点、正门撤离点
+    _tower_stairwell(put, outline, fill, True, False)
+    put(29, 37, "S")
+    put(29, 40, "1")
+
+    for x, y in [(5, 4), (12, 5), (24, 4), (35, 4), (44, 8),
+                 (8, 17), (17, 30), (52, 28)]:
+        put(x, y, "C")
+    for x, y in [(7, 7), (33, 7), (50, 36)]:
+        put(x, y, "M")
+    for x, y in [(23, 4), (12, 24)]:
+        put(x, y, "G")
+    for x, y in [(15, 7), (36, 7), (53, 26), (12, 36)]:
+        put(x, y, "V")
+
+    for x, y, k in [(6, 6, "p"), (13, 7, "g"), (25, 6, "r"), (34, 6, "r"),
+                    (43, 7, "r"), (10, 16, "p"), (20, 20, "r"), (30, 22, "r"),
+                    (40, 20, "g"), (18, 34, "r"), (26, 32, "g"), (36, 30, "r"),
+                    (45, 33, "r")]:
+        put(x, y, k)
+
+    return ["".join(r) for r in g]
+
+
+def build_tower_f2():
+    """2F 办公区:北侧开放工位 + 十六间办公室(4 列 × 3 行)。"""
+    g = _grid()
+    put, hline, vline, outline, fill = _helpers(g)
+
+    outline(0, 0, 59, 43)
+    fill(1, 1, 58, 42, "B")
+
+    # 北侧开放工位:隔断小格
+    for x in range(4, 45, 6):
+        for y in (3, 6, 9):
+            put(x, y, "#")
+            put(x + 1, y, "#")
+
+    # 十六间办公室:上下各开一门通走廊
+    for cy in (14, 24, 34):
+        for cx in (3, 13, 23, 33):
+            outline(cx, cy, cx + 8, cy + 8)
+            fill(cx + 1, cy + 1, cx + 7, cy + 7, "B")
+            put(cx + 4, cy, "B")
+            if cy + 9 < 43:
+                put(cx + 4, cy + 8, "B")
+
+    _tower_stairwell(put, outline, fill, True, True, True)
+
+    for x, y in [(7, 5), (19, 8), (30, 4), (40, 6),
+                 (5, 17), (17, 27), (27, 37), (37, 17)]:
+        put(x, y, "C")
+    for x, y in [(25, 7), (44, 36)]:
+        put(x, y, "M")
+    for x, y in [(11, 5), (35, 37)]:
+        put(x, y, "G")
+    for x, y in [(6, 27), (29, 17), (39, 27)]:
+        put(x, y, "V")
+
+    for x, y, k in [(6, 4, "g"), (16, 8, "p"), (28, 4, "r"), (38, 8, "r"),
+                    (45, 4, "p"), (6, 17, "r"), (16, 19, "g"), (26, 27, "r"),
+                    (36, 19, "r"), (8, 37, "r"), (28, 37, "g"), (38, 37, "r")]:
+        put(x, y, k)
+
+    return ["".join(r) for r in g]
+
+
+def build_tower_f3():
+    """3F 实验室:两间大实验区 + 样本库最肥(保险箱密集)。"""
+    g = _grid()
+    put, hline, vline, outline, fill = _helpers(g)
+
+    outline(0, 0, 59, 43)
+    fill(1, 1, 58, 42, "B")
+
+    # 北侧:休息室(西)/ 更衣室(东)
+    outline(2, 2, 20, 9); fill(3, 3, 19, 8, "B"); put(11, 9, "B")
+    outline(24, 2, 42, 9); fill(25, 3, 41, 8, "B"); put(33, 9, "B")
+    vline(13, 3, 8, "#"); put(17, 3, "#")
+
+    # 西实验区 / 东实验区
+    outline(2, 12, 26, 30); fill(3, 13, 25, 29, "B")
+    outline(34, 12, 57, 30); fill(35, 13, 56, 29, "B")
+
+    # 实验台(靠墙长桌,中间留过道)
+    for y in (15, 19, 23, 27):
+        hline(4, 15, y, "#")
+        hline(37, 54, y, "#")
+
+    # 玻璃隔断
+    vline(19, 13, 29, "#"); put(19, 16, "B"); put(19, 25, "B")
+    vline(47, 13, 29, "#"); put(47, 19, "B")
+
+    # 实验区 <-> 中央走廊的门
+    put(26, 17, "B"); put(26, 24, "B")
+    put(34, 17, "B"); put(34, 24, "B")
+
+    # 南侧:样本库(西)/ 机房(东)
+    outline(4, 33, 24, 41); fill(5, 34, 23, 40, "B"); put(14, 33, "B")
+    outline(30, 33, 50, 41); fill(31, 34, 49, 40, "B"); put(40, 33, "B")
+
+    _tower_stairwell(put, outline, fill, True, True, True)
+
+    for x, y in [(6, 5), (30, 6), (10, 31), (44, 31)]:
+        put(x, y, "C")
+    for x, y in [(10, 5), (38, 5), (20, 17), (50, 20)]:
+        put(x, y, "M")
+    for x, y in [(36, 5), (22, 36)]:
+        put(x, y, "G")
+    for x, y in [(8, 36), (20, 37), (46, 36), (52, 36), (40, 18)]:
+        put(x, y, "V")
+
+    for x, y, k in [(16, 5, "g"), (36, 7, "r"), (8, 16, "p"), (16, 21, "r"),
+                    (22, 26, "g"), (42, 16, "r"), (52, 21, "r"), (50, 26, "g"),
+                    (10, 36, "r"), (22, 38, "r"), (36, 36, "r"), (46, 38, "g"),
+                    (30, 20, "r")]:
+        put(x, y, k)
+
+    return ["".join(r) for r in g]
+
+
+def build_tower_f4():
+    """4F 服务器房:左右两组机柜阵列 + 中央走线通道。"""
+    g = _grid()
+    put, hline, vline, outline, fill = _helpers(g)
+
+    outline(0, 0, 59, 43)
+    fill(1, 1, 58, 42, "B")
+
+    # 机柜阵列:每排一组,中间留过道口,排与排之间是横向巷道
+    #   (东组只铺到 x46,给楼梯间门口留出 x47..58 的东侧走道)
+    for y in range(6, 40, 4):
+        hline(4, 22, y, "#"); put(13, y, "B")
+        hline(34, 46, y, "#"); put(43, y, "B")
+
+    _tower_stairwell(put, outline, fill, True, True, True)
+
+    for x, y in [(8, 5), (28, 5), (46, 5)]:
+        put(x, y, "C")
+    for x, y in [(18, 5), (40, 5), (24, 20)]:
+        put(x, y, "M")
+    for x, y in [(12, 20), (48, 28)]:
+        put(x, y, "G")
+    for x, y in [(16, 12), (30, 16), (44, 28), (20, 32)]:
+        put(x, y, "V")
+
+    for x, y, k in [(10, 8, "r"), (30, 8, "r"), (46, 8, "r"), (18, 16, "g"),
+                    (40, 16, "r"), (12, 26, "r"), (48, 26, "r"), (26, 32, "g"),
+                    (36, 36, "r"), (14, 36, "p"), (50, 36, "r")]:
+        put(x, y, k)
+
+    return ["".join(r) for r in g]
+
+
+def build_tower_f5():
+    """5F 高管层:高管办公室、大会议室、董事长室(保险箱最密)。"""
+    g = _grid()
+    put, hline, vline, outline, fill = _helpers(g)
+
+    outline(0, 0, 59, 43)
+    fill(1, 1, 58, 42, "B")
+
+    # 北侧两间高管办公室
+    outline(3, 2, 20, 12); fill(4, 3, 19, 11, "B"); put(20, 7, "B")
+    vline(11, 3, 11, "#"); put(11, 7, "B")
+    outline(24, 2, 41, 12); fill(25, 3, 40, 11, "B"); put(24, 7, "B")
+
+    # 大会议室(长桌实心,绕桌走)
+    outline(18, 16, 46, 30); fill(19, 17, 45, 29, "B")
+    put(32, 16, "B"); put(32, 30, "B")
+    fill(26, 20, 38, 26, "#")
+
+    # 董事长办公室
+    outline(48, 14, 58, 30); fill(49, 15, 57, 29, "B"); put(48, 22, "B")
+
+    # 南侧:接待区 / 档案室
+    outline(6, 33, 26, 41); fill(7, 34, 25, 40, "B"); put(16, 33, "B")
+    outline(30, 33, 50, 41); fill(31, 34, 49, 40, "B"); put(40, 33, "B")
+
+    _tower_stairwell(put, outline, fill, True, True, True)
+
+    for x, y in [(8, 6), (30, 5), (50, 20), (20, 36)]:
+        put(x, y, "C")
+    for x, y in [(16, 6), (36, 6), (44, 36)]:
+        put(x, y, "M")
+    for x, y in [(6, 36), (52, 26)]:
+        put(x, y, "G")
+    for x, y in [(12, 6), (34, 5), (54, 18), (54, 28), (10, 38), (24, 38)]:
+        put(x, y, "V")
+
+    for x, y, k in [(6, 6, "g"), (16, 8, "r"), (30, 7, "r"), (38, 8, "g"),
+                    (52, 20, "r"), (22, 20, "r"), (40, 20, "r"), (28, 36, "r"),
+                    (46, 36, "r"), (12, 38, "r"), (52, 30, "p")]:
+        put(x, y, k)
+
+    return ["".join(r) for r in g]
+
+
+def build_tower_f6():
+    """6F 天台:停机坪(撤离点)+ 空调机组 + 电梯机房,最后一层。"""
+    g = _grid()
+    put, hline, vline, outline, fill = _helpers(g)
+
+    outline(0, 0, 59, 43)
+    fill(1, 1, 58, 42, "B")
+
+    # 电梯机房
+    outline(3, 2, 14, 9); fill(4, 3, 13, 8, "B"); put(14, 6, "B")
+
+    # 空调机组 / 水箱(实心,不堵主通道)
+    for x, y in [(8, 14), (9, 14), (8, 15), (9, 15),
+                 (44, 14), (45, 14), (44, 15), (45, 15),
+                 (12, 34), (13, 34), (12, 35), (13, 35),
+                 (46, 34), (47, 34), (46, 35), (47, 35)]:
+        put(x, y, "#")
+
+    # 停机坪:撤离区画在正中(下楼走东北楼梯间)
+    put(30, 22, "1")
+    _tower_stairwell(put, outline, fill, False, True, True)
+
+    for x, y in [(10, 20), (40, 20), (20, 38), (44, 38)]:
+        put(x, y, "C")
+    for x, y in [(6, 6), (30, 30)]:
+        put(x, y, "M")
+    for x, y in [(18, 10), (50, 20)]:
+        put(x, y, "G")
+    for x, y in [(36, 10), (24, 36)]:
+        put(x, y, "V")
+
+    for x, y, k in [(10, 10, "r"), (20, 10, "r"), (40, 10, "r"), (50, 10, "r"),
+                    (10, 24, "g"), (20, 30, "r"), (40, 30, "r"), (30, 36, "r"),
+                    (50, 30, "g"), (6, 20, "p")]:
+        put(x, y, k)
+
+    return ["".join(r) for r in g]
+
+
+_TOWER_BUILDERS = {
+    1: build_tower_f1, 2: build_tower_f2, 3: build_tower_f3,
+    4: build_tower_f4, 5: build_tower_f5, 6: build_tower_f6,
+}
+
+
+def build_tower(floor):
+    """按楼层号(1~6)生成那一层的瓦片图。"""
+    return _TOWER_BUILDERS[int(floor)]()
+
+
 # 地图定义:名称 / 行数据 / 撤离点名 / 对应头目
 MAPS = {
     "border": dict(name="边境军事基地", short="军事基地", rows=build_border(),
@@ -693,5 +1003,24 @@ MAPS = {
                  desc="要塞攻坚 · 50 名守军 · 系统配发满配装备"),
 }
 MAP_ORDER = ["border", "tv", "port", "base"]
-# 模式对应地图(人质→室内大楼,突袭→大本营,剧情→卡斯卡德-7 城区)
-MODE_MAP = {"raid": None, "assault": "base", "story": "city"}
+
+# 探索模式的六层(不进 MAP_ORDER:那张地图选择器只放常规图,
+# 探索楼层由模式强制指定,见 MODE_MAP)
+for _n in TOWER_FLOORS:
+    MAPS[TOWER_FLOOR_MAP[_n]] = dict(
+        name="常务公司·" + TOWER_FLOOR_NAME[_n],
+        short=TOWER_FLOOR_NAME[_n],
+        rows=build_tower(_n),
+        extracts=({"1": "正门"} if _n == 1 else
+                  {"1": "天台停机坪"} if _n == 6 else {}),
+        desc=TOWER_FLOOR_INFO[_n][1],
+        floor=_n,
+        # 6F 天台:停机坪画一个白圈 + H(纯装饰,不挡路)
+        deco=((("circle", 30, 22, 5.5, (206, 210, 220), 4),
+               ("circle", 30, 22, 3.2, (206, 210, 220), 3),
+               ("text", 30, 22, "H", (222, 226, 236), 52))
+              if _n == 6 else ()))
+del _n
+
+# 模式对应地图(突袭→大本营,探索→常务公司 1F;其余用玩家选的地图)
+MODE_MAP = {"raid": None, "assault": "base", "explore": TOWER_FLOOR_MAP[1]}

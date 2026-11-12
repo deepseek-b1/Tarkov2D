@@ -107,6 +107,9 @@ class Game:
         self.story_issued = []
         # 局域网联机:None / "host"(本机跑模拟)/ "client"(镜像主机)
         self.lan_role = None
+        # 探索模式:当前楼层(1~6)与本局各层状态缓存(换层保状态,见 raid.py)
+        self.explore_floor = 1
+        self._explore_cache = {}
         self.net = net_mod.Net(self)
         self._prewarm_map()
         self._lan_from_argv()
@@ -175,6 +178,10 @@ class Game:
     def start_raid(self):
         import raid as raid_mod
         self.story_issued = []
+        if getattr(self.save, "mode", "raid") == "explore":
+            # 探索模式每局都从 1F 进楼,上一局的楼层状态不跨局
+            self.explore_floor = 1
+            self._explore_cache = {}
         if self.is_assault():
             # 突袭:系统强制配发一套随机满配的高级装备(战后回收,不动仓库)
             self.assault_snap = assault.issue(self.save)

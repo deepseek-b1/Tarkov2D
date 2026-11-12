@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Tarkov2D 全局配置:常量、物品定义、地图、拾荒者定义。"""
 import os
 
@@ -7,7 +7,7 @@ import pygame
 from inventory import Item      # 装备位里的武器要在槽之间搬(inventory 不反向依赖本模块)
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.13.20"
+GAME_VERSION = "2.13.21"
 # 更新清单地址(留空则只认 EXE 同目录的 version.json)。
 # 默认指向仓库里的 update_server/version.json —— 推到 main 就生效,不用再发服务器。
 # 也可以换成本机自建服务器(如 http://127.0.0.1:8765/version.json)。
@@ -626,8 +626,9 @@ def quality_index(iid_or_def):
     return _QUALITY_INDEX.get(item_quality(iid_or_def)[0], 0)
 
 
-# ---------- 地图(三张地图见 maps.py) ----------
-from maps import MAPS, MAP_ORDER, MODE_MAP, MAP_W, MAP_H
+# ---------- 地图(常规四张 + 探索模式六层,见 maps.py) ----------
+from maps import (MAPS, MAP_ORDER, MODE_MAP, MAP_W, MAP_H,
+                  TOWER_FLOORS, TOWER_FLOOR_MAP, TOWER_FLOOR_NAME)
 
 MW, MH = MAP_W, MAP_H
 MAP_ROWS = MAPS["border"]["rows"]      # 兼容:默认地图行数据
@@ -1830,10 +1831,16 @@ def fire_mode_name(mode):
 MODES = {
     "raid": dict(name="搜打撤", short="搜打撤", desc="自由搜刮 · 找撤离点撤离"),
     "assault": dict(name="突袭", short="突袭", desc="强攻敌巢 · 50 守军 · 友军空袭支援"),
+    "explore": dict(name="探索", short="探索",
+                    desc="六层大楼 · 楼梯逐层打 · 天台撤离"),
     "night": dict(name="黑暗行动", short="夜战",
                   desc="漆黑一片 · 要自带光源 · 默认强化封锁"),
 }
-MODE_ORDER = ["raid", "assault", "night"]
+MODE_ORDER = ["raid", "assault", "explore", "night"]
+
+# ---------- 探索模式(常务公司六层大楼) ----------
+# 楼层图与楼梯坐标在 maps.py(TOWER_*);这里只放玩法参数。
+EXPLORE_STAIR_RANGE = 64     # 站在楼梯口多近能按交互键上下楼(像素)
 
 # ---------- 黑暗模式(夜战) ----------
 # 全图压成漆黑:只有「光源范围」内能看见东西(敌人也只有亮区里才显示)。
@@ -1932,8 +1939,8 @@ SUPPORT = {
 }
 
 # ---------- 固定强度的模式(不给难度档) ----------
-# 人质解救 = 强化封锁强度;夜战 = 强化封锁(用户要求:太亮/太简单就没意思)
-MODE_DIFF = {"assault": "hardened", "night": "hardened"}
+# 探索 = 封锁强度(要逐层打上去,不能太肥);夜战 = 强化封锁
+MODE_DIFF = {"assault": "hardened", "night": "hardened", "explore": "lockdown"}
 
 # ---------- 双人合作(同一台电脑两人玩,见 coop.py) ----------
 # P2 只用键盘:方向键移动 + 自动瞄准最近可见敌人,其余是动作键。这些键由 P2

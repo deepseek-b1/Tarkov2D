@@ -6306,6 +6306,148 @@ def run():
 
     check("局域网 4 人-三客户端握手/各自驱动/镜像/掉线释放", t_lan4)
 
+    def t_explore():
+        """探索模式「常务公司」:六层地图 / 楼梯上下 / 楼层状态保留 / 天台撤离。"""
+        from game import Game
+        from world import GameMap
+        from settings import (W as SW, H as SH, MAPS as _MAPS, MAP_ORDER,
+                              MODES, MODE_ORDER, MODE_MAP, MODE_DIFF,
+                              TOWER_FLOORS, TOWER_FLOOR_MAP, TOWER_FLOOR_NAME,
+                              EXPLORE_STAIR_RANGE, EXTRACT_TIME)
+
+        # 1) 模式与地图接线:4 个模式、探索固定进 1F、六层各一张图
+        assert "explore" in MODES and "explore" in MODE_ORDER, MODE_ORDER
+        assert MODES["explore"].get("short"), MODES["explore"]
+        assert MODE_MAP.get("explore") == "tower_f1", MODE_MAP
+        assert MODE_DIFF.get("explore") == "lockdown", MODE_DIFF
+        assert list(TOWER_FLOORS) == [1, 2, 3, 4, 5, 6], TOWER_FLOORS
+        rows_all = []
+        for n in TOWER_FLOORS:
+            key = TOWER_FLOOR_MAP[n]
+            assert key in _MAPS, key
+            m = GameMap(key)
+            rows_all.append(tuple(_MAPS[key]["rows"]))
+            assert _MAPS[key].get("floor") == n
+            assert m.spawn is not None, (key, "缺出生点")
+            if n < 6:
+                assert m.stairs_up, (key, "缺上楼口")
+            if n > 1:
+                assert m.stairs_down, (key, "缺下楼口")
+            assert m.extracts if n in (1, 6) else not m.extracts, (key, m.extracts)
+        assert len(set(rows_all)) == 6, "六层布局必须各不相同"
+        assert GameMap("tower_f1").extracts[0][0] == "正门"
+        assert GameMap("tower_f6").extracts[0][0] == "天台停机坪"
+
+        # 2) 进楼:1F 大厅,只有上行楼梯,难度锁死在封锁档
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        g.save.mode = "explore"
+        g.start_raid()
+        r = g.raid
+        assert r.mode == "explore" and r.map_key == "tower_f1", r.map_key
+        assert r.explore_floor == 1 and r.diff_key == "lockdown"
+        assert len(r.stairs) == 1 and r.stairs[0].up, r.stairs
+        assert r.stairs[0].target == 2 and "2F" in r.stairs[0].name
+        # 出生点就在正门内侧(没被塞进撤离区里)
+        assert r.player.x > 0 and r.player.y > 0
+
+        # 3) 离楼梯很远按交互键:不该换层
+        r.player.x = r.player.x + 300
+        r.interact()
+        assert r.pending_floor is None, r.pending_floor
+
+        # 4) 站到楼梯口:提示是「上楼」,按交互键 -> 下一帧换层
+        st = r.stairs[0]
+        r.player.x, r.player.y = st.x, st.y
+        kind, ent = r.nearest_interactable()
+        assert kind == "stairs" and ent is st, (kind, ent)
+        assert math.hypot(ent.x - r.player.x, ent.y - r.player.y) < EXPLORE_STAIR_RANGE
+        r.interact()
+        assert r.pending_floor == 2, r.pending_floor
+        screen = pygame.display.set_mode((SW, SH))
+        g.draw(screen)                       # 楼梯提示 + HUD 能画
+        r.update(1 / 60, [])
+        r1 = r
+        r = g.raid
+        assert r is not r1 and r.map_key == "tower_f2" and r.explore_floor == 2
+        # 身上的东西与血量跟着走(不是换层重开一局)
+        assert r.player.weapon is r1.player.weapon
+        assert r.player.bag is r1.player.bag and r.player.safe is r1.player.safe
+        assert r.player.cur_slot == r1.player.cur_slot
+        assert r.kills == r1.kills and r.time_left == r1.time_left
+
+        # 5) 一路打上 6F:每层布局不同、每层都有上下楼
+        r.player.hp = 77
+        seen = {"tower_f1", "tower_f2"}
+        for want in (3, 4, 5, 6):
+            st = next(s for s in r.stairs if s.up)
+            r.player.x, r.player.y = st.x, st.y
+            r.interact()
+            assert r.pending_floor == want, (r.pending_floor, want)
+            r.update(1 / 60, [])
+            prev, r = r, g.raid
+            assert r.explore_floor == want and r.map_key == TOWER_FLOOR_MAP[want]
+            assert r.player.hp == 77, (want, r.player.hp)
+            # 楼层名进 HUD
+            assert TOWER_FLOOR_NAME[want] in r.map.map_name, r.map.map_name
+            seen.add(r.map_key)
+        assert seen == {TOWER_FLOOR_MAP[n] for n in TOWER_FLOORS}
+        assert not any(s.up for s in r.stairs), "6F 是顶楼,不该有上楼口"
+        g.draw(screen)                       # 天台 HUD 能画
+
+        # 6) 6F -> 5F -> 6F:楼层状态保留(箱子/敌人还是同一批对象)
+        c6, s6 = r.containers, r.scavs
+        st = next(s for s in r.stairs if not s.up)
+        r.player.x, r.player.y = st.x, st.y
+        r.interact()
+        r.update(1 / 60, [])
+        r = g.raid
+        assert r.explore_floor == 5
+        st = next(s for s in r.stairs if s.up)
+        r.player.x, r.player.y = st.x, st.y
+        r.interact()
+        r.update(1 / 60, [])
+        r = g.raid
+        assert r.explore_floor == 6
+        assert r.containers is c6 and r.scavs is s6, "回层要接着上次的敌人/箱子"
+
+        # 7) 天台停机坪撤离
+        r.scavs = []
+        name, zone = r.map.extracts[0]
+        r.player.x, r.player.y = zone.center
+        for _ in range(int((EXTRACT_TIME + 1) * 60)):
+            r.update(1 / 60, [])
+            if r.over:
+                break
+        assert r.over and r.result["kind"] == "extract", r.result
+        assert r.result["mode"] == "explore" and r.result["mission"] is True
+        assert g.save.stats["extracts"] == 1
+        g.draw(screen)                       # 结算页能画
+        # 撤离保留装备(不是突袭那种配发回收)
+        assert g.save.weapon is not None
+
+        # 8) 藏身处:4 个模式按钮不超出侧栏;探索强制换图,退回搜打撤能还原
+        g2 = Game()
+        g2.save = save_mod.reset_data()
+        h = g2.hideout
+        for rc in h.mode_rects:
+            assert rc.right <= h.lay["side_panel"].right, "模式按钮别超出侧栏"
+        h._click(h.mode_rects[MODE_ORDER.index("explore")].center)
+        assert g2.save.mode == "explore", g2.save.mode
+        assert g2.save.map_key == "tower_f1", g2.save.map_key
+        g2.draw(screen)
+        h._click(h.mode_rects[MODE_ORDER.index("raid")].center)
+        assert g2.save.mode == "raid"
+        assert g2.save.map_key in MAP_ORDER, g2.save.map_key
+        # 难度:探索是固定强度,点了只给提示
+        before = g2.save.difficulty
+        h._click(h.mode_rects[MODE_ORDER.index("explore")].center)
+        h._click(h.diff_rects[0].center)
+        assert g2.save.difficulty == before, g2.save.difficulty
+
+    check("探索模式-六层切换/楼梯/撤离", t_explore)
+
     check("键位-突袭支援(F1-F3)与切装备位(1-4)不冲突", t_key_conflict)
 
     ok = all(r[1] for r in results)

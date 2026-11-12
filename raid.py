@@ -18,6 +18,8 @@ from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       MAPS, BOSSES, GUARD_ARMOR_DROP, GUARD_ARMORS,
                       AUTHOR_BOSS, AUTHOR_MIN_DIFFICULTY, RPG_BLAST_RADIUS,
                       RPG_HALF_HP_ARMOR_LEVEL, TOUCH, MODES, MODE_MAP,
+                      TOWER_FLOORS, TOWER_FLOOR_MAP, TOWER_FLOOR_NAME,
+                      EXPLORE_STAIR_RANGE,
                       ALLY_COUNT,
                       REVIVE_TIME, INTERACT_RANGE, ALLY_DMG,
                       ASSAULT_ENEMIES, ASSAULT_ALLIES, ASSAULT_PLANT_TIME,
@@ -127,6 +129,21 @@ class SupplyPoint:
         self.x, self.y = x, y
         self.r = 20
         self.cd = 0.0
+
+
+class StairWell:
+    """楼梯口(探索模式):站到跟前按交互键换层。"""
+
+    def __init__(self, x, y, target, label, up=True):
+        self.x, self.y = x, y
+        self.r = 20
+        self.target = target      # 目标楼层号(1~6)
+        self.label = label        # 目标楼层名,如「3F 实验室」
+        self.up = up              # True=上楼 / False=下楼
+
+    @property
+    def name(self):
+        return ("上楼 → " if self.up else "下楼 → ") + self.label
 
 
 class StoryPoint:
@@ -368,7 +385,15 @@ class Raid:
             if self.diff_key not in DIFFICULTIES:
                 self.diff_key = "lockdown"
             self.diff = DIFFICULTIES[self.diff_key]
-        map_key = MODE_MAP.get(self.mode) or getattr(game.save, "map_key", "border")
+        # 探索模式:楼层记在 game.explore_floor 上(换层时由 Raid.switch_floor 改)
+        self.explore_floor = 0
+        if self.mode == "explore":
+            self.explore_floor = int(getattr(game, "explore_floor", 1) or 1)
+            if self.explore_floor not in TOWER_FLOOR_MAP:
+                self.explore_floor = TOWER_FLOORS[0]
+            map_key = TOWER_FLOOR_MAP[self.explore_floor]
+        else:
+            map_key = MODE_MAP.get(self.mode) or getattr(game.save, "map_key", "border")
         self.map_key = map_key if map_key in MAPS else "border"
         self.boss_cfg = BOSSES.get(self.map_key)
         self.touch_mode = bool(getattr(game.save, "touch", False))
@@ -382,6 +407,9 @@ class Raid:
         self.aim_locked = None
         self.map = GameMap(self.map_key)
         self.map_surf = self.map.prerender()
+        # 楼梯口(探索模式):U/D 瓦片 -> 可交互的上下楼点
+        self.stairs = self._make_stairs() if self.mode == "explore" else []
+        self.pending_floor = None      # 交互键按下的换层请求(下一帧开头处理)
         # 剧情模式的装备由 game.start_raid 里的系统配发负责(这里只留提示清单)
         self.story_issued = list(getattr(game, "story_issued", []) or [])
         self.player = Player(game.save)
@@ -518,6 +546,8 @@ class Raid:
         self.doc_spawned = doc_spawned
         for lc in self.containers:
             self._gen_loot(lc)
+        # 探索模式:回到打过的楼层时,那层的敌人/箱子状态原样恢复
+        self._restore_floor_state()
 
         self.bullets = []
         self.particles = []
@@ -569,6 +599,13 @@ class Raid:
         if self.coop:
             self.add_toast("双人合作:配发装备 · 各自撤离(谁先撤谁那份先进仓库)· "
                            "P2 靠近箱子按交互自动搜刮", COL["good"], 9.0)
+        if self.mode == "explore":
+            self.add_toast("探索模式 · " + TOWER_FLOOR_NAME[self.explore_floor]
+                           + " —— 东北楼梯间按交互键上下楼(共 6 层)",
+                           COL["accent"], 6.5)
+            if self.explore_floor == 6:
+                self.add_toast("天台停机坪就是撤离点:站进去别动就能撤",
+                               COL["good"], 6.0)
         if self.mode == "assault":
             self.add_toast(f"任务:给 {len(self.objectives)} 座指挥设施安 C4"
                            f"(按 E 安放,{int(C4_FUSE)} 秒后起爆,爆区 ±{C4_BLAST_RADIUS})",
@@ -654,6 +691,86 @@ class Raid:
         self._aim_t = -1.0          # 辅助瞄准的下次重算时刻
         self.frame = 0              # 帧序号(远景守军按它错峰降频)
         self.view_reach2 = 1e18     # 玩家屏幕位置到四个屏幕角的最大距离²(每帧算)
+
+    # ---------- 探索模式:楼层与楼梯 ----------
+    def _make_stairs(self):
+        """把本层瓦片上的 U/D 变成可交互的楼梯口。"""
+        out = []
+        nxt = self.explore_floor + 1
+        prv = self.explore_floor - 1
+        if nxt in TOWER_FLOOR_MAP:
+            for (x, y) in self.map.stairs_up:
+                out.append(StairWell(x, y, nxt, TOWER_FLOOR_NAME[nxt], True))
+        if prv in TOWER_FLOOR_MAP:
+            for (x, y) in self.map.stairs_down:
+                out.append(StairWell(x, y, prv, TOWER_FLOOR_NAME[prv], False))
+        return out
+
+    def _explore_cache(self):
+        """跨楼层的本局状态:{楼层号: {scavs, containers, searched}}。"""
+        cache = getattr(self.game, "_explore_cache", None)
+        if cache is None:
+            cache = {}
+            self.game._explore_cache = cache
+        return cache
+
+    def _restore_floor_state(self):
+        """回到这一层:敌人、箱子(含尸体)、搜刮揭示状态都接着上次的。"""
+        if self.mode != "explore":
+            return
+        st = self._explore_cache().get(self.explore_floor)
+        if not st:
+            return
+        if st.get("scavs") is not None:
+            self.scavs = st["scavs"]
+        if st.get("containers") is not None:
+            self.containers = st["containers"]
+        if st.get("searched") is not None:
+            self.searched = st["searched"]
+
+    def _save_floor_state(self):
+        """离开这一层:把它现在的样子存起来(下一层用不着,回来时要用)。"""
+        if self.mode != "explore":
+            return
+        self._explore_cache()[self.explore_floor] = dict(
+            scavs=self.scavs, containers=self.containers, searched=self.searched)
+
+    def switch_floor(self, target):
+        """换层:玩家状态与本层敌人/物资都留着,重建一份目标楼层的战局。
+
+        为什么重建而不是就地把地图换掉:Raid 的敌人/箱子/迷雾/预渲染缓存都
+        挂在实例上,就地换一半会留下上一层的残影;重新构造一份最稳,玩家身上
+        的东西(武器/护甲/背包/保险箱/血量/时间/击杀)逐个搬过去。
+        """
+        if self.mode != "explore" or self.over:
+            return False
+        try:
+            target = int(target)
+        except (TypeError, ValueError):
+            return False
+        if target not in TOWER_FLOOR_MAP or target == self.explore_floor:
+            return False
+        old = self
+        old._save_floor_state()
+        self.game.explore_floor = target
+        new = Raid(self.game)
+        p_old, p_new = old.player, new.player
+        # 身上的东西是同一份 Item 引用:换层不该重来
+        p_new.weapon, p_new.armor = p_old.weapon, p_old.armor
+        p_new.helmet, p_new.bag, p_new.safe = p_old.helmet, p_old.bag, p_old.safe
+        for attr in ("hp", "max_hp", "adren", "adren_t", "cur_slot", "aim",
+                     "fire_cd", "burst_left", "jam_t", "reload_t",
+                     "reloading", "piloting", "hurt_flash"):
+            setattr(p_new, attr, getattr(p_old, attr))
+        new.braced = old.braced
+        # 这一局的进度接着算(时间/击杀/战利品/净收益基准)
+        new.start_value = old.start_value
+        new.kills = old.kills
+        new.loot_log = old.loot_log
+        new.time_left = old.time_left
+        new.add_toast(f"到达 {TOWER_FLOOR_NAME[target]}", COL["accent"], 3.2)
+        self.game.raid = new
+        return True
 
     # ---------- 玩家集合(单人 / 双人合作共用) ----------
     def players(self):
@@ -1294,6 +1411,10 @@ class Raid:
         """最近的扩交互对象:未解救人质 / 倒地球友 / 突袭模式要炸的指挥设施。"""
         p = self.player
         best, bd, kind = None, INTERACT_RANGE, None
+        for st in self.stairs:
+            d = math.hypot(st.x - p.x, st.y - p.y)
+            if d < EXPLORE_STAIR_RANGE and d < bd:
+                best, bd, kind = st, d, "stairs"
         for h in self.hostages:
             if h.rescued:
                 continue
@@ -1400,6 +1521,11 @@ class Raid:
             self.channel = None
             return
         kind, ent = self.nearest_interactable()
+        if kind == "stairs":
+            # 换层要重建整份战局:这里只记下请求,下一帧开头再做
+            self.pending_floor = int(ent.target)
+            audio.play("click")
+            return
         if kind == "supply":
             self.use_supply(ent)
             return
@@ -3452,6 +3578,12 @@ class Raid:
 
     # ---------- 每帧 ----------
     def update(self, dt, events):
+        # 楼梯:上一帧按下的换层请求 —— 摆在这一帧最开头(要重建整份战局)
+        if self.pending_floor is not None:
+            _target = self.pending_floor
+            self.pending_floor = None
+            self.switch_floor(_target)
+            return
         # 联机客户端:不跑模拟(世界状态由主机推过来),只读本机操作上传
         if self.lan == "client":
             self._lan_client_update(dt, events)
