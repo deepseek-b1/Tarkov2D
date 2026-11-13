@@ -3,7 +3,12 @@
 import math
 import random
 
-from settings import ALLY_HP, ALLY_RANGE, REPAIR_RANGE, TILE
+from settings import (ALLY_HP, ALLY_RANGE, REPAIR_RANGE, TILE, ITEMS,
+                      RESEARCHER_SIDE_POOL, RESEARCHER_RIFLE_POOL,
+                      RESEARCHER_SIDE_RANGE, RESEARCHER_SIDE_DMG,
+                      RESEARCHER_SIDE_CD, RESEARCHER_SIDE_SPREAD,
+                      RESEARCHER_RIFLE_RANGE, RESEARCHER_RIFLE_DMG,
+                      RESEARCHER_RIFLE_CD, RESEARCHER_RIFLE_SPREAD)
 
 # 队友选目标不必每帧做(见 Ally.nearest_enemy);0.12s 兼顾了跟枪手感与开销
 THINK_INTERVAL = 0.12
@@ -185,12 +190,65 @@ class Hostage(Walker):
 
 
 class Researcher(Hostage):
-    """探索模式的研究员:待救援时蹲在原地,救出后跟着玩家走(不还手)。"""
+    """探索模式的研究员:待救援时蹲在原地;救出后跟着玩家走,还会开枪帮你打。
 
-    def __init__(self, x, y, uid="", floor=1):
+    随身装备:一把手枪/冲锋枪(近距离)+ 随机一把突击步枪(远一点);
+    伤害按「不是战斗人员」打折,不然 13 个人就是一支军队。
+    """
+
+    def __init__(self, x, y, uid="", floor=1, side=None, rifle=None):
         super().__init__(x, y)
         self.name = "研究员"
         self.uid = uid           # 稳定编号 "<楼层>-<序号>":跨层恢复状态用
         self.floor = floor
         self.r = 10
+        self.side = side if side in ITEMS else random.choice(RESEARCHER_SIDE_POOL)
+        self.rifle = rifle if rifle in ITEMS else random.choice(RESEARCHER_RIFLE_POOL)
+        self.fire_cd = random.uniform(0.0, 0.8)
+        self.tgt = None
+        self.tgt_t = -1.0
+
+    def nearest_enemy(self, raid):
+        """最近的、自己看得见的敌人(0.35 秒缓存;最多对最近的 6 个查视线)。"""
+        if self.tgt is not None and raid.now < self.tgt_t:
+            return self.tgt
+        self.tgt_t = raid.now + 0.35
+        r2 = float(RESEARCHER_RIFLE_RANGE) ** 2
+        cands = []
+        for s in raid.scavs:
+            dx = s.x - self.x
+            dy = s.y - self.y
+            d2 = dx * dx + dy * dy
+            if d2 < r2:
+                cands.append((d2, s))
+        self.tgt = None
+        if cands:
+            cands.sort(key=_first)
+            los = raid.map.los_clear
+            for _d2, s in cands[:6]:
+                if los(self.x, self.y, s.x, s.y):
+                    self.tgt = s
+                    break
+        return self.tgt
+
+    def update(self, raid, dt):
+        if not self.rescued:
+            return
+        Hostage.update(self, raid, dt)      # 先跟着玩家走
+        self.fire_cd -= dt
+        if self.fire_cd > 0:
+            return
+        tgt = self.nearest_enemy(raid)
+        if tgt is None:
+            return
+        d = math.hypot(tgt.x - self.x, tgt.y - self.y)
+        if d <= RESEARCHER_SIDE_RANGE:
+            dmg, cd, spread = (RESEARCHER_SIDE_DMG, RESEARCHER_SIDE_CD,
+                               RESEARCHER_SIDE_SPREAD)
+        else:
+            dmg, cd, spread = (RESEARCHER_RIFLE_DMG, RESEARCHER_RIFLE_CD,
+                               RESEARCHER_RIFLE_SPREAD)
+        self.fire_cd = cd
+        self.aim = math.atan2(tgt.y - self.y, tgt.x - self.x)
+        raid.spawn_ally_bullet(self.x, self.y, self.aim, dmg=dmg, spread=spread)
 

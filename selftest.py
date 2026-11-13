@@ -6412,18 +6412,24 @@ def run():
         assert r.explore_floor == 6
         assert r.containers is c6 and r.scavs is s6, "回层要接着上次的敌人/箱子"
 
-        # 7) 天台停机坪撤离:先呼叫直升机(没直升机不给撤),落地后再登机
+        # 7) 天台停机坪:钥匙卡没集齐(一张都没救)-> 叫不了直升机;改走 1F 正门
         r.scavs = []
         name, zone = r.map.extracts[0]
         r.player.x, r.player.y = zone.center
         assert not r.allows_extract(), "直升机没到不能从停机坪撤"
         r.interact()
-        assert r.channel and r.channel["kind"] == "heli_call", r.channel
-        r._update_channel(HELI_CALL_TIME + 0.1)
-        assert r.heli_state == "defend"
-        r.heli_t = 0.0
-        r.update(1 / 60, [])
-        assert r.heli_state == "arrived" and r.allows_extract()
+        assert r.channel is None, "钥匙卡 0/13 不该能叫机"
+        assert any("钥匙卡" in str(t[0]) for t in r.toasts), r.toasts
+        # 一路下楼回 1F,从正门撤离
+        while r.explore_floor > 1:
+            st = next(s for s in r.stairs if not s.up)
+            r.player.x, r.player.y = st.x, st.y
+            r.interact()
+            r.update(1 / 60, [])
+            r = g.raid
+        assert r.explore_floor == 1
+        _, zone1 = r.map.extracts[0]
+        r.player.x, r.player.y = zone1.center
         r.scavs = []
         for _ in range(int((EXTRACT_TIME + 1) * 60)):
             r.update(1 / 60, [])
@@ -6431,7 +6437,7 @@ def run():
                 break
         assert r.over and r.result["kind"] == "extract", r.result
         assert r.result["mode"] == "explore"
-        # 一 个人都没救:任务没完成,也没有救援奖金
+        # 一 个人都没救:没有钥匙卡、任务没完成、也没有救援奖金
         assert r.result["mission"] is False and r.result["rescue_bonus"] == 0
         assert r.result["rescued"] == 0
         assert g.save.stats["extracts"] == 1
@@ -6466,10 +6472,12 @@ def run():
         from game import Game
         from world import GameMap
         from settings import (W as SW, H as SH, TOWER_FLOORS, TOWER_FLOOR_MAP,
-                              TOWER_FLOOR_NAME, RESEARCHER_TOTAL,
+                              TOWER_FLOOR_NAME, RESEARCHER_TOTAL, ITEMS,
                               RESEARCHER_RESCUE_TIME, RESEARCHER_BONUS,
                               RESEARCHER_ALL_BONUS, RESEARCHER_LOST_DIST,
-                              HELI_CALL_TIME, HELI_DEFEND_TIME, HELI_WAVE_MAX,
+                              RESEARCHER_SIDE_POOL, RESEARCHER_RIFLE_POOL,
+                              HELI_KEYCARDS_REQUIRED, HELI_CALL_TIME,
+                              HELI_DEFEND_TIME, HELI_WAVE_MAX,
                               HELI_WINDOW_TIME, HELI_ROOF_FLOOR, TILE,
                               EXTRACT_TIME)
 
@@ -6541,6 +6549,11 @@ def run():
         r._update_channel(RESEARCHER_RESCUE_TIME + 0.1)
         assert first.rescued and r.rescued_count() == 1
         assert first.uid in g._explore_rescued
+        # 随身武器:手枪/冲锋枪 + 一把突击步枪(真实物品 id)
+        assert first.side in RESEARCHER_SIDE_POOL, first.side
+        assert first.rifle in RESEARCHER_RIFLE_POOL, first.rifle
+        assert first.side in ITEMS and first.rifle in ITEMS
+        kit0 = (first.side, first.rifle)
         # 跟随:玩家走远 -> 研究员开始寻路
         r.player.x += 260
         for _ in range(20):
@@ -6559,7 +6572,8 @@ def run():
         assert r.explore_floor == 2
         assert len(r.researchers) == 4, len(r.researchers)
         assert r.rescued_count() == 1
-        assert any(x.rescued and x.uid == first.uid for x in r.researchers)
+        escort = next(x for x in r.researchers if x.rescued and x.uid == first.uid)
+        assert (escort.side, escort.rifle) == kit0, "换层后随身枪不能重 roll"
         g.draw(screen)                        # 带研究员的画面能画
 
         # 3) 一路救满 13 名,再上天台
@@ -6570,8 +6584,25 @@ def run():
         r = climb(g)
         g.draw(screen)
 
-        # 4) 停机坪:呼叫 -> 防守 60 秒(刷波次)-> 落地 -> 登机撤离
+        # 3.5) 武装队友:救出的研究员会朝视野内的敌人开火
+        from enemy import Scav
+        _, zone0 = r.map.extracts[0]
+        r.player.x, r.player.y = zone0.center
+        near = Scav("pistol", r.player.x + 150, r.player.y, r.diff)
+        r.scavs.append(near)
+        hp0 = near.hp
+        hit = False
+        for _ in range(240):
+            r.update(1 / 60, [])
+            if near.hp < hp0 or near not in r.scavs:
+                hit = True
+                break
+        assert hit, "救出的研究员应该会朝敌人开枪"
+        r.scavs = [s for s in r.scavs if s is not near]
+
+        # 4) 停机坪:钥匙卡集齐 -> 呼叫 -> 防守 60 秒(刷波次)-> 落地 -> 登机撤离
         assert r.pad is not None and r.heli_state == "none"
+        assert r.rescued_count() == HELI_KEYCARDS_REQUIRED == RESEARCHER_TOTAL
         _, zone = r.map.extracts[0]
         r.player.x, r.player.y = zone.center
         assert not r.allows_extract()

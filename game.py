@@ -111,6 +111,7 @@ class Game:
         self.explore_floor = 1
         self._explore_cache = {}
         self._explore_rescued = set()   # 本局已救出的研究员 uid(跨楼层)
+        self._explore_kit = {}          # 每名研究员随身枪械(uid -> (手枪/冲锋枪, 突击步枪))
         self.net = net_mod.Net(self)
         self._prewarm_map()
         self._lan_from_argv()
@@ -184,6 +185,7 @@ class Game:
             self.explore_floor = 1
             self._explore_cache = {}
             self._explore_rescued = set()
+            self._explore_kit = {}
         if self.is_assault():
             # 突袭:系统强制配发一套随机满配的高级装备(战后回收,不动仓库)
             self.assault_snap = assault.issue(self.save)

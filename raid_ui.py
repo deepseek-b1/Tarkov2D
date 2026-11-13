@@ -8,7 +8,7 @@ import pygame
 import audio
 import bindings
 from settings import (W, H, COL, BAG_W, BAG_H, RAID_TIME, EXTRACT_TIME,
-                      RESEARCHER_TOTAL, RESEARCHER_BONUS,
+                      RESEARCHER_TOTAL, RESEARCHER_BONUS, HELI_KEYCARDS_REQUIRED,
                       ADRENALINE_SPEED_MUL, ADRENALINE_REGEN, ADRENALINE_HP_MUL,
                       REVIVE_TIME, C4_BLAST_RADIUS,
                       NIGHT_DARK_RGB, NIGHT_BEAM_RGB, PLAYER, COOP,
@@ -1362,7 +1362,7 @@ def _draw_hud(raid, screen):
     txt = (f"剩余 {mm:02d}:{ss:02d}    {raid.map.map_name} · "
            f"{raid.diff['name']}    击杀 {raid.kills}")
     if getattr(raid, "mode", None) == "explore":
-        txt += f"    研究员 {raid.rescued_count()}/{RESEARCHER_TOTAL}"
+        txt += f"    钥匙卡 {raid.rescued_count()}/{HELI_KEYCARDS_REQUIRED}"
     t = get_font(20, bold=True).render(txt, True,
                                        COL["bad"] if tl < 60 else COL["text"])
     screen.blit(t, t.get_rect(center=(W // 2, 18)))
@@ -1380,8 +1380,14 @@ def _draw_hud(raid, screen):
             line = "直升机已飞走 —— 回停机坪按交互键重新呼叫"
             hcol = COL["bad"]
         else:
-            line = "停机坪:按交互键呼叫直升机(守 60 秒,落地后限时登机)"
-            hcol = COL["accent"]
+            _got = raid.rescued_count()
+            if _got < HELI_KEYCARDS_REQUIRED:
+                line = (f"停机坪:钥匙卡 {_got}/{HELI_KEYCARDS_REQUIRED}"
+                        f" —— 还差 {HELI_KEYCARDS_REQUIRED - _got} 张,先去救人")
+                hcol = COL["accent"]
+            else:
+                line = "停机坪:钥匙卡集齐 —— 按交互键呼叫直升机(守 60 秒)"
+                hcol = COL["good"]
         ht = get_font(16, bold=True).render(line, True, hcol)
         hbg = _hud_bg(ht.get_width() + 18, 26, (10, 10, 12, 170))
         screen.blit(hbg, (W // 2 - hbg.get_width() // 2, 40))
@@ -1573,13 +1579,18 @@ def _draw_hud(raid, screen):
         for name, r in raid.map.extracts:
             if r.collidepoint(raid.player.x, raid.player.y):
                 if getattr(raid, "mode", None) == "explore":
+                    _got = raid.rescued_count()
                     if raid.heli_state == "arrived":
                         prompt = "停机坪:站定登机撤离"
                     elif raid.heli_state == "defend":
                         prompt = f"直升机还有 {int(raid.heli_t) + 1} 秒到达 —— 守住!"
+                    elif _got < HELI_KEYCARDS_REQUIRED:
+                        prompt = (f"钥匙卡 {_got}/{HELI_KEYCARDS_REQUIRED}"
+                                  f" —— 还差 {HELI_KEYCARDS_REQUIRED - _got} 张,"
+                                  "先去各层救人")
                     else:
-                        prompt = (f"{ik}  呼叫直升机(研究员 "
-                                  f"{raid.rescued_count()}/{RESEARCHER_TOTAL})")
+                        prompt = (f"{ik}  呼叫直升机(钥匙卡 "
+                                  f"{_got}/{HELI_KEYCARDS_REQUIRED})")
                 else:
                     prompt = ("撤离区:保持不动完成撤离" if raid.allows_extract()
                               else "先炸掉全部指挥设施才能撤离")
@@ -1601,10 +1612,16 @@ def _draw_hud(raid, screen):
             elif kind == "stairs":
                 prompt = f"{ik}  {_ent.name}"
             elif kind == "research":
-                prompt = f"{ik}  营救研究员(研究员 {raid.rescued_count()}/{RESEARCHER_TOTAL})"
+                prompt = (f"{ik}  营救研究员(钥匙卡 "
+                          f"{raid.rescued_count()}/{HELI_KEYCARDS_REQUIRED})")
             elif kind == "heli":
-                prompt = (f"{ik}  呼叫直升机(研究员 "
-                          f"{raid.rescued_count()}/{RESEARCHER_TOTAL})")
+                _got = raid.rescued_count()
+                if _got < HELI_KEYCARDS_REQUIRED:
+                    prompt = (f"钥匙卡 {_got}/{HELI_KEYCARDS_REQUIRED} —— 还差 "
+                              f"{HELI_KEYCARDS_REQUIRED - _got} 张")
+                else:
+                    prompt = (f"{ik}  呼叫直升机(钥匙卡 "
+                              f"{_got}/{HELI_KEYCARDS_REQUIRED})")
             elif kind == "story":
                 o = _ent.obj
                 if o is None or o["kind"] == "talk":
@@ -2113,7 +2130,8 @@ def _draw_result(raid, screen):
         total = r.get("researcher_total", 13)
         got = r.get("rescued", 0)
         ok = got >= total and r["kind"] == "extract"
-        obj = f"研究员救援 {got}/{total}    救援奖金 {fmt_rub(r.get('rescue_bonus', 0))}"
+        obj = (f"研究员救援 {got}/{total} · 钥匙卡 {got}/{HELI_KEYCARDS_REQUIRED}    "
+               f"救援奖金 {fmt_rub(r.get('rescue_bonus', 0))}")
         t = get_font(20, bold=True).render(obj, True,
                                            COL["good"] if ok else COL["accent"])
         screen.blit(t, t.get_rect(center=(W // 2, 244)))

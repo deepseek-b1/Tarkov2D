@@ -7,7 +7,7 @@ import pygame
 from inventory import Item      # 装备位里的武器要在槽之间搬(inventory 不反向依赖本模块)
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.13.22"
+GAME_VERSION = "2.13.23"
 # 更新清单地址(留空则只认 EXE 同目录的 version.json)。
 # 默认指向仓库里的 update_server/version.json —— 推到 main 就生效,不用再发服务器。
 # 也可以换成本机自建服务器(如 http://127.0.0.1:8765/version.json)。
@@ -1858,6 +1858,25 @@ HELI_WAVE_INTERVAL = 12.0        # 防守期间每隔多久刷一波敌人
 HELI_WAVE_SIZE = 4               # 每波人数
 HELI_WAVE_MAX = 10               # 波次敌人同时在场上限(不含初始守军)
 HELI_WINDOW_TIME = 45.0          # 直升机落地后停留多久,错过要重新呼叫
+
+# 钥匙卡:每名研究员身上带 1 张,停机坪叫机要**集齐**才给叫
+HELI_KEYCARDS_REQUIRED = RESEARCHER_TOTAL
+
+# 研究员随身武器:手枪/冲锋枪(近距离)+ 随机一把突击步枪(远一点)
+# 救出后当武装队友帮你打;伤害按「研究员的枪法」打折,不然 13 个人就是一支军队
+RESEARCHER_SIDE_CLASSES = ("手枪", "冲锋枪")
+RESEARCHER_SIDE_RANGE = 300
+RESEARCHER_SIDE_DMG = 4
+RESEARCHER_SIDE_CD = 1.10
+RESEARCHER_SIDE_SPREAD = 0.12
+RESEARCHER_RIFLE_RANGE = 460
+RESEARCHER_RIFLE_DMG = 6
+RESEARCHER_RIFLE_CD = 0.95
+RESEARCHER_RIFLE_SPREAD = 0.085
+RESEARCHER_SIDE_POOL = tuple(k for k, c in WEAPON_CLASS.items()
+                             if c in RESEARCHER_SIDE_CLASSES)
+RESEARCHER_RIFLE_POOL = tuple(k for k, c in WEAPON_CLASS.items()
+                              if c == "突击步枪")
 
 # ---------- 黑暗模式(夜战) ----------
 # 全图压成漆黑:只有「光源范围」内能看见东西(敌人也只有亮区里才显示)。

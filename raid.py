@@ -25,6 +25,8 @@ from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       RESEARCHER_ALL_BONUS, HELI_ROOF_FLOOR, HELI_PAD_RANGE,
                       HELI_CALL_TIME, HELI_DEFEND_TIME, HELI_WAVE_INTERVAL,
                       HELI_WAVE_SIZE, HELI_WAVE_MAX, HELI_WINDOW_TIME,
+                      HELI_KEYCARDS_REQUIRED, RESEARCHER_SIDE_POOL,
+                      RESEARCHER_RIFLE_POOL,
                       ALLY_COUNT,
                       REVIVE_TIME, INTERACT_RANGE, ALLY_DMG,
                       ASSAULT_ENEMIES, ASSAULT_ALLIES, ASSAULT_PLANT_TIME,
@@ -779,6 +781,19 @@ class Raid:
             self.game._explore_rescued = s
         return s
 
+    def researcher_kit(self, uid):
+        """每名研究员的随身枪(手枪/冲锋枪 + 一把突击步枪)固定,换层不重roll。"""
+        kit = getattr(self.game, "_explore_kit", None)
+        if kit is None:
+            kit = {}
+            self.game._explore_kit = kit
+        got = kit.get(uid)
+        if got is None:
+            got = (random.choice(RESEARCHER_SIDE_POOL),
+                   random.choice(RESEARCHER_RIFLE_POOL))
+            kit[uid] = got
+        return got
+
     def _init_researchers(self):
         """本层待救援的 + 已经救出跟着你的(救出的不重复放在楼层里)。"""
         rescued = getattr(self.game, "_explore_rescued", None)
@@ -789,7 +804,9 @@ class Raid:
             uid = "%d-%d" % (self.explore_floor, i)
             if uid in rescued:
                 continue
-            self.researchers.append(Researcher(x, y, uid, self.explore_floor))
+            side, rifle = self.researcher_kit(uid)
+            self.researchers.append(Researcher(x, y, uid, self.explore_floor,
+                                               side=side, rifle=rifle))
         # 已救出的在楼梯口/出生点旁边围一圈(换层后还跟着)
         sx, sy = self.map.spawn
         for j, uid in enumerate(sorted(rescued)):
@@ -798,7 +815,8 @@ class Raid:
             ex, ey = sx + math.cos(ang) * rad, sy + math.sin(ang) * rad
             if self.map.collides(ex, ey, 10):
                 ex, ey = sx + 18, sy + 18
-            r = Researcher(ex, ey, uid, self.explore_floor)
+            side, rifle = self.researcher_kit(uid)
+            r = Researcher(ex, ey, uid, self.explore_floor, side=side, rifle=rifle)
             r.rescued = True
             r.repath_t = random.uniform(0.0, 0.4)
             self.escorts.append(r)
@@ -1700,6 +1718,13 @@ class Raid:
             audio.play("click")
             return
         if kind == "heli":
+            if self.rescued_count() < HELI_KEYCARDS_REQUIRED:
+                missing = HELI_KEYCARDS_REQUIRED - self.rescued_count()
+                self.add_toast(f"钥匙卡不够:还差 {missing} 张 —— 先把各层研究员救齐",
+                               COL["bad"], 4.0)
+                self.add_toast("每救出一名研究员,他就会把自己的门禁卡交给你",
+                               COL["accent"], 4.0)
+                return
             self.channel = dict(kind="heli_call", ent=ent, t=0.0)
             audio.play("click")
             return
@@ -2004,11 +2029,17 @@ class Raid:
         audio.play(sfx)
         self.emit_noise(x, y, 700 if rpg else 400)
 
-    def spawn_ally_bullet(self, x, y, ang):
-        """队友射击:子弹只伤害敌人,不会误伤玩家。"""
+    def spawn_ally_bullet(self, x, y, ang, dmg=None, spread=0.0):
+        """队友射击:子弹只伤害敌人,不会误伤玩家。
+
+        dmg/spread 不给就是队友的标准参数;研究员按自己的枪法传一份打折的。
+        """
         spd = 900.0
+        if spread:
+            ang += random.uniform(-spread, spread)
         self.bullets.append(dict(x=x, y=y, dx=math.cos(ang) * spd, dy=math.sin(ang) * spd,
-                                 dmg=ALLY_DMG, owner="ally", ttl=520 / spd))
+                                 dmg=ALLY_DMG if dmg is None else dmg,
+                                 owner="ally", ttl=520 / spd))
         audio.play("epm")
         self.emit_noise(x, y, 450)
 
