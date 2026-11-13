@@ -67,9 +67,8 @@ def _layout():
         start=pygame.Rect(542, 548, 340, 54),
         supply=pygame.Rect(30, 548, 220, 46),
         reset=pygame.Rect(262, 548, 220, 46),
-        trade=pygame.Rect(930, 548, 72, 46),
-        tasks=pygame.Rect(1008, 548, 72, 46),
-        story=pygame.Rect(1086, 548, 72, 46),
+        trade=pygame.Rect(1008, 548, 72, 46),
+        tasks=pygame.Rect(1086, 548, 72, 46),
         options=pygame.Rect(1164, 548, 72, 46),
         organize=pygame.Rect(374, 106, 116, 24),      # 仓库:一键整理
         repair=pygame.Rect(498, 106, 116, 24),        # 仓库:维修护甲/头盔耐久
@@ -2129,8 +2128,7 @@ class Hideout:
                 if ev.key == pygame.K_ESCAPE and self.hold.active():
                     self.hold.hide()
                     continue
-                if ev.key == pygame.K_ESCAPE and self.view in ("trade", "task",
-                                                               "story"):
+                if ev.key == pygame.K_ESCAPE and self.view in ("trade", "task"):
                     self.view = "stash"
                     save_mod.save_data(self.game.save)
                     audio.play("click")
@@ -2145,8 +2143,6 @@ class Hideout:
                     self._trade_click(ev.pos)
                 elif self.view == "task":
                     self._task_click(ev.pos)
-                elif self.view == "story":
-                    self._story_click(ev.pos)
                 else:
                     self._click(ev.pos)
                 return
@@ -2281,16 +2277,14 @@ class Hideout:
             return
 
         # 难度选择(突袭/探索/夜战是固定强度,没有难度档)
-        if sd.mode in ("assault", "story") or sd.mode in MODE_DIFF:
+        if sd.mode == "assault" or sd.mode in MODE_DIFF:
             fixed_txt = ("突袭模式是固定强度,不适用难度档(系统会配发满配装备)"
                          if sd.mode == "assault" else
-                         "剧情模式为固定强度(《灰区二日》有分支与结局,不吃难度档)"
-                         if sd.mode == "story" else
                          "黑暗行动默认强化封锁(漆黑里再放水就没意思了),不适用难度档"
                          if sd.mode == "night" else
                          "探索模式固定为封锁强度(逐层打上去,不额外放水)"
                          if sd.mode == "explore" else
-                         "人质解救固定为强化封锁强度,不适用难度档")
+                         "这个模式是固定强度,不适用难度档")
             for r in self.diff_rects:
                 if r.collidepoint(pos):
                     self.say(fixed_txt, COL["bad"], 3.0)
@@ -2327,10 +2321,6 @@ class Hideout:
         if lay["tasks"].collidepoint(pos):
             self.view = "task"
             self.task_scroll = 0.0
-            audio.play("click")
-            return
-        if lay["story"].collidepoint(pos):
-            self.view = "story"
             audio.play("click")
             return
         if lay["options"].collidepoint(pos):
@@ -2777,9 +2767,6 @@ class Hideout:
             self._draw_task(screen)
             self._draw_scroll_buttons(screen, [("task", 0)])
             return
-        if self.view == "story":
-            self._draw_story_brief(screen)
-            return
         if self.view == "options":
             self._draw_options(screen)
             return
@@ -2974,8 +2961,6 @@ class Hideout:
         draw_button(screen, lay["tasks"],
                     "任务" + (f"({ready_n})" if ready_n else ""),
                     lay["tasks"].collidepoint(mx, my), small=True)
-        draw_button(screen, lay["story"], "剧情",
-                    lay["story"].collidepoint(mx, my), small=True)
         draw_button(screen, lay["options"], "设置",
                     lay["options"].collidepoint(mx, my), small=True)
         if not sd.any_weapon():
@@ -3025,62 +3010,8 @@ class Hideout:
 
         # ---- 触屏长按信息面板(最上层) ----
         uikit.draw_hold(screen, self.hold)
-
-    # ---------- 剧情简报 ----------
         if getattr(self, "weapon_detail", None) is not None:
             self._draw_weapon_detail(screen)
-
-    def _story_panel(self):
-        return pygame.Rect(120, 92, W - 240, 460)
-
-    def _story_click(self, pos):
-        """剧情简报页:点「返回」退回仓库;点面板外的空白处也退(别卡在这一页)。"""
-        if (self.task_close.collidepoint(pos)
-                or not self._story_panel().collidepoint(pos)):
-            audio.play("click")
-            self.view = "stash"
-            save_mod.save_data(self.game.save)
-
-    # ---------- 剧情简报渲染 ----------
-    def _draw_story_brief(self, screen):
-        """《灰区二日》简报:当前时段任务、状态、已解锁结局。"""
-        sd = self.game.save
-        mx, my = pygame.mouse.get_pos()
-        screen.fill(COL["bg"])
-        t = get_font(34, bold=True).render("剧情 ·《灰区二日》", True, COL["accent"])
-        screen.blit(t, t.get_rect(center=(W // 2, 44)))
-        bal = get_font(20, bold=True).render("北境工业城 卡斯卡德-7", True,
-                                             COL["text_dim"])
-        screen.blit(bal, (W - bal.get_width() - 30, 40))
-
-        panel = self._story_panel()
-        uikit.draw_panel(screen, panel, "当前情况")
-        lines = story_mod.brief_lines(sd)
-        f = get_font(17)
-        y = panel.y + 46
-        for i, ln in enumerate(lines):
-            col = COL["accent"] if i == 0 else (
-                COL["good"] if ":" in ln or "结局" in ln else COL["text"])
-            t = f.render(ln, True, col)
-            screen.blit(t, (panel.x + 26, y))
-            y += 26
-            if y > panel.bottom - 40:
-                break
-        t = get_font(15).render(
-            "每个时段出击一次:做完目标就从开放的撤离点撤出;"
-            "阵亡/超时不丢进度,但会丢装备", True, COL["text_dim"])
-        screen.blit(t, (panel.x + 26, panel.bottom - 32))
-        if sd.mode != "story":
-            t = get_font(18, bold=True).render(
-                "提示:把「游戏模式」切到「剧情」后开始战局,才会推进剧情",
-                True, COL["bad"])
-            screen.blit(t, t.get_rect(center=(W // 2, panel.bottom + 40)))
-        else:
-            t = get_font(17, bold=True).render(
-                f"开始战局将进入:{story_mod.mission_title(sd)}", True, COL["good"])
-            screen.blit(t, t.get_rect(center=(W // 2, panel.bottom + 40)))
-        draw_button(screen, self.task_close, "返回",
-                    self.task_close.collidepoint(mx, my), small=True)
 
     # ---------- 任务中心渲染 ----------
     def _draw_task(self, screen):
@@ -3473,9 +3404,3 @@ class Hideout:
             placed = self.trade_stash_hit((mx, my))
             if placed:
                 draw_tooltip(screen, mx, my, placed.item)
-
-# 剧情模块已删除:保留空壳,防止残留引用在死代码路径上炸掉
-class _StoryStub:
-    def __getattr__(self, _k):
-        return lambda *a, **kw: {}
-story_mod = _StoryStub()
