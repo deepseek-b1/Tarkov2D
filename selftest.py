@@ -6984,6 +6984,49 @@ def run():
 
     check("装备位命名 + 改装窗口(不穿透/不盖黑布)", t_wd_window)
 
+    def t_repair():
+        """护甲耐久:打烂了真能修 —— 按钮在出战配置面板里点得到,不是一个看不见的摆设。"""
+        from game import Game
+        from settings import ARMOR_REPAIR_CAP
+
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        h = g.hideout
+        h.show_intro = False
+        sd = g.save
+        sd.armor = Item("paca")
+        sd.armor.state["dur"] = 0                  # 甲打烂了
+        save_mod.save_data(sd)
+
+        # 1) 按钮位置:在出战配置面板里,不压标题、不压「一键放回仓库并整理」
+        r = h.lay["repair"]
+        assert h.lay["loadout_panel"].contains(r), (r, h.lay["loadout_panel"])
+        assert r.left >= 615, r                      # 面板标题「出战配置」到 609 为止
+        assert r.right <= h.lay["stash_all"].left - 4, (r, h.lay["stash_all"])
+        assert h._repair_count(sd) == 1
+
+        # 2) 点一下:耐久修回来、扣钱、按钮计数清零
+        rub0 = sd.rubles
+        h._click(r.center)
+        assert sd.armor.armor_dur() > 0, sd.armor.armor_dur()
+        assert sd.armor.armor_dur() >= int(sd.armor.armor_max_dur() * ARMOR_REPAIR_CAP) - 1
+        assert sd.rubles < rub0
+        assert h._repair_count(sd) == 0
+
+        # 3) 已经修到上限再点:给的是「满耐久」提示,不是报错
+        ok, msg = h.repair_armor()
+        assert not ok and "满" in msg, msg
+
+        # 4) 钱不够:明确提示修不了,而不是静默失败
+        sd.armor.state["dur"] = 0
+        sd.rubles = 0
+        ok, msg = h.repair_armor()
+        assert not ok and "修不了" in msg, msg
+        assert sd.armor.armor_dur() == 0, "钱不够不该偷偷修一半"
+
+    check("维修-护甲耐久(按钮可点/修到上限/钱不够提示)", t_repair)
+
     ok = all(r[1] for r in results)
     report = ["Tarkov2D selftest " + ("PASS" if ok else "FAIL"), ""]
     for name, passed, err in results:

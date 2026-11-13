@@ -71,7 +71,7 @@ def _layout():
         tasks=pygame.Rect(1086, 548, 72, 46),
         options=pygame.Rect(1164, 548, 72, 46),
         organize=pygame.Rect(374, 106, 116, 24),      # 仓库:一键整理
-        repair=pygame.Rect(498, 106, 116, 24),        # 仓库:维修护甲/头盔耐久
+        repair=pygame.Rect(620, 106, 84, 24),        # 出战配置:维修护甲/头盔耐久
         stash_all=pygame.Rect(712, 106, 184, 24),     # 出战配置:放回仓库并整理
         trade_stash=pygame.Rect(30, 100, 470, 570),
         trade_goods=pygame.Rect(530, 100, 720, 570),
@@ -970,6 +970,20 @@ class Hideout:
         audio.play("click")
         return True, (f"仓库已整理:{before} 件 → {len(sd.stash.items)} 件"
                       "(子弹并组 · 背包卷起 · 枪/甲/子弹各归一片)")
+
+    def _repair_count(self, sd):
+        """有几件护甲/头盔能修(耐久没到上限)—— 显示在「维修装备」按钮上。"""
+        n = 0
+        for it in (sd.armor, sd.helmet):
+            if it is not None and it.armor_repair_cost() > 0:
+                n += 1
+        for p in sd.stash.items:
+            it = getattr(p, "item", None)
+            if it is None or getattr(it, "cat", "") not in ("armor", "helmet"):
+                continue
+            if it.armor_repair_cost() > 0:
+                n += 1
+        return n
 
     def repair_armor(self):
         """维修护甲/头盔耐久:当前穿戴的 + 仓库里的,按缺失比例收费,修到 92%。
@@ -2874,8 +2888,6 @@ class Hideout:
                   scroll=self.stash_scroll, view_h=self.stash_view_h)
         draw_button(screen, lay["organize"], "一键整理",
                     lay["organize"].collidepoint(mx, my), small=True)
-        draw_button(screen, lay["repair"], "维修装备",
-                    lay["repair"].collidepoint(mx, my), small=True)
         if self.stash_max_scroll() > 0:
             t = get_font(13).render(
                 f"滚轮上下翻(仓库共 {sd.stash.h} 行)",
@@ -2905,6 +2917,12 @@ class Hideout:
         uikit.draw_panel(screen, lay["loadout_panel"], "出战配置")
         draw_button(screen, lay["stash_all"], "一键放回仓库并整理",
                     lay["stash_all"].collidepoint(mx, my), small=True)
+        # 维修装备:这次放在面板里(以前画在面板底下,被盖住看不见)
+        _fix_n = self._repair_count(sd)
+        _fix_txt = "维修装备" if not _fix_n else (
+            f"维修 ({_fix_n}{'+' if _fix_n > 9 else ''})")
+        draw_button(screen, lay["repair"], _fix_txt,
+                    lay["repair"].collidepoint(mx, my), small=True)
         for slot in LOADOUT_SLOTS:
             r = lay["weapon"] if slot == "main1" else lay[slot]
             it = loadout_get(sd, slot)
@@ -2918,6 +2936,22 @@ class Hideout:
                   hover=lay["helmet"].collidepoint(mx, my))
         draw_slot(screen, lay["pack"], sd.pack, "背包",
                   hover=lay["pack"].collidepoint(mx, my))
+        # 护甲/头盔耐久条:掉到 0 会红,一眼看出该修了
+        for r, it in ((lay["armor"], sd.armor), (lay["helmet"], sd.helmet)):
+            if it is None:
+                continue
+            _mx = it.armor_max_dur()
+            if _mx <= 0:
+                continue
+            _frac = max(0.0, min(1.0, it.armor_dur() / float(_mx)))
+            bar = pygame.Rect(r.x + 6, r.bottom - 9, r.w - 12, 4)
+            pygame.draw.rect(screen, (40, 44, 52), bar, border_radius=2)
+            _col = (COL["good"] if _frac > 0.5 else
+                    ((238, 190, 90) if _frac > 0.2 else COL["bad"]))
+            if _frac > 0:
+                pygame.draw.rect(screen, _col,
+                                 (bar.x, bar.y, max(2, int(bar.w * _frac)), bar.h),
+                                 border_radius=2)
         bcell = self.bag_cell()
         brect = self.bag_rect()
         cap = "口袋" if sd.pack is None else sd.pack.name

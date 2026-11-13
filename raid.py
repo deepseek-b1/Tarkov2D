@@ -281,8 +281,8 @@ class Player:
                 wear *= ARMOR_WEAR_PEN_RATIO
             before, after = piece.armor_wear(wear)
             if before > 0 and after <= 0:
-                raid.add_toast(f"{piece.name} 耐久耗尽 —— 不再提供防护",
-                               COL["bad"], 3.2)
+                raid.add_toast(f"{piece.name} 耐久耗尽 —— 不再提供防护"
+                               "(回藏身处点「维修装备」修)", COL["bad"], 4.0)
         return left
 
     def take_damage(self, dmg, raid, rpg=False, pen=None):
