@@ -7,7 +7,7 @@ import pygame
 from inventory import Item      # 装备位里的武器要在槽之间搬(inventory 不反向依赖本模块)
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.13.26"
+GAME_VERSION = "2.13.27"
 # 更新清单地址(留空则只认 EXE 同目录的 version.json)。
 # 默认指向仓库里的 update_server/version.json —— 推到 main 就生效,不用再发服务器。
 # 也可以换成本机自建服务器(如 http://127.0.0.1:8765/version.json)。
@@ -1552,12 +1552,13 @@ TALENTS["drone_kam"] = dict(name="末段加速", desc="电量 +25%",
                             mark_mul=KAMIKAZE["talent_mark_mul"])
 
 # ---------- 装备位(藏身处「出战配置」)----------
-# 两个主武器 + 一个副武器 + 一把刀。槽内物品不进战局背包,所以不会占格子。
+# 一把主武器 + 一把副武器(第二个长枪位)+ 一把手枪 + 一把刀。槽内物品不进战局背包,
+# 所以不会占格子。
 # 注意:main1 就是存档里的 sd.weapon 本身(老存档/战局/联机代码全都用它),
 # 其余三个槽存在 sd.weapon.state["x_slots"] 里 —— 这样现有存档格式一个字都不用改。
 LOADOUT_SLOTS = ("main1", "main2", "side", "melee")
-LOADOUT_SLOT_NAMES = {"main1": "主武器 1", "main2": "主武器 2",
-                      "side": "副武器", "melee": "近战"}
+LOADOUT_SLOT_NAMES = {"main1": "主武器", "main2": "副武器",
+                      "side": "手枪", "melee": "刀"}
 _X_SLOTS_KEY = "x_slots"
 
 
@@ -1570,13 +1571,16 @@ def is_melee(item_or_def):
 
 
 def slot_for_weapon(item):
-    """这件武器该进哪个装备位(按类别分)。"""
+    """这件武器该进哪个装备位(按类别分)。
+
+    主武器/副武器 = 长枪(步枪/狙击/霰弹/机枪/冲锋枪),手枪位只放手枪,刀进近战位。
+    """
     if is_melee(item):
         return "melee"
     cls = weapon_class(item.iid)
-    if cls in ("手枪", "冲锋枪"):
+    if cls == "手枪":
         return "side"
-    return "main1"          # 主武器位:main1 满了会自动去 main2
+    return "main1"          # 主武器位:main1 满了会自动去 main2(副武器位)
 
 
 def loadout_get(sd, slot):

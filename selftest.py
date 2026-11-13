@@ -2041,9 +2041,10 @@ def run():
         assert is_melee(Item("knife")) and not is_melee(Item.weapon("ak74"))
         assert WEAPON_CLASS["knife"] == "近战武器"
         assert _S.weapon_ammo_ids(Item("knife")) == []
-        # 分类规则:步枪 -> 主武器位;手枪/冲锋枪 -> 副武器位;刀 -> 近战位
+        # 分类规则:长枪(步枪/冲锋枪)-> 主武器位;手枪 -> 手枪位;刀 -> 近战位
         assert _S.slot_for_weapon(Item.weapon("ak74")) == "main1"
-        assert _S.slot_for_weapon(Item.weapon("mp5")) == "side"
+        assert _S.slot_for_weapon(Item.weapon("mp5")) == "main1"
+        assert _S.slot_for_weapon(Item.weapon("pm")) == "side"
         assert _S.slot_for_weapon(Item("knife")) == "melee"
 
         # 装备:两把主武器 + 副武器 + 刀,各自的位子要对
@@ -6840,6 +6841,53 @@ def run():
         assert worst >= 24, worst
 
     check("敌人-不贴脸(近战停手/远程后撤)/尸体不叠", t_scav_space)
+
+    def t_wd_window():
+        """装备位命名 + 改装窗口:不盖黑布、开着窗口点「开始战局」不会直接开局。"""
+        from game import Game
+        from settings import LOADOUT_SLOT_NAMES
+
+        # 1) 装备位就是四格:主武器 / 副武器 / 手枪 / 刀
+        assert LOADOUT_SLOT_NAMES == {"main1": "主武器", "main2": "副武器",
+                                      "side": "手枪", "melee": "刀"}, LOADOUT_SLOT_NAMES
+
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        g.hideout.show_intro = False
+        h = g.hideout
+        sd = g.save
+        sd.weapon = Item.weapon("ak74", mag=30)
+        h.weapon_detail = sd.weapon
+        start = h.lay["start"]
+        outside = (start.centerx, start.bottom - 6)      # 开始战局按钮上、窗口外
+
+        # 2) 窗口开着点「开始战局」:只关窗口,不能开局
+        h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                                             pos=outside)])
+        assert g.raid is None and g.phase == "hideout", (g.phase, g.raid)
+        assert h.weapon_detail is None, "点窗口外面应该只把窗口关掉"
+
+        # 3) 点窗口标题栏:窗口留着、也不开局
+        h.weapon_detail = sd.weapon
+        r = h._wd_rect()
+        h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                                             pos=(r.x + 120, r.y + 16))])
+        assert h.weapon_detail is sd.weapon and g.raid is None
+
+        # 4) 点标题栏的 X:关窗口,不开局
+        xb = h._wd_close()
+        h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                                             pos=xb.center)])
+        assert h.weapon_detail is None and g.raid is None
+
+        # 5) 窗口关着再点「开始战局」:这次才真的进战局
+        h.weapon_detail = None
+        h.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                                             pos=start.center)])
+        assert g.raid is not None and g.phase == "raid"
+
+    check("装备位命名 + 改装窗口(不穿透/不盖黑布)", t_wd_window)
 
     ok = all(r[1] for r in results)
     report = ["Tarkov2D selftest " + ("PASS" if ok else "FAIL"), ""]

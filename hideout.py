@@ -1122,6 +1122,11 @@ class Hideout:
             self.wd_pos = [(W - 660) // 2, (H - 430) // 2]
         return pygame.Rect(self.wd_pos[0], self.wd_pos[1], 660, 430)
 
+    def _wd_close(self):
+        """标题栏右上角的关闭按钮。"""
+        r = self._wd_rect()
+        return pygame.Rect(r.right - 38, r.y + 7, 24, 22)
+
     def _wd_slot_rects(self):
         """当前武器各槽位的框(相对窗口)。"""
         w = self.weapon_detail
@@ -1175,17 +1180,27 @@ class Hideout:
         return out
 
     def _wd_event(self, ev):
-        """窗口打开时接管鼠标:拖标题栏移动 / 拖配件到槽位安装。"""
+        """窗口打开时接管鼠标:拖标题栏移动 / 拖配件到槽位安装 / 点空白关窗口。"""
         import pygame
         r = self._wd_rect()
-        mx, my = pygame.mouse.get_pos()
+        mx, my = getattr(ev, "pos", None) or pygame.mouse.get_pos()
         if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 3:
+            self.weapon_detail = None
+            self.drag_item = None
+            self.wd_drag = None
+            return True
+        if ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
             self.weapon_detail = None
             self.drag_item = None
             self.wd_drag = None
             return True
         if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
             title = pygame.Rect(r.x, r.y, r.w, 34)
+            if self._wd_close().collidepoint(mx, my):
+                self.weapon_detail = None
+                self.drag_item = None
+                self.wd_drag = None
+                return True
             if title.collidepoint(mx, my):
                 self.wd_drag = (mx - r.x, my - r.y)
                 return True
@@ -1251,20 +1266,34 @@ class Hideout:
         self.say(f"{w.name} 装上 {d['name']}", COL["good"], 2.6)
 
     def _draw_weapon_detail(self, screen):
-        """可拖动改装窗口:标题栏拖动 · 配件从下面仓库拖到槽位。"""
+        """可拖动改装窗口:标题栏拖动 · 配件从下面仓库拖到槽位。
+
+        注意:这里**不盖整屏黑布** —— 只给窗口自己画一圈阴影。以前那层半透明黑
+        会让人以为后面的界面点不了了(实际点击还会穿透到「开始战局」)。
+        """
         from settings import ATTACH_SLOTS, weapon_attach, weapon_slots
         w = self.weapon_detail
         r = self._wd_rect()
-        ov = _overlay("wdim", (W, H), (0, 0, 0, 150))
-        screen.blit(ov, (0, 0))
+        mx, my = pygame.mouse.get_pos()
+        # 窗口投影(只压窗口这一块)
+        sh = pygame.Surface((r.w + 20, r.h + 20), pygame.SRCALPHA)
+        pygame.draw.rect(sh, (0, 0, 0, 80), sh.get_rect(), border_radius=18)
+        screen.blit(sh, (r.x - 10, r.y - 6))
         pygame.draw.rect(screen, COL["panel"], r, border_radius=10)
         pygame.draw.rect(screen, COL["accent"], r, 2, border_radius=10)
         title = pygame.Rect(r.x, r.y, r.w, 34)
         pygame.draw.rect(screen, COL["panel_hi"], title, border_radius=10)
         t = get_font(20, bold=True).render(f"武器改装 — {w.name}", True, COL["accent"])
         screen.blit(t, (r.x + 16, r.y + 6))
-        tip = get_font(12).render("拖标题栏移动窗口 · 右键关闭", True, COL["text_dim"])
-        screen.blit(tip, (r.right - tip.get_width() - 14, r.y + 12))
+        xb = self._wd_close()
+        xhov = xb.collidepoint(mx, my)
+        pygame.draw.rect(screen, COL["bad"] if xhov else COL["panel"], xb,
+                         border_radius=5)
+        pygame.draw.rect(screen, COL["border"], xb, 1, border_radius=5)
+        xt = get_font(15, bold=True).render("X", True, COL["text"])
+        screen.blit(xt, xt.get_rect(center=xb.center))
+        tip = get_font(12).render("拖标题栏移动 · 点 X / 右键关闭", True, COL["text_dim"])
+        screen.blit(tip, (xb.x - tip.get_width() - 12, r.y + 12))
         have = weapon_attach(w)
         for key, box in self._wd_slot_rects():
             got = have.get(key)
@@ -1275,7 +1304,8 @@ class Hideout:
             lt = get_font(15, bold=True).render(ATTACH_SLOTS.get(key, key), True,
                                                 COL["text_dim"])
             screen.blit(lt, (box.x + 12, box.y + 10))
-            nm = ITEMS[got]["name"] if got else "空 —— 把配件拖到这里"
+            nm = (ITEMS.get(got, {}).get("name", got) if got
+                  else "空 —— 把配件拖到这里")
             vt = get_font(15, bold=True).render(
                 nm, True, COL["text"] if got else COL["text_dim"])
             screen.blit(vt, (box.x + 120, box.y + 10))
@@ -2074,8 +2104,6 @@ class Hideout:
         # 玩法简介:先读完再进游戏
         if self.show_intro:
             for ev in events:
-                if getattr(self, "weapon_detail", None) is not None and self._wd_event(ev):
-                    continue
                 if ev.type in (pygame.MOUSEBUTTONDOWN, pygame.KEYDOWN,
                                pygame.FINGERDOWN):
                     nxt = intro.advance(self.intro_page)
@@ -2095,6 +2123,10 @@ class Hideout:
         if self.game.save.touch and self.view in ("stash", "trade"):
             events = self._hold_filter(dt, events)
         for ev in events:
+            # 改装窗口打开时独占鼠标:点窗口外面只会关窗口,不会穿透到后面的
+            # 「开始战局」之类的按钮(以前就是这样一不留神开局的)
+            if self.weapon_detail is not None and self._wd_event(ev):
+                continue
             # 商品列表滚动条拖动中:鼠标移动 = 改滚动位置
             if ev.type == pygame.MOUSEMOTION and self.trade_drag:
                 self._trade_drag_to(ev.pos[1])
@@ -2138,14 +2170,14 @@ class Hideout:
                     self._right_click(ev.pos)
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 if self._scroll_click(ev.pos):     # 触屏翻页按钮最优先
-                    return
+                    continue
                 if self.view == "trade":
                     self._trade_click(ev.pos)
                 elif self.view == "task":
                     self._task_click(ev.pos)
                 else:
                     self._click(ev.pos)
-                return
+                continue
 
     # ---- 触屏翻页按钮(手机没有滚轮) ----
     def _scroll_buttons(self):
@@ -2461,7 +2493,7 @@ class Hideout:
                         return
                     free = loadout_free_slot(sd, item)
                     if free is None:
-                        self.say("武器位满了(2 主武器 + 副武器 + 近战),"
+                        self.say("武器位满了(主武器 / 副武器 / 手枪 / 刀),"
                                  "先卸下一件再拿", COL["bad"], 3.2)
                         return
                     sd.stash.remove_placed(placed)

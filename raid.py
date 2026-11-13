@@ -46,7 +46,7 @@ from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       weapon_params, weapon_capacity, weapon_ammo_ids,
                       weapon_slots, weapon_attach, weapon_blast_mul, ATTACH_SLOTS,
                       LOADOUT_SLOTS, LOADOUT_SLOT_NAMES, loadout_all, loadout_get,
-                      loadout_set, is_melee, is_drone, drone_cfg, drone_kind,
+                      loadout_set, loadout_free_slot, is_melee, is_drone, drone_cfg, drone_kind,
                       is_kamikaze, TALENTS,
                       DRONE, KAMIKAZE, DRONE_VIEW_FPS, DRONE_VIEW_POLYS,
                       weapon_fire_mode, weapon_fire_modes, cycle_fire_mode,
@@ -2790,7 +2790,7 @@ class Raid:
             self.use_med(placed)
 
     def equip_to_slot(self, placed):
-        """Shift+左键:把背包里的枪装到空着的装备位(副武器优先),不抢手里的枪。"""
+        """Shift+左键:把背包里的枪装到空着的装备位(按武器类别),不抢手里的枪。"""
         sd = self.game.save
         p = self.player
         item = placed.item
@@ -2799,20 +2799,19 @@ class Raid:
                 f"需 {item.def_['req_armor_level']} 级护甲才能持用 {item.name}",
                 COL["bad"], 3.0)
             return False
-        for slot in ("side", "main2"):
-            if loadout_get(sd, slot) is not None:
-                continue
-            p.bag.remove_placed(placed)
-            loadout_set(sd, slot, item)
-            audio.play("click")
-            self.add_toast(
-                f"{item.name} 已装到{LOADOUT_SLOT_NAMES.get(slot, slot)}"
-                f" · 按 {LOADOUT_SLOTS.index(slot) + 1} 切换",
-                COL["good"], 3.2)
-            return True
-        self.add_toast("副武器位和第二主武器位都占着 —— 先把一把换下来",
-                       COL["text_dim"], 2.8)
-        return False
+        slot = loadout_free_slot(sd, item)
+        if slot is None:
+            self.add_toast("没有空着的武器位 —— 先把一个位置腾出来",
+                           COL["text_dim"], 2.8)
+            return False
+        p.bag.remove_placed(placed)
+        loadout_set(sd, slot, item)
+        audio.play("click")
+        self.add_toast(
+            f"{item.name} 已装到{LOADOUT_SLOT_NAMES.get(slot, slot)}"
+            f" · 按 {LOADOUT_SLOTS.index(slot) + 1} 切换",
+            COL["good"], 3.2)
+        return True
 
     def equip_from_bag(self, placed):
         p = self.player
