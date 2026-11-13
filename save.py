@@ -117,7 +117,10 @@ class SaveData:
         self.bag = Container(BAG_W, BAG_H)   # 容量由装备的背包决定
         # 保险箱:贴身安全格(阵亡不丢);默认 2 格,50 个承包商任务全完成升 6 格
         self.safe = Container(SAFE_BASE[0], SAFE_BASE[1])
-        self.weapon = None   # Item 或 None(出战武器槽)
+        self.weapon = None   # Item 或 None(主武器位)
+        # 装备位里的另外三个(副武器/手枪/刀):槽名 -> 序列化后的武器数据。
+        # 单独存在存档上,不再塞在主武器的 state 里 —— 卸下主武器不会把它们带走。
+        self.x_slots = {}
         self.armor = None    # Item 或 None(出战护甲槽)
         self.helmet = None   # Item 或 None(出战头盔槽:夜视头盔)
         self.pack = None     # Item 或 None(出战背包,决定 bag 格子容量)
@@ -178,6 +181,8 @@ class SaveData:
     def any_weapon(self):
         if self.weapon:
             return True
+        if any(v for v in (getattr(self, "x_slots", None) or {}).values()):
+            return True          # 副武器/手枪/刀:主武器没装也算有家伙
         for p in self.stash.items:
             if p.item.cat == "weapon":
                 return True
@@ -192,6 +197,7 @@ class SaveData:
         注意:保险箱(self.safe)是贴身安全格,【故意不算】—— 阵亡不丢。
         """
         self.weapon = None
+        self.x_slots = {}
         self.armor = None
         self.helmet = None
         self.pack = None
@@ -209,6 +215,7 @@ class SaveData:
             "safe_w": self.safe.w,
             "safe_h": self.safe.h,
             "weapon": self.weapon.serialize() if self.weapon else None,
+            "x_slots": {k: v for k, v in (self.x_slots or {}).items() if v},
             "armor": self.armor.serialize() if self.armor else None,
             "helmet": self.helmet.serialize() if self.helmet else None,
             "pack": self.pack.serialize() if self.pack else None,
@@ -260,6 +267,19 @@ class SaveData:
         sd.safe = Container.deserialize(sw, sh, data.get("safe"), repair=True)
         if data.get("weapon"):
             sd.weapon = Item.from_dict(data["weapon"])
+        # 装备位:副武器/手枪/刀(新版单独存在存档上;老版塞在主武器 state 里)
+        raw = data.get("x_slots")
+        sd.x_slots = {}
+        if isinstance(raw, dict):
+            for slot in ("main2", "side", "melee"):
+                v = raw.get(slot)
+                if isinstance(v, dict):
+                    sd.x_slots[slot] = v
+        try:
+            from settings import loadout_migrate
+            loadout_migrate(sd)
+        except Exception:
+            pass
         if data.get("armor"):
             sd.armor = Item.from_dict(data["armor"])
         if data.get("helmet"):

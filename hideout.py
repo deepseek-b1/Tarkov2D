@@ -2468,17 +2468,8 @@ class Hideout:
             old = loadout_get(sd, slot)
             if old is not None:
                 if sd.stash.add_item(old):
+                    # 四个位子互相独立:卸主武器不会带走副武器/手枪/刀
                     loadout_set(sd, slot, None)
-                    # main1 卸空后要是有别的武器,把它顶到 main1 —— 否则存档里
-                    # 的 weapon 为空,另外两个槽就跟着丢了。
-                    if slot == "main1" and sd.weapon is None:
-                        rest = [w for s, w in loadout_all(sd).items()
-                                if s != "main1" and w is not None]
-                        if rest:
-                            loadout_set(sd, "main1", rest[0])
-                            for s, w in loadout_all(sd).items():
-                                if w is rest[0] and s != "main1":
-                                    loadout_set(sd, s, None)
                     save_mod.save_data(sd)
                     self.say(f"已卸下 {old.name}")
                 else:

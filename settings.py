@@ -7,7 +7,7 @@ import pygame
 from inventory import Item      # 装备位里的武器要在槽之间搬(inventory 不反向依赖本模块)
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.13.28"
+GAME_VERSION = "2.13.29"
 # 更新清单地址(留空则只认 EXE 同目录的 version.json)。
 # 默认指向仓库里的 update_server/version.json —— 推到 main 就生效,不用再发服务器。
 # 也可以换成本机自建服务器(如 http://127.0.0.1:8765/version.json)。
@@ -1554,12 +1554,14 @@ TALENTS["drone_kam"] = dict(name="末段加速", desc="电量 +25%",
 # ---------- 装备位(藏身处「出战配置」)----------
 # 一把主武器 + 一把副武器(第二个长枪位)+ 一把手枪 + 一把刀。槽内物品不进战局背包,
 # 所以不会占格子。
-# 注意:main1 就是存档里的 sd.weapon 本身(老存档/战局/联机代码全都用它),
-# 其余三个槽存在 sd.weapon.state["x_slots"] 里 —— 这样现有存档格式一个字都不用改。
+# 存储:main1 就是存档里的 sd.weapon 本身(老存档/战局/联机代码全都用它);
+# 其余三个槽存在 sd.x_slots(存档自己的字典)。
+#   —— 以前是塞在 sd.weapon.state["x_slots"] 里,结果一卸主武器,副武器/手枪/刀
+#      就跟着那把枪一起“消失”了;现在四个位子互相独立。
 LOADOUT_SLOTS = ("main1", "main2", "side", "melee")
 LOADOUT_SLOT_NAMES = {"main1": "主武器", "main2": "副武器",
                       "side": "手枪", "melee": "刀"}
-_X_SLOTS_KEY = "x_slots"
+_X_SLOTS_KEY = "x_slots"        # 只用于老存档迁移(旧版塞在武器 state 里)
 
 
 def is_melee(item_or_def):
@@ -1583,30 +1585,26 @@ def slot_for_weapon(item):
     return "main1"          # 主武器位:main1 满了会自动去 main2(副武器位)
 
 
+def _slots_of(sd):
+    """存档里的装备位字典(没有就建一个;老档由 loadout_migrate 搬过来)。"""
+    xs = getattr(sd, "x_slots", None)
+    if not isinstance(xs, dict):
+        xs = {}
+        try:
+            sd.x_slots = xs
+        except Exception:
+            return {}
+    return xs
+
+
 def loadout_get(sd, slot):
     """取某个装备位上的武器(None = 空)。"""
     if slot == "main1":
         return getattr(sd, "weapon", None)
-    w = getattr(sd, "weapon", None)
-    if w is None:
-        return None
-    xs = w.state.get(_X_SLOTS_KEY)
-    if not isinstance(xs, dict):
-        return None
-    data = xs.get(slot)
-    return Item.from_dict(data) if isinstance(data, dict) else data
-
-
-def _loadout_ensure(sd):
-    """保证 sd.weapon 存在且带 x_slots(内部用)。"""
-    w = getattr(sd, "weapon", None)
-    if w is None:
-        return None
-    xs = w.state.get(_X_SLOTS_KEY)
-    if not isinstance(xs, dict):
-        xs = {}
-        w.state[_X_SLOTS_KEY] = xs
-    return xs
+    data = _slots_of(sd).get(slot)
+    if isinstance(data, dict):
+        return Item.from_dict(data)
+    return data or None
 
 
 def loadout_set(sd, slot, item):
@@ -1614,23 +1612,55 @@ def loadout_set(sd, slot, item):
 
     槽内保存的是序列化数据(不是对象引用),所以槽里的枪每次读出来都是新对象 ——
     战局里开火/换弹的 state 改动不会自动回写,这点和 main1(=sd.weapon 本尊)不同。
+    四个位子互相独立:清掉主武器不会动其它三个。
     """
     if slot == "main1":
         sd.weapon = item
-        _loadout_ensure(sd)
         return True
-    if getattr(sd, "weapon", None) is None:
-        if item is None:
-            return True
-        sd.weapon = item            # 没有主武器时先占住 main1,否则存档存不下旁的槽
-        _loadout_ensure(sd)
-        return True
-    xs = _loadout_ensure(sd)
+    xs = _slots_of(sd)
     xs[slot] = item.serialize() if item is not None else None
     return True
 
 
 loadout_put = loadout_set       # 兼容别名
+
+
+def _migrate_item_slots(sd, item):
+    """把某把武器 state 里的老式 x_slots 搬进 sd.x_slots(搬完删掉那份)。"""
+    if item is None:
+        return 0
+    st = getattr(item, "state", None)
+    if not isinstance(st, dict):
+        return 0
+    old = st.get(_X_SLOTS_KEY)
+    if not isinstance(old, dict):
+        return 0
+    xs = _slots_of(sd)
+    moved = 0
+    for slot, data in old.items():
+        if slot not in LOADOUT_SLOTS or slot == "main1":
+            continue
+        if xs.get(slot) is None and data is not None:
+            xs[slot] = data
+            moved += 1
+    st.pop(_X_SLOTS_KEY, None)
+    return moved
+
+
+def loadout_migrate(sd):
+    """老存档迁移:把塞在武器 state["x_slots"] 里的副武器/手枪/刀搬到 sd.x_slots。
+
+    要扫三处:
+      1. 当前主武器(正常情况:另外三个槽就挂在这把枪的 state 里);
+      2. 仓库 / 背包里的武器 —— 已经踩过「卸主武器」这个坑的存档,被带走的三件
+         正躺在仓库里那把枪的 state 里,这里顺手捞回来。
+    返回搬了几件。
+    """
+    moved = _migrate_item_slots(sd, getattr(sd, "weapon", None))
+    for cont in (getattr(sd, "stash", None), getattr(sd, "bag", None)):
+        for pl in (getattr(cont, "items", None) or ()):
+            moved += _migrate_item_slots(sd, getattr(pl, "item", None))
+    return moved
 
 
 def loadout_all(sd):

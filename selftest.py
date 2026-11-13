@@ -2067,13 +2067,68 @@ def run():
         assert loadout_get(sd, "main2") is None
         assert loadout_free_slot(sd, Item.weapon("akm")) == "main2"
 
-        # 存档往返:四个位子要原样回来(存在 sd.weapon.state["x_slots"] 里)
+        # 存档往返:四个位子要原样回来(副武器/手枪/刀 存在 sd.x_slots 里)
         save_mod.save_data(sd)
         sd2 = save_mod.load_data()
         got2 = {s: (w.iid if w else None) for s, w in loadout_all(sd2).items()}
         assert got2 == {"main1": "ak74", "main2": None,
                         "side": "pm", "melee": "knife"}, got2
         assert loadout_get(sd2, "melee").def_.get("melee") is True
+
+        # **卸主武器不能带走其它三个位**(以前它们塞在主武器 state 里,会一起消失)
+        loadout_set(sd, "main1", None)
+        got_off = {s: (w.iid if w else None) for s, w in loadout_all(sd).items()}
+        assert got_off == {"main1": None, "main2": None,
+                           "side": "pm", "melee": "knife"}, got_off
+        save_mod.save_data(sd)
+        sd_off = save_mod.load_data()
+        got_off2 = {s: (w.iid if w else None) for s, w in loadout_all(sd_off).items()}
+        assert got_off2 == {"main1": None, "main2": None,
+                            "side": "pm", "melee": "knife"}, got_off2
+
+        # 老存档迁移:塞在 weapon.state["x_slots"] 里的那把要搬到 sd.x_slots
+        old_sd = save_mod.reset_data()
+        old_sd.weapon = Item.weapon("ak74", mag=30)
+        old_sd.weapon.state[_S._X_SLOTS_KEY] = {
+            "main2": Item.weapon("m700", mag=5).serialize()}
+        raw = old_sd.serialize()
+        raw["x_slots"] = {}          # 模拟老档:只有武器 state 里那份
+        sd_mig = save_mod.SaveData.deserialize(raw)
+        assert loadout_get(sd_mig, "main2") is not None, "老档里的副武器丢了"
+        assert loadout_get(sd_mig, "main2").iid == "m700"
+        assert _S._X_SLOTS_KEY not in sd_mig.weapon.state, "迁移后不该留第二份"
+
+        # 已经踩过坑的存档:被带走的三件躺在仓库里那把枪的 state 里,也要捞回来
+        g5 = save_mod.reset_data()
+        stuck = Item.weapon("ak74", mag=30)
+        stuck.state[_S._X_SLOTS_KEY] = {
+            "side": Item.weapon("pm", mag=8).serialize()}
+        g5.weapon = None
+        g5.stash.add_item(stuck)
+        raw5 = g5.serialize()
+        raw5["x_slots"] = {}
+        sd5 = save_mod.SaveData.deserialize(raw5)
+        assert loadout_get(sd5, "side") is not None, "仓库里那把枪带走的副武器没捞回来"
+        assert loadout_get(sd5, "side").iid == "pm"
+
+        # 藏身处点「主武器」格卸下:只有主武器进仓库,其它三个位还在
+        g4 = Game()
+        g4.save = save_mod.reset_data()
+        g4.save.seen_intro = True
+        h4 = g4.hideout
+        h4.show_intro = False
+        sd4 = g4.save
+        sd4.weapon = Item.weapon("ak74", mag=30)
+        loadout_set(sd4, "main2", Item.weapon("m700", mag=5))
+        loadout_set(sd4, "side", Item.weapon("pm", mag=8))
+        loadout_set(sd4, "melee", Item("knife"))
+        n0 = sd4.stash.item_count()
+        h4._click(h4.lay["weapon"].center)
+        assert sd4.weapon is None, "主武器应该被卸下"
+        assert loadout_get(sd4, "main2").iid == "m700", "副武器被主武器带走了"
+        assert loadout_get(sd4, "side").iid == "pm"
+        assert loadout_get(sd4, "melee").iid == "knife"
+        assert sd4.stash.item_count() == n0 + 1, "卸下的主武器要进仓库"
 
         # 战局:数字键切枪 / 点 HUD 方块 / 挥刀
         g2 = Game()

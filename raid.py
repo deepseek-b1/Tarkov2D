@@ -3206,8 +3206,7 @@ class Raid:
     def consume_kamikaze(self, p):
         """自爆后机体损毁:把这一架从装备位上抹掉(消耗品)。
 
-        主武器位被消耗时,先把另一个装备位顶上来,免得挂在 sd.weapon 上的
-        x_slots(其它三个槽)跟着一起丢。
+        主武器位被消耗时不会影响其它三个位;手上空了就自动换到还有枪的位。
         """
         if p is None:
             return False
@@ -3216,20 +3215,12 @@ class Raid:
             return False
         sd = self.game.save
         slot = getattr(p, "cur_slot", None) or "main1"
-        if slot == "main1":
-            others = [(s, loadout_get(sd, s)) for s in LOADOUT_SLOTS
-                      if s != "main1"]
-            nxt = next((w for _s, w in others if w is not None), None)
-            loadout_set(sd, "main1", nxt)       # 扩能是 None(那就真的空了)
-            if nxt is not None:
-                for s, w in others:
-                    if w is nxt:
-                        continue
-                    loadout_set(sd, s, w)
-        else:
-            loadout_set(sd, slot, None)
+        loadout_set(sd, slot, None)
         p.weapon = None
         p.cur_slot = "main1"
+        nxt = next((s for s in LOADOUT_SLOTS if loadout_get(sd, s) is not None), None)
+        if nxt is not None:
+            self.switch_weapon(p, nxt)
         self.add_toast("机体已损毁(自杀无人机是一次性的)", COL["text_dim"], 3.0)
         return True
 
