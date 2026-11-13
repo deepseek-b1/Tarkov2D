@@ -3,7 +3,8 @@
 import math
 import random
 
-from settings import SCAVS, TILE, SCAV_LOD_DIST, REPAIR_RANGE
+from settings import (SCAVS, TILE, SCAV_LOD_DIST, REPAIR_RANGE,
+                      SCAV_STANDOFF, SCAV_STANDOFF_SPEED)
 
 _LOD2 = float(SCAV_LOD_DIST) * SCAV_LOD_DIST
 
@@ -244,9 +245,22 @@ class Scav:
                 goal = (p.x, p.y)
             self._repath(raid, goal)
             attack_range = self.d.get("range", self.d.get("atk_range", 34))
-            if self.kind != "melee" and see and dist < attack_range * 0.9:
-                # 站定射击
+            if self.kind == "melee":
+                # 近战:走到攻击距离就停下挥刀 —— 以前会一路寻路到玩家脚下再打,
+                # 整个人贴在玩家身上(不好瞄、尸体也堆在一起)
+                if see and dist <= attack_range * 0.9:
+                    self.path = []
+                    self.facing = math.atan2(p.y - self.y, p.x - self.x)
+                else:
+                    self._follow_path(raid, dt, self.d["speed"])
+            elif see and dist < attack_range * 0.9:
                 self.facing = math.atan2(p.y - self.y, p.x - self.x)
+                if dist < SCAV_STANDOFF:
+                    # 贴脸了:一边保持射击一边后撤,拉开一点距离
+                    self.path = []
+                    self._back_off(raid, dt, p)
+                else:
+                    self.path = []
             else:
                 self._follow_path(raid, dt, self.d["speed"])
             if self.kind == "melee":
@@ -258,6 +272,19 @@ class Scav:
             else:
                 if see and dist < self.d["range"] and self.shoot_t <= 0:
                     self._shoot(raid, p)
+
+    def _back_off(self, raid, dt, p):
+        """朝远离目标的方向退;退不动就侧移 —— 别整个人贴在玩家身上。"""
+        ang = math.atan2(self.y - p.y, self.x - p.x)
+        step = self.d["speed"] * SCAV_STANDOFF_SPEED * dt
+        for da in (0.0, 0.6, -0.6, 1.2, -1.2):
+            nx = self.x + math.cos(ang + da) * step
+            ny = self.y + math.sin(ang + da) * step
+            if not raid.map.collides(nx, ny, self.r):
+                self.x, self.y = nx, ny
+                self.path = []
+                return True
+        return False
 
     def _shoot(self, raid, p):
         d = self.d

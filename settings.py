@@ -7,7 +7,7 @@ import pygame
 from inventory import Item      # 装备位里的武器要在槽之间搬(inventory 不反向依赖本模块)
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.13.24"
+GAME_VERSION = "2.13.25"
 # 更新清单地址(留空则只认 EXE 同目录的 version.json)。
 # 默认指向仓库里的 update_server/version.json —— 推到 main 就生效,不用再发服务器。
 # 也可以换成本机自建服务器(如 http://127.0.0.1:8765/version.json)。
@@ -453,11 +453,18 @@ def pack_grid(iid):
     """背包物品对应的格容量(非背包返回口袋容量)。"""
     return ITEMS.get(iid, {}).get("grid", POCKETS)
 
+# ---------- 敌人与玩家的「社交距离」 ----------
+# 敌人贴脸不好瞄,尸体也容易叠在一起:远程敌人靠得太近会一边打一边后撤,
+# 近战敌人走到攻击距离就停下挥刀,不再往玩家身上挤。
+SCAV_STANDOFF = 110          # 远程敌人比这更近就后撤(像素)
+SCAV_STANDOFF_SPEED = 0.85   # 后撤时的速度倍率
+MELEE_ATK_RANGE = 46         # 近战攻击距离(原来 34,整个人会站到玩家身上)
+
 # ---------- 拾荒者(AI 敌人) ----------
 SCAVS = {
     # pen = 敌人这一枪的穿甲等级(0~6),和护甲 level 比:见 raid.Player._absorb_with_armor
-    "melee": dict(name="刀匪", hp=45, speed=210, dmg=13, atk_range=34, atk_cd=0.8, view=310,
-                  pen=1),
+    "melee": dict(name="刀匪", hp=45, speed=210, dmg=13, atk_range=MELEE_ATK_RANGE,
+                  atk_cd=0.8, view=310, pen=1),
     "pistol": dict(name="拾荒枪手", hp=50, speed=145, dmg=8, pellets=1, spread=0.17, rof=1.2,
                    range=540, view=430, sfx="epm", pen=2),
     "shotgun": dict(name="霰弹拾荒者", hp=60, speed=125, dmg=7, pellets=6, spread=0.24, rof=1.8,

@@ -1592,18 +1592,24 @@ class Raid:
         return items
 
     def _corpse_pos(self, x, y):
-        """尸体盒子位置:与已有容器太近时按黄金角环形错开,避免叠在一起。"""
-        for attempt in range(14):
+        """尸体盒子位置:与已有容器太近时按黄金角环形错开,避免叠在一起。
+
+        尸体是击杀点生成的,敌人死后往往躺在同一片地上 —— 一圈 32px 起步、
+        每 5 次外扩 11px 地找空位,最多试 20 次。
+        """
+        x0, y0 = int(x), int(y)
+        cx, cy = x0, y0
+        for attempt in range(20):
             too_close = any(
-                math.hypot(x - lc.rect.centerx, y - lc.rect.centery) < TILE * 0.9
+                math.hypot(cx - lc.rect.centerx, cy - lc.rect.centery) < TILE
                 for lc in self.containers)
             if not too_close:
-                return x, y
+                return cx, cy
             ang = attempt * 2.39996
-            rad = TILE * (0.9 + 0.3 * (attempt // 4))
-            x = int(x + math.cos(ang) * rad)
-            y = int(y + math.sin(ang) * rad)
-        return x, y
+            rad = TILE * (1.0 + 0.35 * (attempt // 5))
+            cx = int(x0 + math.cos(ang) * rad)
+            cy = int(y0 + math.sin(ang) * rad)
+        return cx, cy
 
     def nearest_interactable(self):
         """最近的扩交互对象:未解救人质 / 倒地球友 / 突袭模式要炸的指挥设施。"""

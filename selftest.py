@@ -6788,6 +6788,59 @@ def run():
 
     check("键位-突袭支援(F1-F3)与切装备位(1-4)不冲突", t_key_conflict)
 
+    def t_scav_space():
+        """敌人不贴脸(近战停在攻击距离 / 远程贴脸会后撤)+ 尸体不叠在一起。"""
+        from game import Game
+        from enemy import Scav
+        from settings import SCAV_STANDOFF, MELEE_ATK_RANGE
+
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.seen_intro = True
+        g.save.mode = "raid"
+        g.start_raid()
+        r = g.raid
+        r.player.hp = 99999
+        p = r.player
+
+        # 1) 刀匪冲过来:停在攻击距离附近,不能站到玩家身上
+        m = Scav("melee", p.x + 220, p.y, r.diff)
+        r.scavs = [m]
+        for _ in range(60 * 12):
+            r.update(1 / 60, [])
+            if m.state == "chase" and math.hypot(m.x - p.x, m.y - p.y) < 200:
+                break
+        for _ in range(60 * 4):
+            r.update(1 / 60, [])
+        d = math.hypot(m.x - p.x, m.y - p.y)
+        assert MELEE_ATK_RANGE * 0.6 < d < MELEE_ATK_RANGE * 1.7, d
+        assert m.state == "chase", m.state
+
+        # 2) 远程敌人被贴脸:一边打一边后撤
+        s = Scav("pistol", p.x + 40, p.y, r.diff)
+        s.alert = (p.x, p.y)
+        r.scavs = [s]
+        for _ in range(60 * 2):
+            r.update(1 / 60, [])
+        d2 = math.hypot(s.x - p.x, s.y - p.y)
+        assert d2 > SCAV_STANDOFF * 0.5, d2
+
+        # 3) 同一地点连杀 6 个:六个尸体盒子两两错开
+        r.scavs = []
+        for _ in range(6):
+            r.scavs.append(Scav("ar", p.x + 400, p.y + 400, r.diff))
+        for v in list(r.scavs):
+            v.x, v.y = p.x + 400, p.y + 400
+            r.kill_scav(v)
+        cs = [lc for lc in r.containers if lc.kind == "corpse"][-6:]
+        assert len(cs) == 6, len(cs)
+        worst = min(math.hypot(cs[i].rect.centerx - cs[j].rect.centerx,
+                               cs[i].rect.centery - cs[j].rect.centery)
+                    for i in range(6) for j in range(i + 1, 6))
+        assert worst >= 24, worst
+
+    check("敌人-不贴脸(近战停手/远程后撤)/尸体不叠", t_scav_space)
+
     ok = all(r[1] for r in results)
     report = ["Tarkov2D selftest " + ("PASS" if ok else "FAIL"), ""]
     for name, passed, err in results:
