@@ -26,7 +26,8 @@ from settings import (W, H, TILE, COL, PLAYER, RAID_TIME, EXTRACT_TIME,
                       HELI_CALL_TIME, HELI_DEFEND_TIME, HELI_WAVE_INTERVAL,
                       HELI_WAVE_SIZE, HELI_WAVE_MAX, HELI_WINDOW_TIME,
                       HELI_KEYCARDS_REQUIRED, RESEARCHER_SIDE_POOL,
-                      RESEARCHER_RIFLE_POOL,
+                      RESEARCHER_RIFLE_POOL, RESEARCHER_INFECT_STAGE2,
+                      RESEARCHER_INFECT_STAGE3,
                       ALLY_COUNT,
                       REVIVE_TIME, INTERACT_RANGE, ALLY_DMG,
                       ASSAULT_ENEMIES, ASSAULT_ALLIES, ASSAULT_PLANT_TIME,
@@ -829,11 +830,38 @@ class Raid:
         self.pad = HeliPad(rect.centerx, rect.centery)
 
     def _update_researchers(self, dt):
-        """救出的研究员跟着你走;掉队太远(卡在别的房间)直接拉回来。"""
+        """救出的研究员跟着你走;掉队太远直接拉回来。顺带推进感染阶段。
+
+        感染:一阶段没症状(看不出来)-> 二阶段分不清敌我(乱开枪)->
+        三阶段攻击友军(会被玩家击毙)。倒地时感染计时暂停。
+        """
         if self.mode != "explore" or not self.researchers:
             return
         p = self.player
         for r in self.researchers:
+            if r.dead:
+                continue
+            if r.infected and not r.downed and r.infect_stage < 3:
+                r.infect_t += dt
+                stage = 1
+                if r.infect_t >= RESEARCHER_INFECT_STAGE3:
+                    stage = 3
+                elif r.infect_t >= RESEARCHER_INFECT_STAGE2:
+                    stage = 2
+                if stage != r.infect_stage:
+                    r.infect_stage = stage
+                    r.hostile = stage >= 3
+                    if stage == 2:
+                        self.add_toast("有个研究员开始分不清敌我…(小心他的枪口)",
+                                       COL["accent"], 4.5)
+                    elif stage == 3:
+                        self.add_toast("研究员感染发作,开始攻击自己人!",
+                                       COL["bad"], 5.5)
+            if r.downed:
+                continue
+            if r.hostile:
+                r.update(self, dt)
+                continue
             if not r.rescued:
                 continue
             r.update(self, dt)
@@ -1607,6 +1635,12 @@ class Raid:
             d = math.hypot(a.x - p.x, a.y - p.y)
             if d < bd:
                 best, bd, kind = a, d, "revive"
+        for r in self.researchers:
+            if not r.downed or r.dead:
+                continue
+            d = math.hypot(r.x - p.x, r.y - p.y)
+            if d < bd:
+                best, bd, kind = r, d, "revive"
         for o in self.objectives:
             if o.destroyed or o.c4 is not None:
                 continue          # 炸过的、已经安好 C4 的都不用再管
@@ -1646,6 +1680,9 @@ class Raid:
         if k == "story":
             o = self.channel["ent"].obj
             return f"{o['name']}中" if o else "进行中"
+        if k == "revive":
+            ent = (self.channel or {}).get("ent")
+            return "拉起研究员中" if getattr(ent, "uid", None) else "拉起队友中"
         return {"rescue": "解救人质中", "revive": "拉起队友中",
                 "research": "营救研究员中", "heli_call": "呼叫直升机中",
                 "destroy": "安放炸药中"}.get(k, "进行中")
@@ -2029,17 +2066,19 @@ class Raid:
         audio.play(sfx)
         self.emit_noise(x, y, 700 if rpg else 400)
 
-    def spawn_ally_bullet(self, x, y, ang, dmg=None, spread=0.0):
-        """队友射击:子弹只伤害敌人,不会误伤玩家。
+    def spawn_ally_bullet(self, x, y, ang, dmg=None, spread=0.0,
+                          owner="ally", src=None):
+        """队友射击:默认只伤害敌人,不会误伤玩家。
 
         dmg/spread 不给就是队友的标准参数;研究员按自己的枪法传一份打折的。
+        owner="infected" 是感染发作的流弹:不认人,谁在弹道上打谁(src 是自己)。
         """
         spd = 900.0
         if spread:
             ang += random.uniform(-spread, spread)
         self.bullets.append(dict(x=x, y=y, dx=math.cos(ang) * spd, dy=math.sin(ang) * spd,
                                  dmg=ALLY_DMG if dmg is None else dmg,
-                                 owner="ally", ttl=520 / spd))
+                                 owner=owner, src=src, ttl=520 / spd))
         audio.play("epm")
         self.emit_noise(x, y, 450)
 
@@ -2082,6 +2121,16 @@ class Raid:
             d2 = dx * dx + dy * dy
             if d2 < bd2 and los(sx, sy, a.x, a.y):
                 best, bd2 = a, d2
+        # 探索模式的联络员(研究员)也会被盯上 —— 他们被打倒才会掉血/倒地
+        if self.researchers:
+            for r in self.researchers:
+                if r.downed or r.dead:
+                    continue
+                dx = r.x - sx
+                dy = r.y - sy
+                d2 = dx * dx + dy * dy
+                if d2 < bd2 and los(sx, sy, r.x, r.y):
+                    best, bd2 = r, d2
         if best is not None:
             return best, True
         return self.seek_player(sx, sy), False
@@ -2133,6 +2182,13 @@ class Raid:
         for s in scavs:
             cells.add((int(s.x) >> 6, int(s.y) >> 6))
         cells_get = cells.__contains__
+        # 联络员的存在格:守军子弹只在附近有可能打到他们(13 个人逐颗子弹扫太贵)
+        rcells = set()
+        for _r in getattr(self, "researchers", ()):
+            if _r.dead or _r.downed:
+                continue
+            rcells.add((int(_r.x) >> 6, int(_r.y) >> 6))
+        rcells_get = rcells.__contains__
         for b in self.bullets:
             # 分小步采样,防止低帧率下 55px/步 穿墙/穿人
             bdx = b["dx"]
@@ -2278,6 +2334,76 @@ class Raid:
                                     self.kill_scav(s)
                                 dead = True
                                 break
+                    # 感染发作的联络员可以被玩家打死(没发作的打不到)
+                    if not dead:
+                        for r in self.researchers:
+                            if r.dead or r.downed or not r.hostile:
+                                continue
+                            dx = r.x - bx
+                            dy = r.y - by
+                            lim = r.r + 3
+                            if dx > lim or dx < -lim or dy > lim or dy < -lim:
+                                continue
+                            if dx * dx + dy * dy < lim * lim:
+                                r.take_damage(b["dmg"], self)
+                                audio.play("hit")
+                                self.add_particles(bx, by, 4, (190, 40, 40))
+                                dead = True
+                                break
+                elif b["owner"] == "infected":
+                    # 感染者的流弹:分不清敌我 —— 谁在弹道上打谁(不打自己)
+                    hit = False
+                    for s in scavs:
+                        dx = s.x - bx
+                        dy = s.y - by
+                        lim = s.r + 3
+                        if dx > lim or dx < -lim or dy > lim or dy < -lim:
+                            continue
+                        if dx * dx + dy * dy < lim * lim:
+                            s.damage(b["dmg"])
+                            if s.dead:
+                                self.kill_scav(s)
+                            hit = True
+                            break
+                    if not hit:
+                        lim = PLAYER["radius"] + 2
+                        for q in self.players():
+                            if q.out:
+                                continue
+                            dx = q.x - bx
+                            dy = q.y - by
+                            if (dx < lim and dx > -lim and dy < lim and dy > -lim
+                                    and dx * dx + dy * dy < lim * lim):
+                                q.take_damage(b["dmg"], self)
+                                hit = True
+                                break
+                    if not hit:
+                        for r in self.researchers:
+                            if r is b.get("src") or r.dead or r.downed:
+                                continue
+                            dx = r.x - bx
+                            dy = r.y - by
+                            lim = r.r + 3
+                            if dx > lim or dx < -lim or dy > lim or dy < -lim:
+                                continue
+                            if dx * dx + dy * dy < lim * lim:
+                                r.take_damage(b["dmg"], self)
+                                hit = True
+                                break
+                    if not hit:
+                        for a in self.allies:
+                            if a.downed:
+                                continue
+                            dx = a.x - bx
+                            dy = a.y - by
+                            lim = a.r + 2
+                            if dx > lim or dx < -lim or dy > lim or dy < -lim:
+                                continue
+                            if dx * dx + dy * dy < lim * lim:
+                                a.take_damage(b["dmg"], self)
+                                hit = True
+                                break
+                    dead = hit
                 else:
                     lim = PLAYER["radius"] + 2
                     for q in self.players():
@@ -2303,6 +2429,28 @@ class Raid:
                                 a.take_damage(b["dmg"], self)
                                 dead = True
                                 break
+                    # 联络员(研究员)也会被枪弹打倒
+                    if not dead and rcells:
+                        cx = int(bx) >> 6
+                        cy = int(by) >> 6
+                        if (rcells_get((cx, cy)) or rcells_get((cx - 1, cy))
+                                or rcells_get((cx + 1, cy)) or rcells_get((cx, cy - 1))
+                                or rcells_get((cx, cy + 1)) or rcells_get((cx - 1, cy - 1))
+                                or rcells_get((cx + 1, cy - 1))
+                                or rcells_get((cx - 1, cy + 1))
+                                or rcells_get((cx + 1, cy + 1))):
+                            for r in self.researchers:
+                                if r.dead or r.downed:
+                                    continue
+                                dx = r.x - bx
+                                dy = r.y - by
+                                lim = r.r + 2
+                                if dx > lim or dx < -lim or dy > lim or dy < -lim:
+                                    continue
+                                if dx * dx + dy * dy < lim * lim:
+                                    r.take_damage(b["dmg"], self)
+                                    dead = True
+                                    break
                 if dead:
                     break
             if not dead:

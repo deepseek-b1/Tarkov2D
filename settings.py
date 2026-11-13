@@ -7,7 +7,7 @@ import pygame
 from inventory import Item      # 装备位里的武器要在槽之间搬(inventory 不反向依赖本模块)
 
 # ---------- 版本与更新 ----------
-GAME_VERSION = "2.13.23"
+GAME_VERSION = "2.13.24"
 # 更新清单地址(留空则只认 EXE 同目录的 version.json)。
 # 默认指向仓库里的 update_server/version.json —— 推到 main 就生效,不用再发服务器。
 # 也可以换成本机自建服务器(如 http://127.0.0.1:8765/version.json)。
@@ -1877,6 +1877,15 @@ RESEARCHER_SIDE_POOL = tuple(k for k, c in WEAPON_CLASS.items()
                              if c in RESEARCHER_SIDE_CLASSES)
 RESEARCHER_RIFLE_POOL = tuple(k for k, c in WEAPON_CLASS.items()
                               if c == "突击步枪")
+
+# 联络员(研究员)会被打倒;打倒后有概率感染,感染按时间分三阶段:
+#   一阶段:没有任何症状(看不出来);二阶段:分不清敌我(会对身边人开枪);
+#   三阶段:开始攻击友军(追着玩家打,可以被击毙)
+RESEARCHER_HP = 70
+RESEARCHER_INFECT_CHANCE = 0.20     # 每次被打倒的感染概率
+RESEARCHER_INFECT_STAGE2 = 45.0     # 感染后多少秒进入第二阶段
+RESEARCHER_INFECT_STAGE3 = 120.0    # 感染后多少秒进入第三阶段
+RESEARCHER_REVIVE_TIME = 2.0        # 拉起来的读条(和队友一样)
 
 # ---------- 黑暗模式(夜战) ----------
 # 全图压成漆黑:只有「光源范围」内能看见东西(敌人也只有亮区里才显示)。

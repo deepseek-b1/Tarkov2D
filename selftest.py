@@ -6690,6 +6690,102 @@ def run():
 
     check("探索模式-研究员救援/直升机防守/撤离", t_explore_rescue)
 
+    def t_explore_infect():
+        """探索模式:联络员会被打倒;打倒后 20% 感染;感染三阶段(无症状/乱开枪/打友军)。"""
+        import npc
+        from game import Game
+        from enemy import Scav
+        from settings import (W as SW, H as SH, RESEARCHER_RESCUE_TIME,
+                              RESEARCHER_HP, RESEARCHER_INFECT_CHANCE,
+                              RESEARCHER_INFECT_STAGE2,
+                              RESEARCHER_INFECT_STAGE3)
+
+        assert 0.0 < RESEARCHER_INFECT_CHANCE < 1.0, RESEARCHER_INFECT_CHANCE
+        screen = pygame.display.set_mode((SW, SH))
+        g = Game()
+        g.save = save_mod.reset_data()
+        g.save.mode = "explore"
+        g.save.seen_intro = True
+        g.start_raid()
+        r = g.raid
+        r.player.hp = 99999
+
+        # 1) 被打倒 -> 倒地;交互键变成「拉起」;拉起来回血
+        res = r.researchers[0]
+        r.player.x, r.player.y = res.x, res.y
+        r.interact()
+        r._update_channel(RESEARCHER_RESCUE_TIME + 0.1)
+        assert res.rescued
+        res.take_damage(RESEARCHER_HP + 5, r)
+        assert res.downed and res.hp == 0
+        kind, ent = r.nearest_interactable()
+        assert kind == "revive" and ent is res, (kind, ent)
+        r.interact()
+        assert r.channel and r.channel["kind"] == "revive", r.channel
+        r._update_channel(3.0)
+        assert not res.downed and res.hp > 0
+        g.draw(screen)                       # 倒地/拉起都能画
+
+        # 2) 感染概率:0 不感染、1 必感染;一阶段没有任何症状
+        res.infected, res.infect_stage, res.infect_t = False, 0, 0.0
+        old = npc.RESEARCHER_INFECT_CHANCE
+        try:
+            npc.RESEARCHER_INFECT_CHANCE = 0.0
+            res.knock_down(r)
+            assert not res.infected, "概率 0 不该感染"
+            res.revive()
+            npc.RESEARCHER_INFECT_CHANCE = 1.0
+            res.knock_down(r)
+        finally:
+            npc.RESEARCHER_INFECT_CHANCE = old
+        assert res.infected and res.infect_stage == 1 and not res.hostile
+        assert res.stage_label() == "", "一阶段不该有症状"
+        res.revive()
+        g.draw(screen)
+
+        # 3) 二阶段:分不清敌我 —— 会朝身边的研究员开枪(流弹 owner=infected)
+        r._update_researchers(RESEARCHER_INFECT_STAGE2 + 0.1)
+        assert res.infect_stage == 2 and res.stage_label() == "神志不清"
+        assert not res.hostile
+        mate = r.researchers[1]
+        mate.rescued = True
+        mate.x, mate.y = res.x + 70, res.y
+        res.tgt, res.tgt_t, res.fire_cd = None, -1.0, 0.0
+        r.bullets = []
+        res.update(r, 1 / 60)
+        assert any(b["owner"] == "infected" for b in r.bullets), r.bullets
+
+        # 4) 三阶段:开始打友军(玩家优先),而且能被玩家打死
+        r._update_researchers(RESEARCHER_INFECT_STAGE3 + 0.1)
+        assert res.infect_stage == 3 and res.hostile
+        res.x, res.y = r.player.x + 50, r.player.y
+        res.tgt, res.tgt_t, res.fire_cd = None, -1.0, 0.0
+        r.bullets = []
+        res.update(r, 1 / 60)
+        assert any(b["owner"] == "infected" and b.get("src") is res
+                   for b in r.bullets), r.bullets
+        res.take_damage(999, r)
+        assert res.dead, "发作的研究员应该能被击毙"
+
+        # 5) 敌人会瞄准联络员,枪弹能把他打掉血/打倒
+        other = mate
+        other.rescued = False            # 待在原地,别跟着跑
+        other.x, other.y = r.player.x + 300, r.player.y
+        s = Scav("ar", other.x + 100, other.y, r.diff)
+        r.player.x += 1400               # 把玩家挪出守军视野,保证它选联络员
+        r.scavs = [s]
+        tgt, see = r.threat_for(s)
+        assert isinstance(tgt, npc.Researcher) and see, (tgt, see)
+        other.hp = other.max_hp
+        for _ in range(900):
+            r.update(1 / 60, [])
+            if other.downed or other.hp < other.max_hp:
+                break
+        assert other.downed or other.hp < other.max_hp, other.hp
+        g.draw(screen)
+
+    check("探索模式-联络员倒地/感染三阶段", t_explore_infect)
+
     check("键位-突袭支援(F1-F3)与切装备位(1-4)不冲突", t_key_conflict)
 
     ok = all(r[1] for r in results)

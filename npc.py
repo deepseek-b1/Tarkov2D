@@ -8,7 +8,8 @@ from settings import (ALLY_HP, ALLY_RANGE, REPAIR_RANGE, TILE, ITEMS,
                       RESEARCHER_SIDE_RANGE, RESEARCHER_SIDE_DMG,
                       RESEARCHER_SIDE_CD, RESEARCHER_SIDE_SPREAD,
                       RESEARCHER_RIFLE_RANGE, RESEARCHER_RIFLE_DMG,
-                      RESEARCHER_RIFLE_CD, RESEARCHER_RIFLE_SPREAD)
+                      RESEARCHER_RIFLE_CD, RESEARCHER_RIFLE_SPREAD,
+                      RESEARCHER_HP, RESEARCHER_INFECT_CHANCE)
 
 # 队友选目标不必每帧做(见 Ally.nearest_enemy);0.12s 兼顾了跟枪手感与开销
 THINK_INTERVAL = 0.12
@@ -190,10 +191,11 @@ class Hostage(Walker):
 
 
 class Researcher(Hostage):
-    """探索模式的研究员:待救援时蹲在原地;救出后跟着玩家走,还会开枪帮你打。
+    """探索模式的联络员(研究员):待救援时蹲在原地;救出后跟着玩家走、开枪帮忙。
 
-    随身装备:一把手枪/冲锋枪(近距离)+ 随机一把突击步枪(远一点);
-    伤害按「不是战斗人员」打折,不然 13 个人就是一支军队。
+    随身装备:一把手枪/冲锋枪(近距离)+ 随机一把突击步枪(远一点),伤害按
+    「不是战斗人员」打折。会被打倒;打倒后有概率感染,感染按三个阶段恶化:
+      一阶段 没症状 -> 二阶段 分不清敌我(乱开枪) -> 三阶段 攻击友军(可击毙)
     """
 
     def __init__(self, x, y, uid="", floor=1, side=None, rifle=None):
@@ -207,40 +209,88 @@ class Researcher(Hostage):
         self.fire_cd = random.uniform(0.0, 0.8)
         self.tgt = None
         self.tgt_t = -1.0
+        # 受伤 / 倒地 / 感染
+        self.max_hp = RESEARCHER_HP
+        self.hp = self.max_hp
+        self.downed = False      # 被打倒(还活着,可以拉起来)
+        self.dead = False        # 感染发作后被击毙
+        self.infected = False
+        self.infect_t = 0.0      # 感染后经过的秒数(倒地时暂停)
+        self.infect_stage = 0    # 0=没感染 1/2/3
+        self.hostile = False     # 三阶段:开始打友军
 
-    def nearest_enemy(self, raid):
-        """最近的、自己看得见的敌人(0.35 秒缓存;最多对最近的 6 个查视线)。"""
+    # ---------- 受伤 / 倒地 / 感染 ----------
+    def take_damage(self, dmg, raid):
+        if self.downed or self.dead:
+            return
+        self.hp -= dmg
+        raid.add_particles(self.x, self.y, 3, (210, 130, 110))
+        if self.hp > 0:
+            return
+        self.hp = 0
+        if self.hostile:
+            # 已经发作的救不回来了:直接击毙
+            self.dead = True
+            self.path = []
+            raid.add_toast("感染发作的研究员被击毙了", (200, 90, 90), 3.6)
+            return
+        self.knock_down(raid)
+
+    def knock_down(self, raid):
+        self.downed = True
+        self.path = []
+        self.path_i = 0
+        if not self.infected and random.random() < RESEARCHER_INFECT_CHANCE:
+            self.infected = True
+            self.infect_t = 0.0
+            self.infect_stage = 1
+        raid.add_toast("研究员被打倒了 —— 靠近按交互键拉起来", (235, 180, 90), 3.6)
+
+    def revive(self):
+        self.downed = False
+        self.hp = int(self.max_hp * 0.6)
+
+    def stage_label(self):
+        """头顶那行小字(一阶段没症状,不显示)。"""
+        return {0: "", 1: "", 2: "神志不清", 3: "感染发作"}.get(self.infect_stage, "")
+
+    # ---------- 目标选择 ----------
+    def _pick(self, raid, cands):
+        """从候选里挑最近的、看得见的那个(0.35 秒缓存一次)。"""
         if self.tgt is not None and raid.now < self.tgt_t:
-            return self.tgt
+            return self.tgt if self.tgt in cands else None
         self.tgt_t = raid.now + 0.35
         r2 = float(RESEARCHER_RIFLE_RANGE) ** 2
-        cands = []
-        for s in raid.scavs:
-            dx = s.x - self.x
-            dy = s.y - self.y
+        best, bd = None, r2
+        los = raid.map.los_clear
+        for c in cands:
+            if c is self or getattr(c, "downed", False) or getattr(c, "dead", False):
+                continue
+            if getattr(c, "out", False):
+                continue
+            dx = c.x - self.x
+            dy = c.y - self.y
             d2 = dx * dx + dy * dy
-            if d2 < r2:
-                cands.append((d2, s))
-        self.tgt = None
-        if cands:
-            cands.sort(key=_first)
-            los = raid.map.los_clear
-            for _d2, s in cands[:6]:
-                if los(self.x, self.y, s.x, s.y):
-                    self.tgt = s
-                    break
-        return self.tgt
+            if d2 < bd and los(self.x, self.y, c.x, c.y):
+                best, bd = c, d2
+        self.tgt = best
+        return best
 
-    def update(self, raid, dt):
-        if not self.rescued:
-            return
-        Hostage.update(self, raid, dt)      # 先跟着玩家走
-        self.fire_cd -= dt
-        if self.fire_cd > 0:
-            return
-        tgt = self.nearest_enemy(raid)
-        if tgt is None:
-            return
+    def nearest_enemy(self, raid):
+        """一阶段:只打敌人。"""
+        return self._pick(raid, raid.scavs)
+
+    def nearest_confused(self, raid):
+        """二阶段:分不清敌我 —— 敌人和身边的研究员都算目标。"""
+        return self._pick(raid, list(raid.scavs) + list(raid.researchers))
+
+    def nearest_friendly(self, raid):
+        """三阶段:优先玩家,其次队友/其他研究员。"""
+        return self._pick(raid, list(raid.players()) + list(raid.allies)
+                          + list(raid.researchers))
+
+    # ---------- 每帧 ----------
+    def _fire_at(self, raid, tgt, owner):
         d = math.hypot(tgt.x - self.x, tgt.y - self.y)
         if d <= RESEARCHER_SIDE_RANGE:
             dmg, cd, spread = (RESEARCHER_SIDE_DMG, RESEARCHER_SIDE_CD,
@@ -250,5 +300,47 @@ class Researcher(Hostage):
                                RESEARCHER_RIFLE_SPREAD)
         self.fire_cd = cd
         self.aim = math.atan2(tgt.y - self.y, tgt.x - self.x)
-        raid.spawn_ally_bullet(self.x, self.y, self.aim, dmg=dmg, spread=spread)
+        raid.spawn_ally_bullet(self.x, self.y, self.aim, dmg=dmg, spread=spread,
+                               owner=owner, src=self)
+
+    def _update_hostile(self, raid, dt):
+        """三阶段:追着友军打(可以被玩家击毙)。"""
+        self.repath_t -= dt
+        self.fire_cd -= dt
+        tgt = self.nearest_friendly(raid)
+        if tgt is None:
+            p = raid.player
+            if math.hypot(p.x - self.x, p.y - self.y) > 160:
+                self._repath(raid, p.x, p.y)
+                self._follow(raid, dt, 140)
+            return
+        if self.fire_cd <= 0:
+            self._fire_at(raid, tgt, "infected")
+        if math.hypot(tgt.x - self.x, tgt.y - self.y) > 240:
+            self._repath(raid, tgt.x, tgt.y)
+            self._follow(raid, dt, 145)
+        else:
+            self.path = []
+
+    def update(self, raid, dt):
+        if self.dead:
+            return
+        if self.hostile:
+            self._update_hostile(raid, dt)
+            return
+        if not self.rescued or self.downed:
+            return
+        Hostage.update(self, raid, dt)      # 先跟着玩家走
+        self.fire_cd -= dt
+        if self.fire_cd > 0:
+            return
+        if self.infect_stage >= 2:
+            tgt = self.nearest_confused(raid)
+            owner = "infected"
+        else:
+            tgt = self.nearest_enemy(raid)
+            owner = "ally"
+        if tgt is None:
+            return
+        self._fire_at(raid, tgt, owner)
 

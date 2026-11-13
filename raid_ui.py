@@ -800,17 +800,40 @@ def draw_raid(raid, screen):
         t = get_font(12, bold=True).render("人质" if not h.rescued else "已解救", True, col)
         screen.blit(t, t.get_rect(center=(x, y - h.r - 12)))
 
-    # 探索模式:研究员(没救的蹲在原地,救出的跟着你)
+    # 探索模式:联络员(研究员)—— 没救的蹲着、救出的跟着、倒地的躺着、
+    # 感染二阶段开始发绿、三阶段发红(会打自己人,也能被打死)
     for r in getattr(raid, "researchers", ()):
+        if r.dead:
+            continue
         if not r.rescued and not raid.map.los_clear(p.x, p.y, r.x, r.y):
             continue
         x, y = r.x + ox, r.y + oy
-        col = (246, 240, 202) if not r.rescued else (156, 208, 250)
+        if r.downed:
+            col = (122, 108, 90)
+        elif r.hostile:
+            col = (235, 90, 80)
+        elif r.infect_stage >= 2:
+            col = (152, 196, 122)
+        elif not r.rescued:
+            col = (246, 240, 202)
+        else:
+            col = (156, 208, 250)
         pygame.draw.circle(screen, col, (int(x), int(y)), r.r)
         pygame.draw.circle(screen, (40, 40, 60), (int(x), int(y)), r.r, 2)
-        t = get_font(12, bold=True).render(
-            "研究员" if not r.rescued else "跟着你", True, col)
-        screen.blit(t, t.get_rect(center=(x, y - r.r - 12)))
+        if r.downed:
+            label = "倒地"
+        elif not r.rescued:
+            label = "研究员"
+        else:
+            label = r.stage_label() or "跟着你"
+        t = get_font(12, bold=True).render(label, True, col)
+        screen.blit(t, t.get_rect(center=(x, y - r.r - 14)))
+        if not r.downed and r.hp < r.max_hp:
+            bw2 = 26
+            pygame.draw.rect(screen, (40, 40, 46), (x - bw2 / 2, y - r.r - 4, bw2, 4))
+            pygame.draw.rect(screen, (200, 120, 110),
+                             (x - bw2 / 2, y - r.r - 4,
+                              bw2 * max(0.0, r.hp) / r.max_hp, 4))
 
     # 粒子:整批交给 Surface.blits() 一次贴完。
     # 原来每颗一次 screen.blit(...) —— 一场交火里每帧 180+ 颗,就是 180+ 次
@@ -1363,6 +1386,10 @@ def _draw_hud(raid, screen):
            f"{raid.diff['name']}    击杀 {raid.kills}")
     if getattr(raid, "mode", None) == "explore":
         txt += f"    钥匙卡 {raid.rescued_count()}/{HELI_KEYCARDS_REQUIRED}"
+        _down = sum(1 for r in getattr(raid, "researchers", ())
+                    if getattr(r, "downed", False))
+        if _down:
+            txt += f"    倒地 {_down}"
     t = get_font(20, bold=True).render(txt, True,
                                        COL["bad"] if tl < 60 else COL["text"])
     screen.blit(t, t.get_rect(center=(W // 2, 18)))
@@ -1604,7 +1631,9 @@ def _draw_hud(raid, screen):
             if kind == "rescue":
                 prompt = f"{ik}  解救人质"
             elif kind == "revive":
-                prompt = f"{ik}  拉起队友"
+                # 队友和联络员(研究员)共用「拉起」,提示词分开
+                who = "研究员" if getattr(_ent, "uid", None) else "队友"
+                prompt = f"{ik}  拉起{who}"
             elif kind == "destroy":
                 prompt = f"{ik}  安放炸药(摧毁设施)"
             elif kind == "supply":
