@@ -1116,16 +1116,39 @@ class Hideout:
             return True
         return False
 
+    WD_MIN_W, WD_MIN_H = 420, 380      # 窗口拖到最小能多小
+    WD_MAX_W, WD_MAX_H = 980, 600
+
     def _wd_rect(self):
-        """改装窗口的位置(可拖动)。"""
+        """改装窗口的位置与大小:可拖标题栏移动、拖右下角缩放、可最小化。
+
+        默认贴在左边「仓库」面板上(466×430)—— 中间的「出战配置」不被挡住。
+        """
+        if not hasattr(self, "wd_size") or self.wd_size is None:
+            self.wd_size = [466, 430]
         if not hasattr(self, "wd_pos") or self.wd_pos is None:
-            self.wd_pos = [(W - 660) // 2, (H - 430) // 2]
-        return pygame.Rect(self.wd_pos[0], self.wd_pos[1], 660, 430)
+            self.wd_pos = [32, 96]
+        w, h = self.wd_size
+        h = 34 if getattr(self, "wd_min", False) else h
+        r = pygame.Rect(int(self.wd_pos[0]), int(self.wd_pos[1]), int(w), int(h))
+        r.x = max(0, min(W - r.w, r.x))
+        r.y = max(0, min(H - r.h, r.y))
+        return r
 
     def _wd_close(self):
         """标题栏右上角的关闭按钮。"""
         r = self._wd_rect()
         return pygame.Rect(r.right - 38, r.y + 7, 24, 22)
+
+    def _wd_min_btn(self):
+        """标题栏上的最小化按钮。"""
+        r = self._wd_rect()
+        return pygame.Rect(r.right - 68, r.y + 7, 24, 22)
+
+    def _wd_grip(self):
+        """右下角的缩放手柄(最小化时不显示)。"""
+        r = self._wd_rect()
+        return pygame.Rect(r.right - 20, r.bottom - 20, 20, 20)
 
     def _wd_slot_rects(self):
         """当前武器各槽位的框(相对窗口)。"""
@@ -1172,6 +1195,8 @@ class Hideout:
         for pl in sd.stash.items:
             if pl.item.cat != "attach":
                 continue
+            if y + 40 > r.bottom - 6:      # 窗口调小了:放不下的先不画
+                break
             box = pygame.Rect(x, y, 56, 40)
             out.append((pl.item.iid, pl, box))
             x += 62
@@ -1201,9 +1226,21 @@ class Hideout:
                 self.drag_item = None
                 self.wd_drag = None
                 return True
+            if self._wd_min_btn().collidepoint(mx, my):
+                self.wd_min = not getattr(self, "wd_min", False)
+                self.drag_item = None
+                self.wd_drag = None
+                audio.play("click")
+                return True
             if title.collidepoint(mx, my):
                 self.wd_drag = (mx - r.x, my - r.y)
                 return True
+            if (not getattr(self, "wd_min", False)
+                    and self._wd_grip().collidepoint(mx, my)):
+                self.wd_resize = (r.x, r.y)
+                return True
+            if getattr(self, "wd_min", False):
+                return True                      # 最小化时只认标题栏上的按钮
             for key, box in self._wd_slot_rects():
                 if box.collidepoint(mx, my):
                     self._wd_install(key)
@@ -1224,7 +1261,16 @@ class Hideout:
             dx, dy = self.wd_drag
             self.wd_pos = [mx - dx, my - dy]
             return True
+        if ev.type == pygame.MOUSEMOTION and getattr(self, "wd_resize", None):
+            x0, y0 = self.wd_resize
+            nw = max(self.WD_MIN_W, min(self.WD_MAX_W, mx - x0))
+            nh = max(self.WD_MIN_H, min(self.WD_MAX_H, my - y0))
+            self.wd_size = [nw, nh]
+            return True
         if ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
+            if getattr(self, "wd_resize", None):
+                self.wd_resize = None
+                return True
             if getattr(self, "wd_drag", None):
                 self.wd_drag = None
                 return True
@@ -1292,8 +1338,21 @@ class Hideout:
         pygame.draw.rect(screen, COL["border"], xb, 1, border_radius=5)
         xt = get_font(15, bold=True).render("X", True, COL["text"])
         screen.blit(xt, xt.get_rect(center=xb.center))
-        tip = get_font(12).render("拖标题栏移动 · 点 X / 右键关闭", True, COL["text_dim"])
-        screen.blit(tip, (xb.x - tip.get_width() - 12, r.y + 12))
+        mb = self._wd_min_btn()
+        pygame.draw.rect(screen, COL["panel_hi"] if mb.collidepoint(mx, my)
+                         else COL["panel"], mb, border_radius=5)
+        pygame.draw.rect(screen, COL["border"], mb, 1, border_radius=5)
+        pygame.draw.line(screen, COL["text"], (mb.x + 6, mb.centery + 4),
+                         (mb.right - 6, mb.centery + 4), 2)
+        # 提示文字:标题右边放得下才画(窗口窄的时候不硬塞,免得糊成一团)
+        hint = ("已最小化 · 点 — 展开" if getattr(self, "wd_min", False)
+                else "拖标题栏移动 · 右下角缩放 · 右键关闭")
+        th = get_font(12).render(hint, True, COL["text_dim"])
+        hx = r.x + 16 + t.get_width() + 14
+        if hx + th.get_width() < mb.x - 10:
+            screen.blit(th, (hx, r.y + 13))
+        if getattr(self, "wd_min", False):
+            return                        # 最小化:只留标题栏
         have = weapon_attach(w)
         for key, box in self._wd_slot_rects():
             got = have.get(key)
@@ -1340,6 +1399,13 @@ class Hideout:
             pygame.draw.rect(screen, COL["panel"], bg, border_radius=5)
             pygame.draw.rect(screen, COL["accent"], bg, 1, border_radius=5)
             screen.blit(nm, (bg.x + 7, bg.y + 3))
+        # 右下角缩放把手:三道斜线
+        g = self._wd_grip()
+        gcol = COL["accent"] if g.collidepoint(mx, my) else COL["text_dim"]
+        for i in (0, 5, 10):
+            pygame.draw.line(screen, gcol,
+                             (g.right - 4 - i, g.bottom - 3),
+                             (g.right - 3, g.bottom - 4 - i), 2)
 
 
     def _right_click(self, pos):

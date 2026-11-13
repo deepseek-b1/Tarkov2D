@@ -6887,6 +6887,46 @@ def run():
                                              pos=start.center)])
         assert g.raid is not None and g.phase == "raid"
 
+        # 6) 默认窗口不挡住「出战配置」面板
+        screen = pygame.display.set_mode((1280, 720))
+        g3 = Game()
+        g3.save = save_mod.reset_data()
+        g3.save.seen_intro = True
+        g3.hideout.show_intro = False
+        h3 = g3.hideout
+        h3.weapon_detail = Item.weapon("ak74", mag=30)
+        wr = h3._wd_rect()
+        lp = h3.lay["loadout_panel"]
+        assert not wr.colliderect(lp), (wr, lp)
+        h3.draw(screen)
+
+        # 7) 最小化:只剩标题栏;再点一次展开
+        mb = h3._wd_min_btn()
+        h3.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                                              pos=mb.center)])
+        assert h3.wd_min and h3._wd_rect().h == 34, h3._wd_rect()
+        assert h3.weapon_detail is not None, "最小化不该把窗口关掉"
+        h3.draw(screen)
+        mb = h3._wd_min_btn()
+        h3.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                                              pos=mb.center)])
+        assert not h3.wd_min and h3._wd_rect().h > 100
+
+        # 8) 右下角拖拽缩放
+        wr = h3._wd_rect()
+        grip = h3._wd_grip()
+        h3.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                                              pos=grip.center)])
+        h3.update(1 / 60, [pygame.event.Event(pygame.MOUSEMOTION,
+                                              pos=(wr.right + 120, wr.bottom + 80),
+                                              rel=(0, 0), buttons=(1, 0, 0))])
+        h3.update(1 / 60, [pygame.event.Event(pygame.MOUSEBUTTONUP, button=1,
+                                              pos=(wr.right + 120, wr.bottom + 80))])
+        wr2 = h3._wd_rect()
+        assert wr2.w > wr.w and wr2.h >= wr.h, (wr, wr2)
+        assert wr2.w <= h3.WD_MAX_W and wr2.h <= h3.WD_MAX_H
+        h3.draw(screen)
+
     check("装备位命名 + 改装窗口(不穿透/不盖黑布)", t_wd_window)
 
     ok = all(r[1] for r in results)
